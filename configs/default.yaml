@@ -1,0 +1,33 @@
+seed: 42
+output_dir: outputs
+skill_store: skills/store
+backend: mock
+model: mock-v1
+base_url: https://api.deepseek.com/v1
+meta_evolution: false
+max_skills_per_item: 3
+gate:
+  repeats: 3
+  min_macro_f1_gain: 0.01
+  min_coverage: 0.8
+  max_protected_domain_drop: 0.02
+  alpha: 0.05
+  max_cost_ratio: 1.5
+meta_learning:
+  enabled: false
+  strategy: repeated_holdout
+  episodes: 5
+  meta_test_domain_count: 1
+  min_source_domains: 3
+  min_valid_episodes: 3
+  min_mean_gain: 0.0
+  max_negative_transfer_rate: 0.25
+  max_worst_domain_drop: 0.02
+  min_coverage: 0.8
+  max_cost_ratio: 1.5
+  max_calibration_increase: 0.05
+  confidence_level: 0.95
+  allow_specialization: true
+  aggregate_across_episodes: true
+  enforce_worst_domain: true
+  checkpoint_path: outputs/demse/checkpoint.json
