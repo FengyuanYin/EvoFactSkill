@@ -1,0 +1,213 @@
+{
+  "repository": {
+    "name": "EvoFactSkill",
+    "root": "F:/intern/Agent/auto-skill/EvoFactSkill",
+    "branch": "master",
+    "commit": null,
+    "snapshot": "NO-COMMIT · master · uncommitted working tree snapshot",
+    "dirty": true,
+    "note": "仓库尚无首个 Git 提交；全部文件在分析时均为未跟踪文件。"
+  },
+  "claims": [
+    {
+      "id": "claim-001",
+      "text": "EvoFactSkill在冻结底层模型的条件下，于离散SkillBank空间执行DEMSE。",
+      "basis": "documented",
+      "sources": [
+        {
+          "path": "README.md",
+          "start": 3,
+          "end": 3
+        }
+      ]
+    },
+    {
+      "id": "claim-002",
+      "text": "项目使用Python 3.11+、setuptools和src布局，并注册evofact命令。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "pyproject.toml",
+          "start": 1,
+          "end": 19
+        }
+      ]
+    },
+    {
+      "id": "claim-003",
+      "text": "CLI的meta-evolve分支解析隔离域、消融、恢复和只评估参数。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/cli.py",
+          "start": 22,
+          "end": 32
+        },
+        {
+          "path": "src/evofact/cli.py",
+          "start": 65,
+          "end": 78
+        }
+      ]
+    },
+    {
+      "id": "claim-004",
+      "text": "域情景以完整领域构造，验证源域数量、最终域互斥和元测试覆盖。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/data/episodes.py",
+          "start": 14,
+          "end": 52
+        }
+      ]
+    },
+    {
+      "id": "claim-005",
+      "text": "CandidateFirewall只允许元训练轨迹进入生成视图，并扫描候选是否包含留出样本。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/evolution/firewall.py",
+          "start": 9,
+          "end": 39
+        }
+      ]
+    },
+    {
+      "id": "claim-006",
+      "text": "普通推理路径由路由器选择专家，后端逐技能分析，Judge汇总并生成不可变轨迹。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/routing/router.py",
+          "start": 4,
+          "end": 22
+        },
+        {
+          "path": "src/evofact/runtime/inference.py",
+          "start": 6,
+          "end": 18
+        }
+      ]
+    },
+    {
+      "id": "claim-007",
+      "text": "内层进化包含推理、错误归因、反事实贡献、聚类、蒸馏和候选生成。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/experiments/runner.py",
+          "start": 41,
+          "end": 52
+        }
+      ]
+    },
+    {
+      "id": "claim-008",
+      "text": "MetaEvolutionRunner按情景执行内层生成、配对评估、聚合、门控和提交。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/experiments/meta_runner.py",
+          "start": 50,
+          "end": 107
+        }
+      ]
+    },
+    {
+      "id": "claim-009",
+      "text": "跨情景聚合计算宏F1增益、置信区间、负迁移、最差域、覆盖、校准和成本。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/validation/transfer.py",
+          "start": 23,
+          "end": 67
+        }
+      ]
+    },
+    {
+      "id": "claim-010",
+      "text": "元门控可产生generalized、specialized、pareto、review_required、retired或rejected决策。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/validation/meta_gate.py",
+          "start": 7,
+          "end": 49
+        }
+      ]
+    },
+    {
+      "id": "claim-011",
+      "text": "SkillRepository使用内容哈希快照、原子替换和事件日志管理活动技能。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/skills/repository.py",
+          "start": 20,
+          "end": 73
+        }
+      ]
+    },
+    {
+      "id": "claim-012",
+      "text": "检查点恢复要求配置、数据与技能库指纹一致，并以临时文件原子保存。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "src/evofact/experiments/checkpoint.py",
+          "start": 17,
+          "end": 41
+        }
+      ]
+    },
+    {
+      "id": "claim-013",
+      "text": "测试源码包含31个test_方法，其中11个覆盖DEMSE。",
+      "basis": "static",
+      "sources": [
+        {
+          "path": "tests/test_suite.py",
+          "start": 33,
+          "end": 118
+        },
+        {
+          "path": "tests/test_demse.py",
+          "start": 28,
+          "end": 119
+        }
+      ]
+    },
+    {
+      "id": "claim-014",
+      "text": "Mock五域情景仅用于机制验证，不代表真实模型实验。",
+      "basis": "documented",
+      "sources": [
+        {
+          "path": "README.md",
+          "start": 5,
+          "end": 15
+        }
+      ]
+    },
+    {
+      "id": "claim-015",
+      "text": "当前系统核心输入是文本样本与结构化证据，代码中没有视觉编码或跨模态推理链。",
+      "basis": "inferred",
+      "sources": [
+        {
+          "path": "src/evofact/core/models.py",
+          "start": 16,
+          "end": 38
+        },
+        {
+          "path": "src/evofact/runtime/inference.py",
+          "start": 6,
+          "end": 18
+        }
+      ]
+    }
+  ]
+}
