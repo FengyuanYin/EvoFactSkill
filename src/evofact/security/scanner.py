@@ -2,28 +2,61 @@ import ast
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-BLOCKED_IMPORTS={"subprocess","socket","requests","urllib","shutil","ctypes","winreg"}
-BLOCKED_CALLS={"eval","exec","compile","open","__import__","system","popen","remove","unlink","rmtree"}
+BLOCKED_IMPORTS = {"subprocess", "socket", "requests", "urllib", "shutil", "ctypes", "winreg"}
+BLOCKED_CALLS = {
+    "eval",
+    "exec",
+    "compile",
+    "open",
+    "__import__",
+    "system",
+    "popen",
+    "remove",
+    "unlink",
+    "rmtree",
+}
+
 
 @dataclass(frozen=True)
 class SafetyReport:
-    level:str
-    findings:tuple[str,...]
+    level: str
+    findings: tuple[str, ...]
 
-def scan_resources(resources:dict[str,str])->SafetyReport:
-    findings=[]; has_scripts=False
-    for rel,source in resources.items():
-        path=PurePosixPath(rel.replace("\\","/"))
-        if path.is_absolute() or ".." in path.parts: findings.append(f"unsafe path: {rel}"); continue
-        if not rel.startswith("scripts/"): continue
-        has_scripts=True
-        try: tree=ast.parse(source,filename=rel)
-        except SyntaxError as exc: findings.append(f"syntax error in {rel}: {exc}"); continue
+
+def scan_resources(resources: dict[str, str]) -> SafetyReport:
+    findings = []
+    has_scripts = False
+    for rel, source in resources.items():
+        path = PurePosixPath(rel.replace("\\", "/"))
+        if path.is_absolute() or ".." in path.parts:
+            findings.append(f"unsafe path: {rel}")
+            continue
+        if not rel.startswith("scripts/"):
+            continue
+        has_scripts = True
+        try:
+            tree = ast.parse(source, filename=rel)
+        except SyntaxError as exc:
+            findings.append(f"syntax error in {rel}: {exc}")
+            continue
         for node in ast.walk(tree):
-            if isinstance(node,(ast.Import,ast.ImportFrom)):
-                names=[x.name.split('.')[0] for x in node.names] if isinstance(node,ast.Import) else [(node.module or '').split('.')[0]]
-                findings += [f"blocked import {name} in {rel}" for name in names if name in BLOCKED_IMPORTS]
-            if isinstance(node,ast.Call):
-                name=node.func.id if isinstance(node.func,ast.Name) else (node.func.attr if isinstance(node.func,ast.Attribute) else "")
-                if name in BLOCKED_CALLS: findings.append(f"blocked call {name} in {rel}")
-    return SafetyReport("blocked" if findings else ("review_required" if has_scripts else "safe"),tuple(findings))
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = (
+                    [x.name.split(".")[0] for x in node.names]
+                    if isinstance(node, ast.Import)
+                    else [(node.module or "").split(".")[0]]
+                )
+                findings += [
+                    f"blocked import {name} in {rel}" for name in names if name in BLOCKED_IMPORTS
+                ]
+            if isinstance(node, ast.Call):
+                name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+                )
+                if name in BLOCKED_CALLS:
+                    findings.append(f"blocked call {name} in {rel}")
+    return SafetyReport(
+        "blocked" if findings else ("review_required" if has_scripts else "safe"), tuple(findings)
+    )

@@ -1,2 +1,3 @@
 from .router import SkillRouter
-__all__=["SkillRouter"]
+
+__all__ = ["SkillRouter"]

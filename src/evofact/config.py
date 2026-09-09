@@ -4,11 +4,12 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
 from evofact.generation.models import GenerationConfig
 
 
 @dataclass(frozen=True)
-class GateConfig:
+class GateConfig:  # 验证门配置
     repeats: int = 3
     min_macro_f1_gain: float = 0.01
     min_coverage: float = 0.8
@@ -22,7 +23,7 @@ class GateConfig:
 
 
 @dataclass(frozen=True)
-class MetaLearningConfig:
+class MetaLearningConfig:  # 元学习配置
     enabled: bool = False
     strategy: str = "repeated_holdout"
     episodes: int = 5
@@ -57,7 +58,7 @@ class MetaLearningConfig:
 
 
 @dataclass(frozen=True)
-class AppConfig:
+class AppConfig:  # runner 配置
     seed: int = 42
     output_dir: Path = Path("outputs")
     skill_store: Path = Path("skills/store")

@@ -1,8 +1,10 @@
 """One LLM call returns strategy decisions and complete dataset-style samples."""
-from dataclasses import asdict
+
 import json
+from dataclasses import asdict
 
 from evofact.experiments.runner import _gold
+
 from .prompts import GENERATOR_SYSTEM
 
 
@@ -23,9 +25,13 @@ class ChallengeGenerator:
             source_row = asdict(source)
             source_row["metadata"] = {}
             source_row["label"] = gold
-            row = {"source_sample": source_row, "trace": asdict(trace),
-                   "gold_label": gold, "outcome": "success" if trace.decision.label == gold else "failure",
-                   "attribution": asdict(reports[trace.trace_id])}
+            row = {
+                "source_sample": source_row,
+                "trace": asdict(trace),
+                "gold_label": gold,
+                "outcome": "success" if trace.decision.label == gold else "failure",
+                "attribution": asdict(reports[trace.trace_id]),
+            }
             row["trace"]["sample_public"] = source.public_view()
             row["trace"]["sample_public"]["metadata"] = {}
             (success if row["outcome"] == "success" else failure).append(row)
@@ -35,9 +41,14 @@ class ChallengeGenerator:
             for group in (failure, success):
                 if i < len(group):
                     chosen.append(group[i])
-        return json_value({"batch_size": config.batch_size, "id_prefix": f"gen-{episode_id}-",
-                           "trace_counts": {"success": len(success), "failure": len(failure)},
-                           "examples": chosen[:config.max_trace_examples]})
+        return json_value(
+            {
+                "batch_size": config.batch_size,
+                "id_prefix": f"gen-{episode_id}-",
+                "trace_counts": {"success": len(success), "failure": len(failure)},
+                "examples": chosen[: config.max_trace_examples],
+            }
+        )
 
     async def generate(self, backend, request):
         # No proposal stage, deterministic fallback, text renderer or repair call.

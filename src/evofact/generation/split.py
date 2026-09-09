@@ -1,4 +1,5 @@
 """Group-preserving construction/probe split inside meta-train only."""
+
 import hashlib
 from collections import defaultdict
 
@@ -41,11 +42,21 @@ def split_construction_probe(samples, facts, *, fraction: float, seed: str):
     construction, probe = [], []
     for domain, grouped in sorted(domains.items()):
         if len(grouped) < 2:
-            raise ValueError(f"domain {domain} requires at least two independent event/evidence groups")
-        grouped.sort(key=lambda g: hashlib.sha256(f"{seed}:{min(s.sample_id for s in g)}".encode()).hexdigest())
+            raise ValueError(
+                f"domain {domain} requires at least two independent event/evidence groups"
+            )
+        grouped.sort(
+            key=lambda g: hashlib.sha256(
+                f"{seed}:{min(s.sample_id for s in g)}".encode()
+            ).hexdigest()
+        )
         count = min(len(grouped) - 1, max(1, round(len(grouped) * fraction)))
         probe.extend(s for group in grouped[:count] for s in group)
         construction.extend(s for group in grouped[count:] for s in group)
     allowed = {s.sample_id for s in construction}
     selected = [f for f in facts if f.sample_id in allowed and f.verified is True]
-    return sorted(construction, key=lambda s: s.sample_id), sorted(probe, key=lambda s: s.sample_id), selected
+    return (
+        sorted(construction, key=lambda s: s.sample_id),
+        sorted(probe, key=lambda s: s.sample_id),
+        selected,
+    )

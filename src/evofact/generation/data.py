@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 from evofact.core.models import Evidence, Sample
+
 from .models import EvidenceFact, numeric
 
 
@@ -28,7 +29,11 @@ def load_samples(path):
 
 
 def load_facts(path):
-    rows = [EvidenceFact(**json.loads(line)) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        EvidenceFact(**json.loads(line))
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     if not rows or len({f.fact_id for f in rows}) != len(rows):
         raise ValueError("facts must have unique IDs and cannot be empty")
     return rows
@@ -40,9 +45,15 @@ def validate_fact_links(samples, facts):
         raise ValueError("duplicate fact IDs")
     for fact in facts:
         sample = by_id.get(fact.sample_id)
-        if sample is None or (sample.domain or sample.dataset) != fact.domain or sample.event_id != fact.event_id:
+        if (
+            sample is None
+            or (sample.domain or sample.dataset) != fact.domain
+            or sample.event_id != fact.event_id
+        ):
             raise ValueError("fact sample/domain/event provenance mismatch")
-        if not any(e.text == fact.evidence_text and e.source == fact.source for e in sample.evidence):
+        if not any(
+            e.text == fact.evidence_text and e.source == fact.source for e in sample.evidence
+        ):
             raise ValueError("structured fact is not linked to the sample evidence snapshot")
 
 
@@ -51,13 +62,40 @@ def fixture_adversarial_data():
     for domain in ("health", "finance", "science", "society", "environment", "outer_holdout"):
         for index in range(4):
             event = f"{domain}-event-{index}"
-            fact = EvidenceFact(f"fact-{event}", f"sample-{event}", domain, event,
-                                f"fixture://{event}", f"模拟项目{domain}{index}",
-                                "登记数量", str(20 + index), "项", True)
+            fact = EvidenceFact(
+                f"fact-{event}",
+                f"sample-{event}",
+                domain,
+                event,
+                f"fixture://{event}",
+                f"模拟项目{domain}{index}",
+                "登记数量",
+                str(20 + index),
+                "项",
+                True,
+            )
             facts.append(fact)
             evidence = (Evidence(fact.evidence_text, fact.source),)
-            samples.append(Sample(fact.sample_id, "fixture", fact.evidence_text, "REAL", domain, event, evidence=evidence))
-            samples.append(Sample(f"other-{event}", "fixture",
-                                  f"{fact.entity}的{fact.attribute}为{numeric(99 + index)}项。",
-                                  "FAKE", domain, event, evidence=evidence))
+            samples.append(
+                Sample(
+                    fact.sample_id,
+                    "fixture",
+                    fact.evidence_text,
+                    "REAL",
+                    domain,
+                    event,
+                    evidence=evidence,
+                )
+            )
+            samples.append(
+                Sample(
+                    f"other-{event}",
+                    "fixture",
+                    f"{fact.entity}的{fact.attribute}为{numeric(99 + index)}项。",
+                    "FAKE",
+                    domain,
+                    event,
+                    evidence=evidence,
+                )
+            )
     return samples, facts

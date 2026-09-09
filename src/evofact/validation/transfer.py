@@ -8,25 +8,35 @@ from evofact.core.models import EpisodeEvaluation, TransferUtility
 
 
 def _delta(result: EpisodeEvaluation, name: str) -> float:
-    return float(result.candidate_result.aggregate_metrics.get(name, 0.0)) - float(result.baseline_result.aggregate_metrics.get(name, 0.0))
+    return float(result.candidate_result.aggregate_metrics.get(name, 0.0)) - float(
+        result.baseline_result.aggregate_metrics.get(name, 0.0)
+    )
 
 
-def _bootstrap_ci(values: list[float], seed: int, confidence_level: float, iterations: int = 2000) -> tuple[float, float]:
+def _bootstrap_ci(
+    values: list[float], seed: int, confidence_level: float, iterations: int = 2000
+) -> tuple[float, float]:
     if len(values) == 1:
         return (values[0], values[0])
     rng = random.Random(seed)
-    draws = sorted(mean(values[rng.randrange(len(values))] for _ in values) for _ in range(iterations))
+    draws = sorted(
+        mean(values[rng.randrange(len(values))] for _ in values) for _ in range(iterations)
+    )
     tail = (1 - confidence_level) / 2
     return draws[int(tail * iterations)], draws[min(iterations - 1, int((1 - tail) * iterations))]
 
 
 class CrossEpisodeAggregator:
-    def __init__(self, seed: int = 42, confidence_level: float = .95, aggregate_across_episodes: bool = True):
+    def __init__(
+        self, seed: int = 42, confidence_level: float = 0.95, aggregate_across_episodes: bool = True
+    ):
         self.seed = seed
         self.confidence_level = confidence_level
         self.aggregate_across_episodes = aggregate_across_episodes
 
-    def aggregate(self, results: list[EpisodeEvaluation] | tuple[EpisodeEvaluation, ...]) -> dict[str, TransferUtility]:
+    def aggregate(
+        self, results: list[EpisodeEvaluation] | tuple[EpisodeEvaluation, ...]
+    ) -> dict[str, TransferUtility]:
         groups: dict[str, list[EpisodeEvaluation]] = defaultdict(list)
         seen = set()
         for result in results:
@@ -44,10 +54,14 @@ class CrossEpisodeAggregator:
             for row in rows:
                 for domain, metrics in row.domain_deltas.items():
                     domain_values[domain].append(float(metrics.get("macro_f1_all", 0.0)))
-            domain_gains = {domain: mean(values) for domain, values in sorted(domain_values.items())}
+            domain_gains = {
+                domain: mean(values) for domain, values in sorted(domain_values.items())
+            }
             coverage_delta = mean(_delta(row, "coverage") for row in rows)
             calibration_delta = mean(_delta(row, "ece") for row in rows)
-            candidate_coverage = mean(float(row.candidate_result.aggregate_metrics.get("coverage", 0.0)) for row in rows)
+            candidate_coverage = mean(
+                float(row.candidate_result.aggregate_metrics.get("coverage", 0.0)) for row in rows
+            )
             ratios = []
             for row in rows:
                 old = float(row.baseline_result.aggregate_metrics.get("mean_cost", 0.0))

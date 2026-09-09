@@ -1,7 +1,7 @@
+import math
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-import math
 
 
 @dataclass(frozen=True)
@@ -17,9 +17,11 @@ class GenerationConfig:
     def __post_init__(self):
         if self.proposer != "llm":
             raise ValueError("generation.proposer only supports llm")
-        for value, lower, upper in ((self.batch_size, 2, 100),
-                                    (self.max_trace_examples, 2, 200),
-                                    (self.max_text_chars, 100, 30000)):
+        for value, lower, upper in (
+            (self.batch_size, 2, 100),
+            (self.max_trace_examples, 2, 200),
+            (self.max_text_chars, 100, 30000),
+        ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError("invalid generation budget")
         if not math.isfinite(self.probe_fraction) or not 0 < self.probe_fraction < 1:
@@ -50,10 +52,19 @@ class EvidenceFact:
     verified: bool = False
 
     def __post_init__(self):
-        if not all(isinstance(v, str) and v.strip() for v in (
-            self.fact_id, self.sample_id, self.domain, self.event_id,
-            self.source, self.entity, self.attribute, self.unit,
-        )):
+        if not all(
+            isinstance(v, str) and v.strip()
+            for v in (
+                self.fact_id,
+                self.sample_id,
+                self.domain,
+                self.event_id,
+                self.source,
+                self.entity,
+                self.attribute,
+                self.unit,
+            )
+        ):
             raise ValueError("fact provenance and slots must be non-empty strings")
         if any("\n" in v for v in (self.entity, self.attribute, self.unit)):
             raise ValueError("fact slots must be single-line")

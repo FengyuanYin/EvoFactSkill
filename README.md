@@ -1,5 +1,62 @@
 # EvoFactSkill
 
+[![CI](https://github.com/FengyuanYin/EvoFactSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FengyuanYin/EvoFactSkill/actions/workflows/ci.yml)
+[![Security](https://github.com/FengyuanYin/EvoFactSkill/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/FengyuanYin/EvoFactSkill/actions/workflows/security.yml)
+[![PyPI](https://img.shields.io/pypi/v/evofactskill.svg)](https://pypi.org/project/evofactskill/)
+
+## GitHub CI/CD and trusted releases
+
+The repository uses three least-privilege GitHub Actions workflows. All referenced Actions are pinned to immutable commit SHAs and Dependabot checks both Actions and CI Python tools every week.
+
+| Workflow | Trigger | Required behavior |
+|---|---|---|
+| `CI` | Pull requests, pushes to `main`, manual runs, reusable calls | Ruff lint/format, Python 3.11–3.14 tests, package metadata and clean-wheel CLI smoke test |
+| `Security` | Pull requests, pushes to `main`, Mondays, manual runs | CodeQL Python analysis and `pip-audit` project dependency scan |
+| `Release` | A pushed `vX.Y.Z` tag | Reuses CI, checks tag = package version, attests artifacts, creates a GitHub Release, then publishes to PyPI with OIDC |
+
+CI and Security never receive a model API key and do not run real LLM experiments or restricted datasets. A successful CI run retains its verified `python-package` artifact for seven days. Failed test matrices retain only their JUnit diagnostic files.
+
+### One-time repository configuration
+
+1. In **Settings → Environments**, create an environment named exactly `pypi`. Add required reviewers if releases need manual approval, and restrict deployment branches/tags to protected tags matching `v*`.
+2. In PyPI, create or select the `evofactskill` project. Under **Publishing**, add a GitHub Trusted Publisher with owner `FengyuanYin`, repository `EvoFactSkill`, workflow `release.yml`, and environment `pypi`. If the project does not exist yet, use PyPI's pending publisher flow.
+3. In **Settings → Rules → Rulesets** (or branch protection), protect `main`, require pull requests, and require these checks: `Lint and compile`, all four `Test (Python 3.x)` jobs, `Build and verify package`, `CodeQL`, and `Dependency audit`.
+4. Enable GitHub Actions and Code Scanning. If GitHub's default CodeQL setup is already active, disable it before enabling this repository's advanced `security.yml` workflow to avoid duplicate configurations.
+
+No `PYPI_API_TOKEN`, PyPI password, cloud key, or model credential belongs in GitHub Secrets. The publish job receives only a short-lived OIDC identity after the `pypi` environment permits it.
+
+### Publishing a version
+
+Releases are deliberate: merging to `main` never publishes a package, and the workflow never changes the project version or creates its own tag.
+
+1. Update the version in both `pyproject.toml` and the offline-compatible `setup.py` to the same SemVer value.
+2. Run the local checks below, commit the version change, push it, and wait for CI and Security to pass on `main`.
+3. Create and push the matching tag, including the `v` prefix:
+
+```powershell
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
+The release rejects malformed or mismatched tags before requesting write or OIDC permissions. It builds the wheel and source distribution once in the reused CI workflow; the exact same files are checksummed, attested, attached to GitHub Release, and uploaded to PyPI. Existing GitHub releases and PyPI versions are never overwritten or silently skipped.
+
+### Local release checks
+
+Run these commands in a disposable virtual environment before tagging:
+
+```powershell
+python -m pip install -r .github/requirements/ci.txt
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest
+python -m build
+python -m twine check dist/*
+```
+
+For failures, open the commit under the repository's **Actions** tab. Test XML and dependency-audit JSON are attached to the failed run when available; CodeQL findings appear under **Security → Code scanning**. Package artifacts are attached to the `Build and verify package` job. After fixing code or an external GitHub/PyPI setting, push a new commit or use **Re-run failed jobs** for the unchanged release tag. Do not delete or recreate an already published PyPI version.
+
+The one-time GitHub Environment and PyPI Trusted Publisher settings cannot be created safely from repository code. Until both are configured and visible in their respective settings pages, CI is operational but the final PyPI deployment is not ready.
+
 新增独立链路：**meta-train 成功/失败 trace → LLM 自选策略并一次生成 samples → 独立审核 → DEMSE 检测技能门控**。成功类型升难度，失败类型增样强化；底层模型参数冻结。
 
 ```powershell
