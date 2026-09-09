@@ -66,7 +66,7 @@ python -m evofact.cli --config configs/adversarial_llm.yaml adversarial-evolve -
 python -m evofact.cli --config configs/adversarial_llm.yaml adversarial-evolve --evaluation-only --resume
 ```
 
-该命令仅支持 `proposer: llm`，运行前配置 `DEEPSEEK_API_KEY`；即使不传输入而使用模拟夹具，也会调用真实 LLM。每个 episode 一次生成调用，同时输出 samples 和策略 decisions；独立标签审核另有一次调用。`--samples samples.jsonl` 读取带 evidence 的标准化输入，`--facts` 可选。去掉 evaluation-only 才提交检测库与正式生成审计；样本按 episode 导出 JSONL。旧三模式和数值模板已删除。详见 [设计与输入协议](docs/adversarial-design.md) 和 [Day 10 教程](learn/Day10-挑战生成智能体与双层进化.md)。
+该命令仅支持 `proposer: llm`，运行前配置 `DEEPSEEK_API_KEY`；即使不传输入而使用模拟夹具，也会调用真实 LLM。每个 episode 一次生成调用，同时输出 samples 和策略 decisions；独立标签审核另有一次调用。`--samples samples.jsonl` 读取带 evidence 的标准化输入，`--facts` 可选。去掉 evaluation-only 才提交检测库与正式生成审计；样本按 episode 导出 JSONL。旧三模式和数值模板已删除。详见 [设计与输入协议](docs/adversarial-design.md)。
 
 EvoFactSkill 以 DEMSE（Domain-Episodic Meta-Gated Skill Evolution，域情景元门控技能进化）作为跨域自进化核心：每个 episode 将完整源领域划分为 meta-train 与 meta-test，前者生成可解释 Skill 候选，后者模拟未知域并只提供迁移效用门控。多轮结果按候选语义身份聚合后，系统再决定泛化、特化、Pareto 保留或拒绝。底层语言模型始终冻结，因此这里的“元学习”发生在离散 SkillBank 空间，而不是参数级 MAML。
 
@@ -101,8 +101,6 @@ The repository is independent from CD-FND. It can read separately configured dat
 ## Quick verification — no network or API key
 
 安装到本地环境：`python -m pip install -e . --no-build-isolation`（需要本地 setuptools）。控制台入口已统一到 `evofact.cli:main`；无需安装也可按下方 `PYTHONPATH` 方式运行。
-
-中文源码教程见 [learn/README.md](learn/README.md)：九天内容覆盖入口、数据契约、隔离、推理、归因、统计、生命周期、DEMSE 与验收，每章都有实际代码对应的练习和答案。
 
 PowerShell:
 
