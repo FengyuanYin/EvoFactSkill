@@ -98,8 +98,6 @@ EvoFactSkill is a research framework for **verified, self-evolving skill banks i
 
 安装到本地环境：`python -m pip install -e . --no-build-isolation`（需要本地 setuptools）。控制台入口已统一到 `evofact.cli:main`；无需安装也可按下方 `PYTHONPATH` 方式运行。
 
-中文源码教程见 [learn/README.md](learn/README.md)：九天内容覆盖入口、数据契约、隔离、推理、归因、统计、生命周期、DEMSE 与验收，每章都有实际代码对应的练习和答案。
-
 PowerShell:
 
 ```powershell
