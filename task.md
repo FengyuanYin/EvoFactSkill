@@ -1,5 +1,183 @@
 # EvoFactSkill Tasks
 
+## 2026-09-09：GitHub CI/CD 自动化测试与可信发布（待审批）
+
+### 文件清单
+
+| 操作 | 文件 | 职责 |
+|---|---|---|
+| 新建 | `.github/workflows/ci.yml` | 可复用 lint、多版本测试、构建与 wheel 安装验证 |
+| 新建 | `.github/workflows/security.yml` | CodeQL、依赖漏洞审计和每周扫描 |
+| 新建 | `.github/workflows/release.yml` | 标签/版本门卫、证明、GitHub Release 与 PyPI OIDC 发布 |
+| 新建 | `.github/dependabot.yml` | GitHub Actions 与 pip 依赖自动更新 |
+| 新建 | `.github/requirements/ci.txt` | CI 工具的精确版本约束 |
+| 修改 | `README.md` | 徽章、检查说明、一次性远端配置、发布与排错手册 |
+| 修改 | `spec.md`、`plan.md`、`task.md`、`checklist.md` | CI/CD 规格、设计、执行与验收证据 |
+
+现有 `.gitignore` 中并行加入的 `/code-to-course` 由用户工作区保留，本任务不撤销或改写该变更。
+
+### T-CI1：确认包与发布契约
+
+**文件：** `pyproject.toml`、`setup.py`、`src/evofact/cli.py`（只读核对）
+**依赖：** 无
+
+**步骤：**
+1. 核对权威项目名、版本、最低 Python、构建后端与控制台入口。
+2. 验证 `pyproject.toml` 与兼容 `setup.py` 的名称、版本和入口一致。
+3. 记录发布标签必须为 `v<pyproject version>`，本轮不自动修改版本或创建标签。
+
+**验证：** 用 Python 标准库读取 TOML，输出 `evofactskill`、当前版本、`>=3.11` 与 `evofact.cli:main`；不一致则先停止并修正规格/设计。
+
+### T-CI2：固定 CI 工具依赖
+
+**文件：** `.github/requirements/ci.txt`
+**依赖：** T-CI1
+
+**步骤：**
+1. 为 build、pytest、pytest-asyncio、ruff、twine 与 pip-audit 选择兼容 Python 3.11 的稳定精确版本。
+2. 只记录 CI 工具，不重复项目运行时依赖。
+3. 采用 Dependabot 可识别的 requirements 格式，并写明更新由 CI 验证。
+
+**验证：** 在干净虚拟环境中安装约束文件；运行每个工具的 `--version`，期望全部成功且无无法解析依赖。
+
+### T-CI3：实现 CI 的权限、触发与 lint job
+
+**文件：** `.github/workflows/ci.yml`
+**依赖：** T-CI2
+
+**步骤：**
+1. 配置 PR、`main` push、人工运行和 `workflow_call` 触发器。
+2. 设置同一 workflow/ref 的 concurrency cancellation 与顶层 `contents: read`。
+3. checkout、setup-python 等外部 Actions 固定到官方完整提交 SHA并附版本注释。
+4. lint job 安装 CI 工具，运行 Ruff lint、Ruff format check 与 `compileall`。
+
+**验证：** 使用 actionlint 检查工作流语法和表达式；本地逐条执行 lint 命令，期望全部返回 0。
+
+### T-CI4：实现 Python 测试矩阵
+
+**文件：** `.github/workflows/ci.yml`
+**依赖：** T-CI3
+
+**步骤：**
+1. 增加 Python 3.11、3.12、3.13、3.14 的矩阵，关闭 fail-fast。
+2. 从统一 CI 约束安装测试工具与项目，并设置不写字节码、无真实模型凭据的环境。
+3. 运行完整 pytest，生成 JUnit XML；测试失败时上传诊断报告，成功时不上传无用缓存。
+
+**验证：** actionlint 通过；本机可用 Python 版本执行完整 pytest；静态检查确认工作流没有 API Key/secret 引用。
+
+### T-CI5：实现单次构建、校验与安装冒烟
+
+**文件：** `.github/workflows/ci.yml`
+**依赖：** T-CI4
+
+**步骤：**
+1. package job 依赖 lint 和 test，清理后使用 PEP 517 构建 wheel 与 sdist。
+2. 用 Twine 检查两类制品元数据，并校验 dist 只含一个 wheel 和一个 sdist。
+3. 创建隔离虚拟环境，仅安装 wheel，执行 `evofact --help`。
+4. 上传名为 `python-package`、保留 7 天的 artifact，内容仅限 wheel 与 sdist。
+
+**验证：** 本地构建、Twine 检查、全新环境 wheel 安装及 CLI 帮助全部成功；检查 artifact path 不包含工作区其他文件。
+
+### T-CI6：实现安全分析工作流
+
+**文件：** `.github/workflows/security.yml`
+**依赖：** T-CI2
+
+**步骤：**
+1. 配置 PR、`main` push、每周 cron 与人工触发，并默认 `contents: read`。
+2. CodeQL job 仅增加 `security-events: write`，初始化、分析 Python 并上传结果。
+3. dependency-audit job 使用 CI 约束安装项目与 pip-audit，生成 JSON 报告并以漏洞为失败条件。
+4. 无论审计成功或失败都上传存在的报告，且不得用无条件 `continue-on-error` 掩盖漏洞。
+
+**验证：** actionlint 通过；权限扫描确认只有 CodeQL job 可写 security events，安全工作流没有 Release、contents write 或 OIDC 权限。
+
+### T-CI7：配置依赖自动更新
+
+**文件：** `.github/dependabot.yml`
+**依赖：** T-CI2、T-CI3、T-CI6
+
+**步骤：**
+1. 配置 `github-actions` 每周更新，目录为仓库根。
+2. 配置 `pip` 每周更新，覆盖 CI requirements 所在目录。
+3. 设置有限 open PR 数、清晰 commit 前缀与同生态分组，禁止自动合并。
+
+**验证：** YAML/Dependabot schema 基本校验通过；两个 ecosystem、目录和 schedule 均存在且唯一。
+
+### T-CI8：实现发布触发与版本门卫
+
+**文件：** `.github/workflows/release.yml`
+**依赖：** T-CI5
+
+**步骤：**
+1. 仅响应 `v*.*.*` 标签，并调用本仓库可复用 CI；不接受任意 ref 发布输入。
+2. 在任何外部写入前严格验证 SemVer 标签，将标签版本与 `pyproject.toml` 版本比较。
+3. 下载 CI 的 `python-package` artifact，校验数量、Twine 元数据、文件名版本和包内版本。
+4. 为同一组 wheel/sdist 生成 `SHA256SUMS`，验证摘要可回读。
+
+**验证：** actionlint 通过；本地版本脚本对 `v0.1.0`/当前版本成功，对版本不符、缺 `v`、非法 SemVer 失败。
+
+### T-CI9：实现来源证明与 GitHub Release
+
+**文件：** `.github/workflows/release.yml`
+**依赖：** T-CI8
+
+**步骤：**
+1. attest job 仅授予 `id-token: write`、`attestations: write` 和读取制品所需权限。
+2. 对 wheel/sdist 生成 GitHub artifact provenance，不对整个工作区证明。
+3. github-release job 仅授予 `contents: write`，使用 GitHub CLI 自动生成发行说明并上传 wheel、sdist、摘要。
+4. 创建前检测同名 Release；存在时失败，不更新或覆盖。
+
+**验证：** actionlint 与权限静态检查通过；命令 dry-run/参数检查确认上传文件集准确且重复 Release 路径非零退出。
+
+### T-CI10：实现 PyPI Trusted Publishing
+
+**文件：** `.github/workflows/release.yml`
+**依赖：** T-CI9
+
+**步骤：**
+1. pypi-publish job 依赖 GitHub Release 成功，绑定 `pypi` Environment。
+2. job 仅授予 `id-token: write`，下载同一 `python-package` artifact。
+3. 使用固定完整 SHA 的 PyPA 官方 publish Action 上传，不配置用户名、密码或 API Token，不启用 `skip-existing`。
+
+**验证：** 静态扫描确认无 PyPI secret/token、仅发布 job 有 OIDC；artifact 名称和目录与 CI 完全一致；actionlint 通过。
+
+### T-CI11：完善维护者文档
+
+**文件：** `README.md`
+**依赖：** T-CI3～T-CI10
+
+**步骤：**
+1. 加入 CI、CodeQL 与 PyPI 状态徽章。
+2. 说明 PR/main/weekly/tag 触发、必需检查名称及建议分支保护。
+3. 写明创建 `pypi` Environment、配置审批者/标签保护、PyPI Trusted Publisher 或 pending publisher 的步骤。
+4. 写明更新版本、提交、创建并推送 `vX.Y.Z` 标签的发布流程，以及失败日志、artifact、Security 与 Release 排查入口。
+5. 明确 CI 不运行真实模型、不需要 API Key，GitHub Actions 无法代替 PyPI 项目侧的一次性配置。
+
+**验证：** README 本地链接检查通过；所有 workflow、Environment、artifact 和文件名与实现逐字一致。
+
+### T-CI12：本地总验收、提交与远端验证
+
+**文件：** 上述全部文件
+**依赖：** T-CI1～T-CI11
+
+**步骤：**
+1. 运行 actionlint、YAML 检查、Ruff、compileall、完整 pytest、构建、Twine 和 wheel 安装冒烟。
+2. 检查所有 Action `uses:` 均固定 40 位 SHA，工作流无秘密值、宽泛写权限和真实模型调用。
+3. 按 `checklist.md` 逐项记录证据，保留用户并行 `.gitignore` 改动。
+4. 提交 CI/CD 文件并推送 `main`；等待 GitHub 远端 CI 与 Security 工作流完成，若失败则读取日志、修复、重新验证和推送。
+5. 不创建版本标签，不触发真实 PyPI 发布；向用户报告仍需在 GitHub/PyPI UI 完成的一次性配置。
+
+**验证：** 本地检查全绿；远端 `main` 提交对应的必需 CI/Security jobs 成功或给出可操作的外部配置阻塞证据；Git 工作区与 `origin/main` 同步。
+
+### 执行顺序
+
+```text
+T-CI1 → T-CI2 → T-CI3 → T-CI4 → T-CI5
+                 └──────────────→ T-CI6 → T-CI7
+T-CI5 → T-CI8 → T-CI9 → T-CI10
+T-CI3～T-CI10 → T-CI11 → T-CI12
+```
+
 ## T-G：单次 LLM 样本链路（当前用户授权方案）
 
 1. G1 删除模板/权重/策略提议分支，只保留 proposer: llm，新增 prompts.py 与一次调用生成器。

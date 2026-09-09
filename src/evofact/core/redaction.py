@@ -3,8 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 SENSITIVE_KEYS = {
-    "label", "gold", "gold_label", "gold_native_label", "answer", "target",
-    "expected", "expected_result", "ground_truth",
+    "label",
+    "gold",
+    "gold_label",
+    "gold_native_label",
+    "answer",
+    "target",
+    "expected",
+    "expected_result",
+    "ground_truth",
 }
 
 

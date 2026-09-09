@@ -1,4 +1,8 @@
 __pycache__/
+spec.md
+task.md
+plan.md
+checklist.md
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
@@ -14,3 +18,5 @@ skills/store/
 skills/demse-store/
 !skills/store/.gitkeep
 /learn
+/code-to-course
+/docs

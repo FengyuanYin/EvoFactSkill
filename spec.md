@@ -1,5 +1,66 @@
 # EvoFactSkill Spec
 
+## 2026-09-09：GitHub CI/CD 自动化测试与可信发布（待审批）
+
+### 背景
+
+仓库当前依赖本地人工执行测试、检查与推送，远端缺少统一的质量门禁、依赖安全检查、Python 包制品验证和可审计发布流程。需要在 GitHub 上建立默认无密钥、最小权限、失败即阻断的自动化流水线，使拉取请求和主分支改动可被持续验证，并使正式版本通过标签触发 GitHub Release 与 PyPI Trusted Publishing。
+
+### 目标
+
+- 在拉取请求和主分支更新时自动执行一致、可复现的质量检查。
+- 对 Python 版本兼容性、离线测试、静态检查、包构建和安装结果建立远端门禁。
+- 自动发现依赖与源码中的常见安全问题，并保留 GitHub 可查看的报告。
+- 以版本标签作为唯一正式发布入口，构建一次并将同一组制品发布到 GitHub Release 和 PyPI。
+- 使用 GitHub OIDC 与 PyPI Trusted Publishing，避免在仓库中保存长期 PyPI Token。
+
+### 功能需求
+
+- CI1：拉取请求、推送到主分支和人工触发时运行持续集成；同一分支的新运行应取消尚未完成的旧运行。
+- CI2：在项目支持的多个 Python 版本上运行完整离线测试；测试不得要求模型 API Key、数据集或外部网络服务。
+- CI3：执行 Ruff 格式与静态检查、Python 源码字节码编译检查，并在任一检查失败时阻断流水线。
+- CI4：构建 wheel 与 source distribution，校验包元数据，并在全新环境中安装 wheel 后验证命令行入口可调用。
+- CI5：对直接与传递依赖执行已知漏洞审计，对源码执行 CodeQL 分析；定时任务应能在代码没有变化时继续发现新披露风险。
+- CI6：上传测试与构建日志/制品供失败诊断；普通 CI 制品设置有限保留期，不作为正式版本分发入口。
+- CI7：匹配语义版本格式的标签触发发布；发布前必须重新通过质量门禁，并验证标签版本与项目声明版本完全一致。
+- CI8：发布流水线只使用已验证的构建制品，先创建 GitHub Release 并附加 wheel、source distribution 与校验摘要，再通过 PyPI Trusted Publishing 发布相同制品。
+- CI9：发布任务使用 GitHub Environment 审批与最小权限；PyPI 发布仅授予发布任务短时 OIDC 身份令牌，其他任务无写权限。
+- CI10：对重复标签、版本不一致、测试失败、构建失败、制品校验失败或 PyPI 拒绝发布给出明确失败结果，且不得静默覆盖已有版本。
+- CI11：自动提出 GitHub Actions 与 Python 依赖更新，并将依赖升级交由同一 CI 门禁验证。
+- CI12：README 提供状态徽章、CI 触发规则、版本发布步骤、PyPI Trusted Publisher 与 GitHub Environment 的一次性配置说明，以及失败排查入口。
+
+### 非功能需求
+
+- CIN1：所有工作流默认只读仓库内容；仅安全报告、证明、Release 或 PyPI 发布步骤获得完成职责所需的最小额外权限。
+- CIN2：第三方 GitHub Actions 固定到不可变提交摘要，并保留可读版本注释，降低上游标签被篡改的供应链风险。
+- CIN3：PR 中的代码不得接触发布凭据、OIDC 发布权限或可写发布令牌；来自 fork 的 PR 仍可安全运行普通检查。
+- CIN4：正式发布必须可追溯到 Git 提交、标签、GitHub Actions 运行、构建制品及其摘要。
+- CIN5：工作流只使用 GitHub 托管环境与 PyPI 官方可信发布能力，不新增长期云密钥或自托管 Runner 依赖。
+- CIN6：CI 以 Linux 为主验证环境，Python 兼容范围以项目元数据为准；Windows 专属实验流程不纳入本轮远端门禁。
+- CIN7：流水线不得运行真实 LLM 实验、访问受限数据集、提交运行输出或宣称离线夹具代表真实研究结果。
+
+### 不做的事
+
+- 不部署长期运行的 Web 服务、模型服务、数据库或云基础设施。
+- 不自动提升项目版本、自动创建发布标签或绕过人工发布决定。
+- 不在 GitHub Secrets 中保存 PyPI API Token；若 PyPI 项目尚未创建，一次性项目创建与 Trusted Publisher 绑定由仓库维护者在 PyPI 完成。
+- 不自动合并依赖更新或绕过分支保护规则。
+- 不在 CI 中下载或执行真实研究数据、调用收费模型 API、运行长时间完整实验。
+- 不保证 PyPI 名称当前可注册；首次发布前需要维护者确认项目所有权或使用 PyPI 的 pending publisher 流程。
+
+### 验收标准
+
+- CIAC1：新建或更新拉取请求后，GitHub 自动显示静态检查、支持版本测试、包构建安装与安全分析状态；任一必需任务失败时整体失败。（覆盖 CI1-CI5）
+- CIAC2：连续推送同一分支时，旧的未完成 CI 被取消，新提交获得独立检查结果。（覆盖 CI1）
+- CIAC3：无 API Key、无外部数据集的 GitHub 托管 Runner 可完成全部必需测试，且不会触发真实模型调用。（覆盖 CI2、CIN7）
+- CIAC4：流水线产出可通过元数据校验的 wheel 与 source distribution；从 wheel 安装后命令行入口可成功显示帮助。（覆盖 CI4）
+- CIAC5：依赖漏洞审计支持每周定时运行，CodeQL 结果进入 GitHub Security；发现达到门槛的问题时任务明确失败或产生安全告警。（覆盖 CI5）
+- CIAC6：普通 PR 和主分支 CI 只有读取源码及写入检查/安全结果所需权限，无法创建 Release 或请求 PyPI OIDC 身份。（覆盖 CI9、CIN1、CIN3）
+- CIAC7：创建与项目版本一致的语义版本标签后，发布任务重跑门禁、生成制品摘要、创建 GitHub Release，并以 Trusted Publishing 将同一制品发布至 PyPI。（覆盖 CI7-CI9）
+- CIAC8：标签与项目版本不一致时发布在上传前失败；重复版本不会被覆盖或被标记为成功。（覆盖 CI10）
+- CIAC9：所有外部 Actions 均固定到完整提交摘要，Dependabot 能为 Actions 和 Python 依赖提出更新。（覆盖 CI11、CIN2）
+- CIAC10：README 能让维护者完成 GitHub Environment、PyPI Trusted Publisher、分支保护和首次发布配置，并能找到失败日志与制品。（覆盖 CI12）
+
 ## 2026-09-09：仅 LLM 的 trace 驱动样本生成（当前规格）
 
 用户明确要求：只保留 proposer: llm，将可选策略嵌入系统提示词，读取 meta-train 成功/失败 trace，一次返回符合数据集样式的完整 samples。本节替代原模板配对与生成策略权重方案。

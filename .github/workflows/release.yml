@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  verify-release:
+    name: Verify release inputs
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: .github/requirements/ci.txt
+      - name: Install verification tools
+        run: python -m pip install --disable-pip-version-check -r .github/requirements/ci.txt
+      - name: Validate tag and project version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_version="$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
+          setup_version="$(python -c 'import pathlib,re; text=pathlib.Path("setup.py").read_text(encoding="utf-8"); match=re.search(r"version=\"([^\"]+)\"", text); print(match.group(1) if match else "")')"
+          if [[ "${tag_version}" != "${project_version}" || "${tag_version}" != "${setup_version}" ]]; then
+            echo "Tag ${tag_version}, pyproject ${project_version}, and setup.py ${setup_version} must match" >&2
+            exit 1
+          fi
+          echo "version=${tag_version}" >> "${GITHUB_OUTPUT}"
+      - name: Download CI-built package
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: python-package
+          path: dist
+      - name: Verify package versions and checksums
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/evofactskill-"${RELEASE_VERSION}"-*.whl)
+          sdists=(dist/evofactskill-"${RELEASE_VERSION}".tar.gz)
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+          python -m twine check "${wheels[@]}" "${sdists[@]}"
+          python -m pip install --disable-pip-version-check --target "${RUNNER_TEMP}/release-package" "${wheels[0]}"
+          installed_version="$(PYTHONPATH="${RUNNER_TEMP}/release-package" python -c 'import importlib.metadata; print(importlib.metadata.version("evofactskill"))')"
+          test "${installed_version}" = "${RELEASE_VERSION}"
+          sha256sum dist/* > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Upload checksum manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-checksums
+          path: SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: Attest release package
+    needs: verify-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: python-package
+          path: dist
+      - name: Generate build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+  github-release:
+    name: Publish GitHub Release
+    needs:
+      - verify-release
+      - attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: python-package
+          path: dist
+      - name: Download checksum manifest
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-checksums
+          path: release-metadata
+      - name: Create immutable GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.whl \
+            dist/*.tar.gz \
+            release-metadata/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --generate-notes \
+            --title "EvoFactSkill ${GITHUB_REF_NAME}"
+
+  pypi-publish:
+    name: Publish to PyPI
+    needs: github-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/evofactskill
+    permissions:
+      id-token: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: python-package
+          path: dist
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/

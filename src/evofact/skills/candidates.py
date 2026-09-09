@@ -10,8 +10,13 @@ def apply_candidate(skills: list[SkillSpec], proposal: EvolutionProposal) -> lis
     targets = proposal.target_skill_ids
     candidates = proposal.candidate_skills
     count = (len(targets), len(candidates))
-    exact = {Op.ADD: (0, 1), Op.EDIT: (1, 1), Op.GENERALIZE: (1, 1),
-             Op.SPECIALIZE: (1, 1), Op.RETIRE: (1, 0)}
+    exact = {
+        Op.ADD: (0, 1),
+        Op.EDIT: (1, 1),
+        Op.GENERALIZE: (1, 1),
+        Op.SPECIALIZE: (1, 1),
+        Op.RETIRE: (1, 0),
+    }
     valid = count == exact.get(proposal.operation)
     if proposal.operation == Op.SPLIT:
         valid = count[0] == 1 and count[1] >= 2

@@ -1,5 +1,141 @@
 # EvoFactSkill Plan
 
+## 2026-09-09：GitHub CI/CD 自动化测试与可信发布（待审批）
+
+### 架构概览
+
+自动化拆为三条职责独立的 GitHub Actions 流水线，并由 Dependabot 维护其依赖：
+
+```text
+Pull Request / main push / manual
+              │
+              ▼
+       Reusable CI workflow
+   lint ─ test matrix ─ package/install
+              │
+              └── python-package artifact（短期）
+
+main push / Pull Request / weekly / manual
+              │
+              ▼
+       Security workflow
+      CodeQL + dependency audit
+
+SemVer tag vX.Y.Z / manual retry
+              │
+              ▼
+     Release workflow（调用 CI）
+ version guard → download exact artifact → SHA-256
+              ├── provenance attestation
+              ├── GitHub Release
+              └── PyPI Trusted Publishing (OIDC)
+```
+
+普通 CI 同时支持 `workflow_call`，因此发布工作流复用完全相同的检查和包构建逻辑，不复制质量门禁。构建任务只构建一次 wheel 与 source distribution；后续安装测试、摘要、GitHub Release 和 PyPI 都消费这组不可变 artifact。
+
+### 工作流接口与数据
+
+#### CI 工作流
+
+触发器为 `pull_request`、`push` 到 `main`、`workflow_dispatch` 和 `workflow_call`。顶层权限为 `contents: read`，并以工作流名与 ref 构造并发组，取消同一 PR/分支的旧运行。
+
+CI 包含以下 jobs：
+
+- `lint`：在 Python 3.11 上安装固定版本的质量工具，执行 `ruff check`、`ruff format --check` 与 `compileall`。
+- `test`：对 Python 3.11、3.12、3.13、3.14 建立 fail-fast 关闭的矩阵，安装项目开发测试依赖并运行完整 `pytest`；设置环境变量禁止字节码落盘，不提供任何模型凭据。
+- `package`：等待 lint 与全部测试通过后，使用 PEP 517 构建 wheel/sdist，执行 Twine 元数据检查，解包检查关键模块，安装 wheel 到隔离虚拟环境并运行 `evofact --help`，最后上传名为 `python-package` 的短期 artifact。
+
+CI artifact 契约：仅包含 `*.whl` 与 `*.tar.gz`，不包含源码工作区、配置密钥、测试缓存或实验输出；保留 7 天。发布工作流通过同名 artifact 消费，不重新构建。
+
+#### Security 工作流
+
+触发器为 PR、`main` 更新、每周定时与人工触发。权限默认 `contents: read`；仅 CodeQL 分析 job 增加 `security-events: write`，PR 来自 fork 时遵循 GitHub 对安全事件上传的限制。
+
+- `codeql`：初始化 Python 分析、执行自动构建并上传 SARIF 到 GitHub Code Scanning。
+- `dependency-audit`：安装项目与审计器，对项目解析出的依赖执行漏洞检查；发现已知漏洞时非零退出，并上传机器可读 JSON 报告作为诊断 artifact。报告不存在或命令异常时也不得把任务标记为成功。
+
+#### Release 工作流
+
+触发器为符合 `v*.*.*` glob 的标签，工作流首先用严格正则 `^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$` 验证标签，再将去除 `v` 的版本与 `pyproject.toml` 项目版本比较。手工重跑沿用当前标签，不提供任意 ref 的发布输入。
+
+发布 jobs 与权限隔离：
+
+1. `quality` 调用可复用 CI，只有源码读取权限。
+2. `verify-release` 下载 CI 生成的 `python-package` artifact，重新执行元数据校验、文件名/包内版本校验并生成 `SHA256SUMS`。
+3. `attest` 对已验证制品生成 GitHub artifact provenance，仅拥有 `id-token: write` 与 `attestations: write`。
+4. `github-release` 仅拥有 `contents: write`，通过 GitHub CLI 创建不可变版本说明并上传 wheel、sdist 与 `SHA256SUMS`；若 Release 已存在则明确失败，不覆盖。
+5. `pypi-publish` 使用名为 `pypi` 的 GitHub Environment，仅拥有 `id-token: write`，通过 PyPA 官方发布 Action 将同一 artifact 上传 PyPI；不启用 `skip-existing`。
+
+GitHub Environment `pypi` 负责可选人工审批和分支/标签保护；PyPI Trusted Publisher 绑定仓库、发布工作流文件名和该 Environment。首次项目未创建时使用 PyPI pending publisher 或由维护者先创建项目。
+
+### 文件组织
+
+```text
+.github/
+├── workflows/
+│   ├── ci.yml                 # 可复用测试、lint、构建、wheel 安装验证
+│   ├── security.yml           # CodeQL、依赖漏洞审计、周计划
+│   └── release.yml            # 标签校验、证明、Release、PyPI OIDC
+├── dependabot.yml             # GitHub Actions 与 pip 每周更新
+└── requirements/
+    └── ci.txt                 # CI 专用工具的精确版本约束
+README.md                      # 徽章、门禁、远端配置与发布手册
+pyproject.toml                 # 包元数据和 Ruff/pytest 的权威配置
+spec.md / plan.md / task.md / checklist.md
+```
+
+项目本身仍以 `pyproject.toml` 为唯一权威包元数据；`setup.py` 仅保留离线兼容入口。CI 工具约束文件只包含 build、pytest、pytest-asyncio、ruff、twine、pip-audit 等流水线工具，不重复声明项目运行时依赖。
+
+### 模块交互与失败传播
+
+```text
+checkout → tool install → lint/test
+                         │ failure: stop
+                         ▼
+                    PEP 517 build
+                         │
+           twine check + clean wheel install
+                         │ failure: no artifact
+                         ▼
+                 upload python-package
+                         │
+                 release-only consumers
+            ┌────────────┼────────────┐
+         attestation  GitHub Release  PyPI OIDC
+```
+
+Release 的所有外部写入都依赖版本校验和完整 CI 成功。GitHub Release 与 PyPI 发布使用独立 jobs 和最小权限；由于两个外部系统不存在跨平台原子事务，执行顺序固定为先 GitHub Release、后 PyPI。若 PyPI 拒绝版本，GitHub Release 保留作为可审计失败证据，由维护者修正外部配置后重跑失败 job；不得删除或覆盖既有 PyPI 版本。
+
+### 技术决策
+
+| 决策点 | 选择 | 理由 |
+|---|---|---|
+| CI 复用 | `workflow_call` + 常规事件共用一个工作流 | 发布与日常检查使用同一门禁，避免规则漂移 |
+| Python 矩阵 | 3.11、3.12、3.13、3.14 | 覆盖项目声明的最低版本及当前稳定 CPython 系列 |
+| 主要 Runner | `ubuntu-latest` | 启动快、工具链稳定，符合本轮非 Windows 专属范围 |
+| 构建 | `python -m build` 的 PEP 517 路径 | 使用标准隔离构建并验证正式分发格式 |
+| 制品原则 | 构建一次、多处消费 | 避免 GitHub 与 PyPI 发布不同二进制内容 |
+| 发布触发 | 人工创建严格 SemVer 标签 | 保留维护者发布决定，避免代码合并即自动公开版本 |
+| PyPI 认证 | Trusted Publishing / OIDC | 无长期 API Token，身份绑定仓库与工作流环境 |
+| GitHub 发布 | GitHub CLI + 自动生成说明 | 减少额外第三方 Action，使用 GitHub 原生认证 |
+| 供应链 | 外部 Actions 固定完整 SHA，Dependabot 更新 | 防止可变 tag 漂移，同时维持安全升级能力 |
+| 安全分析 | CodeQL + pip-audit | 分别覆盖源码静态分析和已知依赖漏洞 |
+| 权限 | 工作流默认只读、job 逐项提升 | 降低 PR 代码与发布权限接触面 |
+| 重复发布 | 明确失败，不 `skip-existing` | 避免部分失败被伪装成成功或覆盖不可变版本 |
+| PyPI 环境 | GitHub Environment `pypi` | 支持审批、部署历史与 Trusted Publisher 精确绑定 |
+
+### Spec 覆盖检查
+
+- CI1-CI4、CI6 由可复用 CI 的触发、并发、lint、测试矩阵和 package job 覆盖。
+- CI5 由独立 Security 工作流的 CodeQL、pip-audit 和周计划覆盖。
+- CI7-CI10 由 Release 的 SemVer/版本门卫、单次制品流、证明、GitHub Release 与 PyPI jobs 覆盖。
+- CI11 由 `dependabot.yml` 的 Actions/pip 更新配置覆盖。
+- CI12 由 README 的配置与发布手册覆盖。
+- CIN1、CIN3、CIN5 由默认只读与 job 级 OIDC/写权限隔离覆盖。
+- CIN2 由完整 SHA 固定和 Dependabot 覆盖。
+- CIN4 由 tag、运行记录、artifact、SHA256SUMS 与 provenance 覆盖。
+- CIN6、CIN7 由 Ubuntu 测试矩阵和无凭据离线命令范围覆盖。
+
 ## 挑战链路架构：一次 LLM 响应（2026-09-09）
 
 `generation/prompts.py` 保存可选策略及生成/独立审核系统提示词；`generator.py` 汇总 construction trace，交替选取成功/失败实例，单次调用后端返回 `samples + decisions`。成功升难度、失败同类增样，预算分配由模型完成。

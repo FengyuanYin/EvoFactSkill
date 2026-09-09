@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from evofact.config import MetaLearningConfig
 from evofact.core.models import DomainEpisode, Sample
+
 from .domains import data_fingerprint, domain_index
 
 
@@ -16,12 +17,20 @@ class DomainEpisodeSampler:
         self.config = config
         self.seed = seed
 
-    def build(self, samples: Sequence[Sample], source_domains: Sequence[str], final_test_domains: Sequence[str], skillbank_snapshot_id: str) -> tuple[DomainEpisode, ...]:
+    def build(
+        self,
+        samples: Sequence[Sample],
+        source_domains: Sequence[str],
+        final_test_domains: Sequence[str],
+        skillbank_snapshot_id: str,
+    ) -> tuple[DomainEpisode, ...]:
         groups = domain_index(samples)
         source = tuple(sorted(set(source_domains)))
         final = tuple(sorted(set(final_test_domains)))
         if len(source) < self.config.min_source_domains:
-            raise ValueError(f"DEMSE requires at least {self.config.min_source_domains} source domains")
+            raise ValueError(
+                f"DEMSE requires at least {self.config.min_source_domains} source domains"
+            )
         if (set(source) & set(final)) or not (set(source) | set(final)) <= set(groups):
             raise ValueError("invalid source/final domain partition")
         if self.config.meta_test_domain_count >= len(source):
@@ -33,9 +42,33 @@ class DomainEpisodeSampler:
             train_domains = tuple(domain for domain in source if domain not in test_domains)
             train_ids = tuple(s.sample_id for domain in train_domains for s in groups[domain])
             test_ids = tuple(s.sample_id for domain in test_domains for s in groups[domain])
-            payload = {"seed": self.seed, "index": index, "strategy": self.config.strategy, "train": train_domains, "test": test_domains, "data": fingerprint, "bank": skillbank_snapshot_id}
-            episode_id = "episode-" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
-            episodes.append(DomainEpisode(episode_id, self.seed, self.config.strategy, train_domains, test_domains, train_ids, test_ids, final, fingerprint, skillbank_snapshot_id))
+            payload = {
+                "seed": self.seed,
+                "index": index,
+                "strategy": self.config.strategy,
+                "train": train_domains,
+                "test": test_domains,
+                "data": fingerprint,
+                "bank": skillbank_snapshot_id,
+            }
+            episode_id = (
+                "episode-"
+                + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+            )
+            episodes.append(
+                DomainEpisode(
+                    episode_id,
+                    self.seed,
+                    self.config.strategy,
+                    train_domains,
+                    test_domains,
+                    train_ids,
+                    test_ids,
+                    final,
+                    fingerprint,
+                    skillbank_snapshot_id,
+                )
+            )
         covered = set().union(*(set(e.meta_test_domains) for e in episodes))
         if covered != set(source):
             raise RuntimeError("episode plan does not cover every source domain as meta-test")
@@ -49,4 +82,11 @@ class DomainEpisodeSampler:
         width = self.config.meta_test_domain_count
         required = math.ceil(len(source) / width)
         count = max(self.config.episodes, required)
-        return [tuple(sorted(shuffled[(index * width + offset) % len(shuffled)] for offset in range(width))) for index in range(count)]
+        return [
+            tuple(
+                sorted(
+                    shuffled[(index * width + offset) % len(shuffled)] for offset in range(width)
+                )
+            )
+            for index in range(count)
+        ]
