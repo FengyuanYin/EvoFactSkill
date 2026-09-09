@@ -1,6 +1,6 @@
 import hashlib
 from evofact.core.models import InferenceTrace, RunBudget, Sample, SkillKind, SkillSpec, UsageRecord
-from evofact.routing.router import SkillRouter
+from evofact.routing.router import SkillRouter, matches_scope
 from .aggregator import aggregate_evidence
 
 class InferenceRuntime:
@@ -11,7 +11,7 @@ class InferenceRuntime:
             try:
                 result=await self.backend.analyze(public,by_id[sid]); reports.append(result.value); usage=_merge(usage,result.usage)
             except Exception as exc: errors.append(f"specialist {sid}: {type(exc).__name__}: {exc}")
-        judges=[s for s in self.skills if s.kind==SkillKind.JUDGE and s.status.value in {"active","frozen"}]
+        judges=[s for s in self.skills if s.kind==SkillKind.JUDGE and s.status.value in {"active","frozen"} and matches_scope(s, public)]
         if not judges: raise RuntimeError("no active judge skill")
         result=await self.backend.judge(public,tuple(reports),judges[0]); usage=_merge(usage,result.usage)
         trace_id=hashlib.sha256(f"{sample.sample_id}:{','.join(decision.selected_skill_ids)}".encode()).hexdigest()[:20]

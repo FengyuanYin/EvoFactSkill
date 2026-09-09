@@ -28,7 +28,12 @@ class CrossEpisodeAggregator:
 
     def aggregate(self, results: list[EpisodeEvaluation] | tuple[EpisodeEvaluation, ...]) -> dict[str, TransferUtility]:
         groups: dict[str, list[EpisodeEvaluation]] = defaultdict(list)
+        seen = set()
         for result in results:
+            key = (result.episode_id, result.candidate_fingerprint)
+            if key in seen:
+                raise ValueError("duplicate candidate evaluation in episode")
+            seen.add(key)
             groups[result.candidate_fingerprint].append(result)
         utilities = {}
         for fingerprint, rows in sorted(groups.items()):

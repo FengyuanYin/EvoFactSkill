@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from evofact.generation.models import GenerationConfig
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class AppConfig:
     max_skills_per_item: int = 3
     gate: GateConfig = field(default_factory=GateConfig)
     meta_learning: MetaLearningConfig = field(default_factory=MetaLearningConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
 
     def __post_init__(self) -> None:
         if self.backend not in {"mock", "openai-compatible"}:
@@ -120,6 +122,10 @@ def _simple_yaml(text: str) -> dict[str, Any]:
 def load_config(path: str | Path) -> AppConfig:
     raw = _simple_yaml(Path(path).read_text(encoding="utf-8"))
     gate = GateConfig(**raw.pop("gate", {}))
+    generation_raw = raw.pop("generation", {})
+    if "store_path" in generation_raw:
+        generation_raw["store_path"] = Path(generation_raw["store_path"])
+    generation = GenerationConfig(**generation_raw)
     meta_raw = raw.pop("meta_learning", {})
     if "checkpoint_path" in meta_raw:
         meta_raw["checkpoint_path"] = Path(meta_raw["checkpoint_path"])
@@ -128,4 +134,4 @@ def load_config(path: str | Path) -> AppConfig:
         if key in raw:
             raw[key] = Path(raw[key])
     raw["dataset_roots"] = {k: Path(v) for k, v in raw.get("dataset_roots", {}).items()}
-    return AppConfig(gate=gate, meta_learning=meta_learning, **raw)
+    return AppConfig(gate=gate, meta_learning=meta_learning, generation=generation, **raw)

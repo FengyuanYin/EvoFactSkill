@@ -1,0 +1,21 @@
+# Requires a real LLM backend and DEEPSEEK_API_KEY. Offline tests inject a fake backend.
+backend: openai-compatible
+model: deepseek-chat
+base_url: https://api.deepseek.com/v1
+api_key_env: DEEPSEEK_API_KEY
+seed: 42
+output_dir: outputs/adversarial-llm
+skill_store: outputs/adversarial-llm/detector-bank
+max_skills_per_item: 3
+meta_learning:
+  enabled: true
+  episodes: 5
+  checkpoint_path: outputs/adversarial-llm/checkpoint.json
+generation:
+  enabled: true
+  proposer: llm
+  batch_size: 8
+  max_trace_examples: 32
+  max_text_chars: 6000
+  probe_fraction: 0.4
+  store_path: outputs/adversarial-llm/generation-audit.json

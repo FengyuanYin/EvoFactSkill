@@ -13,3 +13,4 @@ data/raw/
 skills/store/
 skills/demse-store/
 !skills/store/.gitkeep
+/learn

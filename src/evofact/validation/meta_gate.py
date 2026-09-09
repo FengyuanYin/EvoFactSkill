@@ -31,14 +31,17 @@ class MetaValidationGate:
         if utility.calibration_delta > self.config.max_calibration_increase:
             failures.append("calibration regression exceeded")
         if not failures:
-            return self._decision(utility, True, "generalized", utility.tested_domains, ())
+            return self._decision(utility, True, "retired" if retirement_candidate else "generalized", utility.tested_domains, ())
         positive = tuple(sorted(domain for domain, gain in utility.domain_gains.items() if gain > 0))
-        if self.config.allow_specialization and positive and len(positive) < len(utility.tested_domains) and utility.episode_count >= 2:
+        hard_constraints_pass = (
+            utility.mean_coverage >= self.config.min_coverage
+            and utility.cost_ratio <= self.config.max_cost_ratio
+            and utility.calibration_delta <= self.config.max_calibration_increase
+        )
+        if not retirement_candidate and self.config.allow_specialization and hard_constraints_pass and positive and len(positive) < len(utility.tested_domains) and utility.episode_count >= self.config.min_valid_episodes:
             severe = utility.negative_transfer_rate > .5 or utility.worst_domain_drop < -2 * self.config.max_worst_domain_drop
             if not severe:
                 return self._decision(utility, True, "specialized", positive, tuple(failures))
-        if retirement_candidate and utility.episode_count >= self.config.min_valid_episodes and utility.mean_gain < 0 and utility.negative_transfer_rate > .5:
-            return self._decision(utility, False, "retired", (), tuple(failures))
         if utility.mean_gain > 0 and utility.mean_coverage >= self.config.min_coverage:
             return self._decision(utility, False, "pareto", (), tuple(failures))
         return self._decision(utility, False, "rejected", (), tuple(failures))
