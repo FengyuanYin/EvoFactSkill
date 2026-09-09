@@ -1,32 +1,32 @@
 # EvoFactSkill Checklist
 
-## 2026-09-09 GitHub CI/CD 自动化测试与可信发布验收（待审批）
+## 2026-09-09 GitHub CI/CD 自动化测试与可信发布验收
 
 > 每项必须通过命令输出、GitHub 检查结果或远端配置截图/页面状态验证。正式验收不会创建版本标签或向 PyPI 发布测试版本；发布路径通过静态检查、构建制品和远端非发布工作流验证，首次正式发布由维护者主动创建标签触发。
 
 ### 实现完整性
 
-- [ ] CI 同时支持 Pull Request、`main` push、人工触发与 `workflow_call`。（验证：actionlint 通过，并检查 `ci.yml` 的四类事件定义）
-- [ ] 同一工作流与 ref 的旧运行会在新提交到来时取消。（验证：检查 concurrency group 包含 workflow/ref 且 `cancel-in-progress` 启用）
-- [ ] CI 默认仅有仓库内容读取权限。（验证：权限扫描确认顶层不存在 `write-all`，且普通 jobs 无 `contents: write` 或 `id-token: write`）
-- [ ] lint job 执行 Ruff lint、Ruff format check 和 Python compileall。（验证：本地运行相同命令全部返回 0，并在 GitHub job 日志看到三步成功）
-- [ ] 测试矩阵覆盖 Python 3.11、3.12、3.13、3.14且关闭 fail-fast。（验证：工作流矩阵静态检查，并观察远端四个 test jobs 独立完成）
-- [ ] 测试环境不包含模型密钥且完整测试不访问真实模型或受限数据。（验证：扫描 workflow 不引用模型 secret；无 API Key 的远端 pytest 成功）
+- [x] CI 同时支持 Pull Request、`main` push、人工触发与 `workflow_call`。（验证：actionlint 通过，并检查 `ci.yml` 的四类事件定义）
+- [x] 同一工作流与 ref 的旧运行会在新提交到来时取消。（验证：检查 concurrency group 包含 workflow/ref 且 `cancel-in-progress` 启用）
+- [x] CI 默认仅有仓库内容读取权限。（验证：权限扫描确认顶层不存在 `write-all`，且普通 jobs 无 `contents: write` 或 `id-token: write`）
+- [x] lint job 执行 Ruff lint、Ruff format check 和 Python compileall。（验证：本地运行相同命令全部返回 0，并在 GitHub job 日志看到三步成功）
+- [x] 测试矩阵覆盖 Python 3.11、3.12、3.13、3.14且关闭 fail-fast。（验证：工作流矩阵静态检查，并观察远端四个 test jobs 独立完成）
+- [x] 测试环境不包含模型密钥且完整测试不访问真实模型或受限数据。（验证：扫描 workflow 不引用模型 secret；无 API Key 的远端 pytest 成功）
 - [ ] package job 只在 lint 与全部测试通过后运行。（验证：检查 `needs` 依赖；制造测试失败的 PR 时 package 被跳过）
-- [ ] package job 生成且只上传一个 wheel 和一个 sdist，保留期为 7 天。（验证：构建日志与 artifact 内容/设置匹配）
-- [ ] wheel 与 sdist 通过 Twine 元数据检查。（验证：`python -m twine check dist/*` 返回 0）
-- [ ] wheel 能在全新环境独立安装且 `evofact --help` 成功。（验证：不设置 `PYTHONPATH` 的临时虚拟环境中命令返回 0）
+- [x] package job 生成且只上传一个 wheel 和一个 sdist，保留期为 7 天。（验证：构建日志与 artifact 内容/设置匹配）
+- [x] wheel 与 sdist 通过 Twine 元数据检查。（验证：`python -m twine check dist/*` 返回 0）
+- [x] wheel 能在全新环境独立安装且 `evofact --help` 成功。（验证：不设置 `PYTHONPATH` 的临时虚拟环境中命令返回 0）
 
 ### 安全与供应链
 
-- [ ] Security 工作流支持 PR、`main` push、每周定时和人工触发。（验证：actionlint 与触发器静态检查通过）
-- [ ] CodeQL 对 Python 源码运行并将结果写入 GitHub Code Scanning。（验证：远端 CodeQL job 成功，Security 页面出现对应分析记录）
-- [ ] 只有 CodeQL job 获得 `security-events: write`，Security 工作流没有 Release 或 OIDC 权限。（验证：权限扫描通过）
-- [ ] pip-audit 对解析后的项目依赖执行审计、生成 JSON，并在发现漏洞时保持非零结果。（验证：正常审计命令运行；检查 workflow 未使用无条件 `continue-on-error` 或吞掉退出码）
-- [ ] 审计报告在成功与失败路径都可用于诊断，缺失报告不会导致上传步骤自身误报成功。（验证：检查 artifact 条件与 `if-no-files-found` 策略）
-- [ ] 所有第三方与官方 `uses:` 均固定到 40 位提交 SHA并带可读版本注释。（验证：脚本解析所有 `uses:`，本地相对 workflow 除外，未发现 tag/branch 引用）
-- [ ] CI 工具均以精确版本约束，Python 3.11 可完整安装。（验证：干净 3.11 环境安装 `.github/requirements/ci.txt` 并输出各工具版本）
-- [ ] Dependabot 每周检查 GitHub Actions 与 CI pip requirements，不配置自动合并。（验证：Dependabot schema/字段检查，远端 Insights 页面识别两类更新配置）
+- [x] Security 工作流支持 PR、`main` push、每周定时和人工触发。（验证：actionlint 与触发器静态检查通过）
+- [x] CodeQL 对 Python 源码运行并将结果写入 GitHub Code Scanning。（验证：远端 CodeQL job 成功，Security 页面出现对应分析记录）
+- [x] 只有 CodeQL job 获得 `security-events: write`，Security 工作流没有 Release 或 OIDC 权限。（验证：权限扫描通过）
+- [x] pip-audit 对解析后的项目依赖执行审计、生成 JSON，并在发现漏洞时保持非零结果。（验证：正常审计命令运行；检查 workflow 未使用无条件 `continue-on-error` 或吞掉退出码）
+- [x] 审计报告在成功与失败路径都可用于诊断，缺失报告不会导致上传步骤自身误报成功。（验证：检查 artifact 条件与 `if-no-files-found` 策略）
+- [x] 所有第三方与官方 `uses:` 均固定到 40 位提交 SHA并带可读版本注释。（验证：脚本解析所有 `uses:`，本地相对 workflow 除外，未发现 tag/branch 引用）
+- [x] CI 工具均以精确版本约束，Python 3.11 可完整安装。（验证：干净 3.11 环境安装 `.github/requirements/ci.txt` 并输出各工具版本）
+- [x] Dependabot 每周检查 GitHub Actions 与 CI pip requirements，不配置自动合并。（验证：Dependabot schema/字段检查，远端 Insights 页面识别两类更新配置）
 
 ### 发布保护
 
@@ -43,38 +43,40 @@
 
 ### 文档与运维
 
-- [ ] README 展示 CI、CodeQL、PyPI 状态徽章，链接到当前仓库和正确工作流。（验证：本地 Markdown 链接检查及远端点击验证）
-- [ ] README 说明 PR/main/weekly/tag 触发器、必需检查名称和建议分支保护。（验证：逐项对照 workflow job 名称）
-- [ ] README 说明 GitHub `pypi` Environment 的审批与标签保护设置。（验证：按文档在 GitHub Settings 中能找到对应配置入口）
-- [ ] README 说明 PyPI Trusted Publisher/pending publisher 所需仓库、workflow 与 Environment 精确值。（验证：逐项对照发布工作流和仓库名）
-- [ ] README 给出人工版本更新、提交、创建/推送标签与失败重跑步骤，并明确不会自动发版。（验证：命令语法检查及流程对照）
-- [ ] README 明确 CI 不使用真实模型、不需要 API Key，PyPI/GitHub 一次性远端设置仍需维护者完成。（验证：文字审查无歧义）
-- [ ] 非本任务的 `.gitignore` `/code-to-course` 改动被保留。（验证：提交前后 diff 中该行仍存在）
+- [x] README 展示 CI、CodeQL、PyPI 状态徽章，链接到当前仓库和正确工作流。（验证：本地 Markdown 链接检查及远端点击验证）
+- [x] README 说明 PR/main/weekly/tag 触发器、必需检查名称和建议分支保护。（验证：逐项对照 workflow job 名称）
+- [x] README 说明 GitHub `pypi` Environment 的审批与标签保护设置。（验证：按文档在 GitHub Settings 中能找到对应配置入口）
+- [x] README 说明 PyPI Trusted Publisher/pending publisher 所需仓库、workflow 与 Environment 精确值。（验证：逐项对照发布工作流和仓库名）
+- [x] README 给出人工版本更新、提交、创建/推送标签与失败重跑步骤，并明确不会自动发版。（验证：命令语法检查及流程对照）
+- [x] README 明确 CI 不使用真实模型、不需要 API Key，PyPI/GitHub 一次性远端设置仍需维护者完成。（验证：文字审查无歧义）
+- [x] 非本任务的 `.gitignore` `/code-to-course` 改动被保留。（验证：提交前后 diff 中该行仍存在）
 
 ### 本地质量门禁
 
-- [ ] actionlint 对三个工作流均无错误。（验证：在仓库根运行 actionlint，退出码为 0）
-- [ ] GitHub workflow 与 Dependabot YAML 可解析且没有重复键。（验证：严格 YAML 解析脚本返回 0）
-- [ ] `git diff --check` 无空白错误。（验证：命令返回 0）
-- [ ] Ruff lint 与 format check 通过。（验证：两个 Ruff 命令返回 0）
-- [ ] Python compileall 通过且不向仓库写入缓存。（验证：临时输出目录执行 compileall，退出码为 0，Git 状态无新增缓存）
-- [ ] 完整 pytest 通过且不访问网络/API。（验证：无凭据环境运行测试，记录通过数量）
-- [ ] PEP 517 构建、Twine、wheel 安装与 CLI 冒烟全部通过。（验证：记录构建文件名、校验输出和 `evofact --help` 退出码）
-- [ ] 没有提交密钥、缓存、构建目录、运行输出或实验数据。（验证：Git 状态、敏感模式扫描和 tracked-files 检查通过）
+- [x] actionlint 对三个工作流均无错误。（验证：在仓库根运行 actionlint，退出码为 0）
+- [x] GitHub workflow 与 Dependabot YAML 可解析且没有重复键。（验证：严格 YAML 解析脚本返回 0）
+- [x] `git diff --check` 无空白错误。（验证：命令返回 0）
+- [x] Ruff lint 与 format check 通过。（验证：两个 Ruff 命令返回 0）
+- [x] Python compileall 通过且不向仓库写入缓存。（验证：临时输出目录执行 compileall，退出码为 0，Git 状态无新增缓存）
+- [x] 完整 pytest 通过且不访问网络/API。（验证：无凭据环境运行测试，记录通过数量）
+- [x] PEP 517 构建、Twine、wheel 安装与 CLI 冒烟全部通过。（验证：记录构建文件名、校验输出和 `evofact --help` 退出码）
+- [x] 没有提交密钥、缓存、构建目录、运行输出或实验数据。（验证：Git 状态、敏感模式扫描和 tracked-files 检查通过）
 
 ### 端到端场景
 
-- [ ] 场景 1——普通推送：提交 CI/CD 文件并推送 `main` 后，远端自动启动 CI 和 Security；四版本测试、lint、package、CodeQL 与依赖审计均产生可见结果，构建成功时可下载 `python-package` artifact。（验证：GitHub Actions 对应提交的运行记录与 artifact 页面）
+- [x] 场景 1——普通推送：提交 CI/CD 文件并推送 `main` 后，远端自动启动 CI 和 Security；四版本测试、lint、package、CodeQL 与依赖审计均产生可见结果，构建成功时可下载 `python-package` artifact。（验证：GitHub Actions 对应提交的运行记录与 artifact 页面）
 - [ ] 场景 2——质量失败保护：在临时验证分支/本地工作流模拟中引入确定性 lint 或测试失败，观察 package 与全部发布 jobs 不运行；恢复文件后检查重新通过。（验证：运行记录/依赖图显示失败传播，不把故障提交合并至 main）
 - [ ] 场景 3——合法发布路径：使用与当前版本匹配的本地模拟标签执行版本门卫、制品校验和摘要步骤，确认将传给 Release、证明和 PyPI 的文件字节完全相同。（验证：三处制品 SHA-256 集合一致；本轮不真实推送标签）
 - [ ] 场景 4——非法发布阻断：使用版本不符和非法 SemVer 样例，确认在任何 `contents: write`、attestation 或 OIDC job 前失败。（验证：版本门卫非零退出且依赖 jobs 被跳过）
 
 ### 外部配置就绪条件
 
-- [ ] GitHub Actions 已启用，Code Scanning 可接收结果。（验证：远端普通推送后 CI/CodeQL 可运行；若组织策略阻止，记录管理员需要执行的操作）
+- [x] GitHub Actions 已启用，Code Scanning 可接收结果。（验证：远端普通推送后 CI/CodeQL 可运行；若组织策略阻止，记录管理员需要执行的操作）
 - [ ] GitHub `pypi` Environment 已创建并按需配置审批者与允许标签。（验证：Repository Settings 的 Environments 页面）
 - [ ] PyPI 项目或 pending publisher 已将仓库 `FengyuanYin/EvoFactSkill`、发布工作流 `release.yml`、Environment `pypi` 绑定为 Trusted Publisher。（验证：PyPI Publishing 设置；未完成时不得声称真实发布已就绪）
 - [ ] `main` 分支保护已将必要 CI/Security jobs 设为必需检查。（验证：Rulesets/Branch protection 页面；仓库权限不足时提供精确手工步骤）
+
+远端验收证据（提交 `7af4b690906d22e1f4fd0100cb8c9ef54b200143`）：CI run `34323859199` 成功，包含 lint/compile、Python 3.11–3.14 四个测试 job 以及 package job；Security run `34323859181` 成功，CodeQL 与 Dependency audit 均通过。本地验证为 Ruff 全通过、92 个文件格式检查通过、pytest 64 项通过（另含 4 个 subtests）、actionlint/YAML/compileall/build/Twine/干净 wheel 安装与 CLI 冒烟全部通过，pip-audit 未发现已知漏洞。未创建发布标签，也未向 PyPI 发布；`pypi` Environment、Trusted Publisher 和 `main` 分支保护仍须在远端设置页面完成。
 
 ## 2026-09-09 单次 LLM 生成链路验收（当前版本）
 
