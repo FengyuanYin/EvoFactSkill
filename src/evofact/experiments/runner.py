@@ -12,6 +12,7 @@ from evofact.runtime.mock_backend import MockBackend
 from evofact.runtime.openai_backend import OpenAICompatibleBackend
 from evofact.skills.loader import load_skill_package
 from evofact.skills.utility import UtilityTracker
+from evofact.skills.candidates import apply_candidate
 from evofact.validation.evaluator import evaluate
 from evofact.validation.gate import ValidationGate
 from evofact.validation.statistics import mcnemar, paired_bootstrap
@@ -33,13 +34,15 @@ class ExperimentRunner:
         if self.config.backend=="mock": return MockBackend()
         return OpenAICompatibleBackend(self.config.base_url,self.config.resolved_api_key(),self.config.model)
     async def run(self,samples:list[Sample]|None=None,strategy:str="utility-aware",skills=None):
-        rows=samples or fixture_samples(); runtime=InferenceRuntime(self._backend(),SkillRouter(strategy,self.config.seed),skills or self.skills); traces=[]; evaluations=[]
+        rows=fixture_samples() if samples is None else samples
+        runtime=InferenceRuntime(self._backend(),SkillRouter(strategy,self.config.seed),self.skills if skills is None else skills); traces=[]; evaluations=[]
         for sample in rows:
             trace=await runtime.infer(sample,RunBudget(self.config.max_skills_per_item)); traces.append(trace)
             gold=_gold(sample.label); evaluations.append(SampleEvaluation(sample.sample_id,gold,trace.decision.label,trace.decision.confidence,sample.domain,str(sample.metadata.get("temporal_window")) if sample.metadata.get("temporal_window") is not None else None,trace.usage.estimated_cost))
         return traces,evaluate(evaluations)
-    async def evolve_once(self,samples:list[Sample]|None=None):
-        rows=samples or fixture_samples(); traces,result=await self.run(rows); reports=[attribute_trace(t,_gold(s.label)) for t,s in zip(traces,rows)]; tracker=UtilityTracker()
+    async def evolve_once(self,samples:list[Sample]|None=None, *, generation_guard=None):
+        rows=fixture_samples() if samples is None else samples
+        traces,result=await self.run(rows); reports=[attribute_trace(t,_gold(s.label)) for t,s in zip(traces,rows)]; tracker=UtilityTracker()
         credited=[]
         for trace,sample,report in zip(traces,rows,reports):
             baseline_ok=trace.decision.label==_gold(sample.label); deltas={}
@@ -48,18 +51,25 @@ class ExperimentRunner:
                 cf_trace=(await self.run([sample],skills=reduced))[0][0]; delta=float(baseline_ok)-float(cf_trace.decision.label==_gold(sample.label)); deltas[sid]=delta
                 tracker.update(sid,success=baseline_ok,delta=delta,cost=trace.usage.estimated_cost,domain=sample.domain,window=str(sample.metadata.get("temporal_window")) if sample.metadata.get("temporal_window") is not None else None)
             credited.append(replace(report,counterfactual_deltas=deltas))
-        reports=credited; clusters=cluster_reports([r for r in reports if r.error_types]); proposals=[propose_from_cluster(cid,group,self.skills) for cid,group in clusters.items()]
+        reports=credited
+        if generation_guard is not None:
+            generation_guard(traces, reports)
+        clusters=cluster_reports([r for r in reports if r.error_types]); proposals=[propose_from_cluster(cid,group,self.skills) for cid,group in clusters.items()]
         return {"traces":traces,"evaluation":result,"attributions":reports,"utilities":tracker.values,"distillation":distill(traces,reports),"proposals":proposals}
     async def closed_loop(self,samples:list[Sample]|None=None,validation_samples:list[Sample]|None=None):
-        rows=samples or fixture_samples(); validation_rows=validation_samples or fixture_validation_samples(); outcome=await self.evolve_once(rows); decisions=[]
+        rows=fixture_samples() if samples is None else samples
+        validation_rows=fixture_validation_samples() if validation_samples is None else validation_samples
+        if not rows or not validation_rows:
+            raise ValueError("evolution requires non-empty training and validation samples")
+        from evofact.core.models import DataManifest
+        from evofact.data.leakage import detect_leakage
+        manifest = DataManifest("validation", {}, tuple(s.sample_id for s in rows), tuple(s.sample_id for s in validation_rows))
+        errors = detect_leakage(rows + validation_rows, manifest)
+        if errors:
+            raise ValueError("validation data leakage: " + "; ".join(errors))
+        outcome=await self.evolve_once(rows); decisions=[]
         for proposal in outcome["proposals"]:
-            candidate_skills=list(self.skills)
-            for candidate in proposal.candidate_skills:
-                replaced=False
-                for index,current in enumerate(candidate_skills):
-                    if current.name in proposal.target_skill_ids:
-                        candidate_skills[index]=replace(candidate,status=SkillStatus.ACTIVE); replaced=True; break
-                if not replaced: candidate_skills.append(replace(candidate,status=SkillStatus.ACTIVE))
+            candidate_skills=apply_candidate(self.skills, proposal)
             repeated_baseline=[]; repeated_candidate=[]
             for repeat_index in range(self.config.gate.repeats):
                 _,base_run=await self.run(validation_rows)

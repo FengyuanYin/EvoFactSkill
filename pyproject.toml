@@ -13,7 +13,7 @@ dependencies = []
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [project.scripts]
-evofact = "evofact.cli:app"
+evofact = "evofact.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,5 +1,19 @@
 # EvoFactSkill Plan
 
+## 挑战链路架构：一次 LLM 响应（2026-09-09）
+
+`generation/prompts.py` 保存可选策略及生成/独立审核系统提示词；`generator.py` 汇总 construction trace，交替选取成功/失败实例，单次调用后端返回 `samples + decisions`。成功升难度、失败同类增样，预算分配由模型完成。
+
+`verifier.py` 先检查完整 Sample schema、来源字段、重复、预算、留出数据和 decisions 的 trace 白名单，再独立调用 LLM 仅根据正文和来源证据判断 REAL/FAKE/UNKNOWN。只有与生成标签一致的样本进入检测训练；不通过时拒绝，不渲染模板、不重试生成。证据 stance 清为 unknown，避免把源断言结论迁移到新断言。
+
+`AdversarialEvolutionRunner._evolve_episode`：按事件/证据来源拆 construction/probe → 冻结检测基线 → construction 推理与归因 → 一次生成及缓存 → 审核 → construction+合格 samples 调用 evolve_once → probe 诊断 → 原 DEMSE 外层。每个 episode 独立，不传播其他 episode 的生成记忆。
+
+检查点目录下的 generation-cache 保存完整已返回响应，key 覆盖配置、prompt、数据/episode、construction 和检测库。完成记录由原 checkpoint 保存；正式 generation.store_path 是版本化运行审计，不再是可学习权重库。报告按 episode 导出标准化 samples JSONL，防止混合留出域。检测提交与生成审计各自原子；相同参数 --resume 可补齐中断提交。
+
+## 2026-09-08 实现补强
+
+候选评估与提交共用纯函数 `apply_candidate`，按操作移除全部目标再加入候选；仓库以一次 active 指针替换提交完整结果。恢复身份覆盖完整数据与技能内容、模型、seed、预算、门控及领域计划；已提交事务用 run ID 去重。路由将作用域作为硬过滤，特化不得绕过覆盖、成本和校准限制。新增回归测试作为本次验收依据；旧勾选记录仅代表历史验证。
+
 > DEMSE 修订：本计划新增 Domain-Episodic Meta-Gated Skill Evolution 实现。原固定验证闭环保留为兼容模式与实验基线；DEMSE 不更新底层模型参数，而在离散 SkillBank 空间执行域情景双层元优化。
 
 ## 架构概览

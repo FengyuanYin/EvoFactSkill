@@ -1,5 +1,16 @@
 # EvoFactSkill
 
+新增独立链路：**meta-train 成功/失败 trace → LLM 自选策略并一次生成 samples → 独立审核 → DEMSE 检测技能门控**。成功类型升难度，失败类型增样强化；底层模型参数冻结。
+
+```powershell
+$env:PYTHONPATH='src'
+$env:PYTHONDONTWRITEBYTECODE='1'
+python -m evofact.cli --config configs/adversarial_llm.yaml adversarial-evolve --evaluation-only
+python -m evofact.cli --config configs/adversarial_llm.yaml adversarial-evolve --evaluation-only --resume
+```
+
+该命令仅支持 `proposer: llm`，运行前配置 `DEEPSEEK_API_KEY`；即使不传输入而使用模拟夹具，也会调用真实 LLM。每个 episode 一次生成调用，同时输出 samples 和策略 decisions；独立标签审核另有一次调用。`--samples samples.jsonl` 读取带 evidence 的标准化输入，`--facts` 可选。去掉 evaluation-only 才提交检测库与正式生成审计；样本按 episode 导出 JSONL。旧三模式和数值模板已删除。详见 [设计与输入协议](docs/adversarial-design.md) 和 [Day 10 教程](learn/Day10-挑战生成智能体与双层进化.md)。
+
 EvoFactSkill 以 DEMSE（Domain-Episodic Meta-Gated Skill Evolution，域情景元门控技能进化）作为跨域自进化核心：每个 episode 将完整源领域划分为 meta-train 与 meta-test，前者生成可解释 Skill 候选，后者模拟未知域并只提供迁移效用门控。多轮结果按候选语义身份聚合后，系统再决定泛化、特化、Pareto 保留或拒绝。底层语言模型始终冻结，因此这里的“元学习”发生在离散 SkillBank 空间，而不是参数级 MAML。
 
 离线机制验证：
@@ -31,6 +42,10 @@ The repository is independent from CD-FND. It can read separately configured dat
 - AST-based executable-skill screening. Script skills always require review unless a stricter external sandbox is supplied.
 
 ## Quick verification — no network or API key
+
+安装到本地环境：`python -m pip install -e . --no-build-isolation`（需要本地 setuptools）。控制台入口已统一到 `evofact.cli:main`；无需安装也可按下方 `PYTHONPATH` 方式运行。
+
+中文源码教程见 [learn/README.md](learn/README.md)：九天内容覆盖入口、数据契约、隔离、推理、归因、统计、生命周期、DEMSE 与验收，每章都有实际代码对应的练习和答案。
 
 PowerShell:
 
@@ -126,3 +141,16 @@ The standard-library OpenAI-compatible backend is available for integration. Sup
 The shared experiment protocol defines: single LLM, static multi-agent, all experts, random routing, prompt-only evolution, no skill discovery, no negative-transfer control, and the full system. All arms must use the same manifest, sample order and metric implementation.
 
 See [spec.md](spec.md), [plan.md](plan.md), [task.md](task.md), and [checklist.md](checklist.md) for the approved scope and verification criteria.
+
+## 2026-09-08 implementation audit
+
+- Empty sample lists and empty banks retain their meaning; only `None` selects defaults.
+- Skill domain/dataset/time scopes are hard routing filters, including fallback paths.
+- Fixed and DEMSE evaluation share lifecycle transitions for split, merge and retirement; frozen targets and malformed transitions are rejected.
+- Checkpoint identities cover complete data and skill content plus model, seed, budget and gate configuration. Changing the final-domain policy also rejects resume.
+- DEMSE commits a complete bank and audit transaction in one atomic active-pointer update. A committed run can resume without repeating its commit. Conflicting accepted proposals require joint evaluation.
+- Paired tests reject missing/duplicate IDs and changed gold labels; duplicate episode evidence is rejected. Specialization cannot bypass coverage, cost, calibration or minimum-episode constraints.
+- `skills diff` returns a real snapshot diff; rollback requires a snapshot. Snapshot lookups reject path-like input.
+- Dataset reports evaluate the supplied final-test split without invoking evolution. Ordinary inference reads an existing active bank; without one it loads seeds.
+
+The historical checklist is not evidence that every research requirement is complete. Automatic proposal discovery currently emits ADD/EDIT; the slow Meta-Skill loop is an event-recording scaffold, and some named ablation arms share routing implementations. Real-backend token pricing and full token/call/concurrency budget enforcement are not yet complete. The current file repository assumes a single writer. Default results remain offline mechanism tests, not empirical evidence of cross-domain model accuracy.

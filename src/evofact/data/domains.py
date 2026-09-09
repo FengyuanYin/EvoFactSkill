@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict
 from collections import defaultdict
 from collections.abc import Sequence
 
@@ -27,13 +28,13 @@ def domain_index(samples: Sequence[Sample]) -> dict[str, tuple[Sample, ...]]:
 
 
 def data_fingerprint(samples: Sequence[Sample]) -> str:
-    payload = [(s.sample_id, s.dataset, effective_domain(s), " ".join(s.text.casefold().split())) for s in samples]
-    return hashlib.sha256(json.dumps(sorted(payload), ensure_ascii=False).encode()).hexdigest()
+    payload = [asdict(s) for s in sorted(samples, key=lambda s: s.sample_id)]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
 def skillbank_fingerprint(skills: Sequence[SkillSpec]) -> str:
-    payload = [(s.skill_id, s.version, s.status.value, s.instructions, tuple(s.scope.domains)) for s in skills]
-    return hashlib.sha256(json.dumps(sorted(payload), ensure_ascii=False).encode()).hexdigest()
+    payload = [asdict(s) for s in sorted(skills, key=lambda s: s.skill_id)]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
 def split_source_and_final(samples: Sequence[Sample], final_test_domains: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:

@@ -1,5 +1,21 @@
 # EvoFactSkill Spec
 
+## 2026-09-09：仅 LLM 的 trace 驱动样本生成（当前规格）
+
+用户明确要求：只保留 proposer: llm，将可选策略嵌入系统提示词，读取 meta-train 成功/失败 trace，一次返回符合数据集样式的完整 samples。本节替代原模板配对与生成策略权重方案。
+
+- G1：每个 episode 仅一次生成请求；LLM 在同一响应中自主分配样本预算、选择策略并写出正文。删除 deterministic、fixed/weights/adaptive、style/delta 模板与策略 EDIT 分支。
+- G2：成功指主检测系统判对，意味着原难度不足以使其犯错，应构造同类型更难案例；失败指主系统判错或弃权，应增加相同失败类型样本及变体，加强训练。两类比例由 LLM 自主决定。
+- G3：系统提示词嵌入可选策略；输入限定 construction 的样本、证据、gold、成功/失败判定、路由/专家/Judge trace 和归因。预算内尽量保留两类 trace；没有某类时不得编造。
+- G4：输出项目标准化 Sample 字段，匹配来源 dataset、语言与体裁。策略理由和来源 trace 位于独立 decisions，不进入检测公开视图。
+- G5：先校验结构、数量、重复、来源与留出泄漏，再由独立 LLM 请求在看不到生成标签的条件下审核证据。UNKNOWN、冲突或无证据样本不进入训练。不做补生成或标签自动纠正。
+- G6：按事件、证据文本和来源隔离 construction/probe；probe 仅用于诊断，probe/meta-test/final-test 均不回流生成请求。可选 --facts 保持链接检查，不再要求数值事实才能生成。
+- G7：原 construction 与合格 samples 一起进入现有 evolve_once，产生检测 Skill 候选；原 DEMSE meta-test 配对与跨 episode 门控决定检测库更新。
+- G8：保存 prompt 指纹、请求、响应、审核、样本和诊断；中断恢复复用已缓存响应与已完成 episode。evaluation-only 写缓存/检查点/报告，不提交检测库或正式生成审计。
+- G9：配置、CLI、报告、tests 和 learn 同步；普通离线流程保持可用，新生成命令必须使用 LLM，离线验收仅通过测试后端替身。
+
+生成 agent 的适应发生在上下文和样本分配上；本轮不更新其模型参数或系统提示词。训练指现有检测 Skill 演化，并非神经网络梯度训练。标签审核是相对输入证据的一致性判断，不能声称开放世界真新闻鉴定。
+
 > 修订说明：本文档在原 EvoFactSkill 规格基础上加入论文提出的 DEMSE（Domain-Episodic Meta-Gated Skill Evolution，域情景元门控技能进化）。DEMSE 是本项目跨域自进化的核心机制；原固定验证门控作为兼容模式和实验基线保留。
 
 ## 背景

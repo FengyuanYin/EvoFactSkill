@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib, json, os, tempfile
+import difflib
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,10 @@ class SkillRepository:
         self.root=Path(root); self.snapshots=self.root/"snapshots"; self.events=self.root/"events.jsonl"; self.active_file=self.root/"active.json"
         self.snapshots.mkdir(parents=True,exist_ok=True); self.root.mkdir(parents=True,exist_ok=True)
     def _atomic_json(self,path:Path,value) -> None:
+        if path == self.active_file and "schema_version" not in value and path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            if previous.get("schema_version") == "active_v2":
+                value = {**previous, "skills": value}
         fd,tmp=tempfile.mkstemp(dir=path.parent,prefix=".tmp-",suffix=".json")
         try:
             with os.fdopen(fd,"w",encoding="utf-8") as stream: json.dump(_jsonable(value),stream,ensure_ascii=False,sort_keys=True,indent=2)
@@ -32,13 +37,61 @@ class SkillRepository:
         event={"schema_version":"skill_event_v1","timestamp":datetime.now(timezone.utc).isoformat(),"action":action,**_jsonable(payload)}
         with self.events.open("a",encoding="utf-8") as stream: stream.write(json.dumps(event,ensure_ascii=False,sort_keys=True)+"\n")
     def _active(self)->dict[str,str]:
-        return json.loads(self.active_file.read_text(encoding="utf-8")) if self.active_file.exists() else {}
+        payload = json.loads(self.active_file.read_text(encoding="utf-8")) if self.active_file.exists() else {}
+        return payload.get("skills", payload) if payload.get("schema_version") == "active_v2" else payload
+
+    def transaction(self, run_id: str) -> dict | None:
+        if not self.active_file.exists():
+            return None
+        payload = json.loads(self.active_file.read_text(encoding="utf-8"))
+        return payload.get("transactions", {}).get(run_id) if payload.get("schema_version") == "active_v2" else None
+
+    def commit_bank(self, skills: list[SkillSpec], *, run_id: str, baseline: list[SkillSpec], audit: dict) -> tuple[str, ...]:
+        """Commit one complete bank and its audit record in the same atomic pointer write."""
+        from evofact.data.domains import skillbank_fingerprint
+        previous = self.transaction(run_id)
+        if previous:
+            if skillbank_fingerprint(list(self.active().values())) != previous["after"]:
+                raise ValueError("repository changed after transaction")
+            return tuple(previous["snapshots"])
+        current = list(self.active().values())
+        if current and skillbank_fingerprint(current) != skillbank_fingerprint(baseline):
+            raise ValueError("repository changed during evaluation")
+        if len({s.name for s in skills}) != len(skills):
+            raise ValueError("duplicate names in atomic bank")
+        active = {}
+        for skill in skills:
+            data = _jsonable(asdict(skill))
+            digest = hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            path = self.snapshots / f"{digest}.json"
+            if not path.exists():
+                self._atomic_json(path, data)
+            active[skill.name] = digest
+        payload = json.loads(self.active_file.read_text(encoding="utf-8")) if self.active_file.exists() else {}
+        transactions = payload.get("transactions", {}) if payload.get("schema_version") == "active_v2" else {}
+        transactions[run_id] = {"before": skillbank_fingerprint(baseline), "after": skillbank_fingerprint(skills), "snapshots": list(active.values()), "audit": audit}
+        self._atomic_json(self.active_file, {"schema_version": "active_v2", "skills": active, "transactions": transactions})
+        return tuple(active.values())
+
+    def diff(self, name: str, snapshot: str | None = None) -> str:
+        current = self._active()[name]
+        if snapshot is None:
+            choices = [event["snapshot"] for event in self.history() if event.get("name") == name and event.get("snapshot") != current]
+            snapshot = choices[-1] if choices else current
+        old = self.get_snapshot(snapshot)
+        if old.name != name:
+            raise ValueError("diff snapshot belongs to another skill")
+        left = json.dumps(_jsonable(asdict(old)), ensure_ascii=False, sort_keys=True, indent=2).splitlines(True)
+        right = json.dumps(_jsonable(asdict(self.get_snapshot(current))), ensure_ascii=False, sort_keys=True, indent=2).splitlines(True)
+        return "".join(difflib.unified_diff(left, right, fromfile=snapshot, tofile=current))
     def save(self,skill:SkillSpec,action:str="stage") -> str:
         data=_jsonable(asdict(skill)); digest=hashlib.sha256(json.dumps(data,sort_keys=True,ensure_ascii=False).encode()).hexdigest(); path=self.snapshots/f"{digest}.json"
         if not path.exists(): self._atomic_json(path,data)
         self._event(action,skill_id=skill.skill_id,snapshot=digest,name=skill.name,status=skill.status)
         return digest
     def get_snapshot(self,digest:str)->SkillSpec:
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("snapshot must be a SHA-256 digest")
         return _skill_from(json.loads((self.snapshots/f"{digest}.json").read_text(encoding="utf-8")))
     def list(self,status:SkillStatus|None=None)->list[SkillSpec]:
         result=[self.get_snapshot(p.stem) for p in sorted(self.snapshots.glob("*.json"))]
@@ -70,4 +123,11 @@ class SkillRepository:
         if skill.name!=name or skill.status==SkillStatus.RETIRED: raise ValueError("invalid rollback target")
         active=self._active(); active[name]=digest; self._atomic_json(self.active_file,active); self._event("rollback",name=name,snapshot=digest)
     def history(self)->list[dict]:
-        return [json.loads(x) for x in self.events.read_text(encoding="utf-8").splitlines()] if self.events.exists() else []
+        events = [json.loads(x) for x in self.events.read_text(encoding="utf-8").splitlines()] if self.events.exists() else []
+        payload = json.loads(self.active_file.read_text(encoding="utf-8")) if self.active_file.exists() else {}
+        if payload.get("schema_version") == "active_v2":
+            for run_id, transaction in payload.get("transactions", {}).items():
+                for digest in transaction["snapshots"]:
+                    skill = self.get_snapshot(digest)
+                    events.append({"action": "meta_promote", "run_id": run_id, "snapshot": digest, "name": skill.name, "skill_id": skill.skill_id, "status": skill.status, "audit": transaction["audit"]})
+        return events
