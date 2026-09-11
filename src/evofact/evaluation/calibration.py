@@ -2,6 +2,9 @@ from evofact.core.models import SampleEvaluation
 
 
 def brier_score(rows: list[SampleEvaluation]) -> float:
+    """函数作用：负责当前模块中的 `brier_score` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`rows`（list[SampleEvaluation]）需符合函数签名约定。
+    输出：返回 `float` 类型结果；校验或下游调用失败时异常向上传递。"""
     if not rows:
         return 0
     values = []
@@ -16,6 +19,9 @@ def brier_score(rows: list[SampleEvaluation]) -> float:
 
 
 def expected_calibration_error(rows: list[SampleEvaluation], bins: int = 10) -> float:
+    """函数作用：负责当前模块中的 `expected_calibration_error` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`rows`（list[SampleEvaluation]）需符合函数签名约定；`bins`（int，默认 `10`）需符合函数签名约定。
+    输出：返回 `float` 类型结果；校验或下游调用失败时异常向上传递。"""
     if not rows:
         return 0
     total = 0

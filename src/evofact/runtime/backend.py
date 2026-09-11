@@ -11,7 +11,16 @@ class BackendResult:
 
 
 class ModelBackend(Protocol):
-    async def analyze(self, sample: dict[str, Any], skill: SkillSpec) -> BackendResult: ...
+    async def analyze(self, sample: dict[str, Any], skill: SkillSpec) -> BackendResult:
+        """函数作用：负责`ModelBackend` 中的 `analyze` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `ModelBackend` 实例；`sample`（dict[str, Any]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
+        输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
+        ...
+
     async def judge(
         self, sample: dict[str, Any], reports: tuple[SpecialistReport, ...], skill: SkillSpec
-    ) -> BackendResult: ...
+    ) -> BackendResult:
+        """函数作用：负责`ModelBackend` 中的 `judge` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `ModelBackend` 实例；`sample`（dict[str, Any]）需符合函数签名约定；`reports`（tuple[SpecialistReport, ...]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
+        输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
+        ...

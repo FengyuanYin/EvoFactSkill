@@ -11,6 +11,9 @@ class Weibo21Adapter:
     name = "weibo21"
 
     def discover(self, root: Path) -> DatasetDiagnostic:
+        """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。
+        输入要求：`self` 应为已初始化的 `Weibo21Adapter` 实例；`root`（Path）需符合函数签名约定。
+        输出：返回 `DatasetDiagnostic` 类型结果；校验或下游调用失败时异常向上传递。"""
         files = tuple(
             str(p)
             for p in sorted(root.glob("*"))
@@ -21,6 +24,9 @@ class Weibo21Adapter:
         )
 
     def _rows(self, path: Path) -> list[dict[str, Any]]:
+        """函数作用：负责`Weibo21Adapter` 中的 `_rows` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `Weibo21Adapter` 实例；`path`（Path）需符合函数签名约定。
+        输出：返回 `list[dict[str, Any]]` 类型结果；校验或下游调用失败时异常向上传递。"""
         if path.suffix.casefold() == ".jsonl":
             return [
                 json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()
@@ -33,6 +39,9 @@ class Weibo21Adapter:
         return value.to_dict(orient="records") if hasattr(value, "to_dict") else list(value)
 
     def load(self, root: Path) -> Iterable[Sample]:
+        """函数作用：从配置的存储位置读取并标准化当前对象负责的数据。
+        输入要求：`self` 应为已初始化的 `Weibo21Adapter` 实例；`root`（Path）需符合函数签名约定。
+        输出：返回迭代器并逐项产出 `Iterable[Sample]` 所约定的结果；读取或解析失败时异常在迭代阶段抛出。"""
         diag = self.discover(root)
         if not diag.available:
             raise FileNotFoundError(diag.message)

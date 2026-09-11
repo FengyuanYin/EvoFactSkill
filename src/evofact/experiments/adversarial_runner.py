@@ -22,12 +22,18 @@ from .runner import _gold
 
 
 def fingerprint(value):
+    """函数作用：负责当前模块中的 `fingerprint` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`value`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
     ).hexdigest()
 
 
 def false_positive_rate(result):
+    """函数作用：负责当前模块中的 `false_positive_rate` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`result`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     real = [row for row in result.per_sample if row.gold == "REAL"]
     if not real:
         raise ValueError("probe must contain true-news examples to measure false positives")
@@ -36,6 +42,9 @@ def false_positive_rate(result):
 
 class AdversarialEvolutionRunner(MetaEvolutionRunner):
     def __init__(self, config, project_root, facts=(), repository=None, *, generation_backend=None):
+        """函数作用：创建并初始化 `AdversarialEvolutionRunner` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；`config`（未显式标注）需符合函数签名约定；`project_root`（未显式标注）需符合函数签名约定；`facts`（未显式标注，默认 `()`）需符合函数签名约定；`repository`（未显式标注，默认 `None`）需符合函数签名约定；`generation_backend`（未显式标注，默认 `None`）需以关键字传入并符合签名约定。
+        输出：返回 `None`；初始化 `AdversarialEvolutionRunner` 的实例状态，构造参数非法时可能抛出异常。"""
         super().__init__(config, project_root, repository)
         self.facts = list(facts)
         self.audit = {}
@@ -46,6 +55,9 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         self.resume_generation = False
 
     async def run(self, samples, *, final_test_domains=(), resume=False, evaluation_only=False):
+        """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；`samples`（未显式标注）需符合函数签名约定；`final_test_domains`（未显式标注，默认 `()`）需以关键字传入并符合签名约定；`resume`（未显式标注，默认 `False`）需以关键字传入并符合签名约定；`evaluation_only`（未显式标注，默认 `False`）需以关键字传入并符合签名约定。
+        输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         if not self.config.generation.enabled:
             raise ValueError("generation.enabled must be true for adversarial-evolve")
         if not final_test_domains:
@@ -101,6 +113,9 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         return outcome
 
     def _config_fingerprint(self):
+        """函数作用：计算当前运行配置的稳定标识 `_config_fingerprint` 所表示的数据，供当前模块后续流程使用。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；无其他显式输入。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         return fingerprint(
             {
                 "schema": "one_shot_llm_v2",
@@ -112,9 +127,15 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         )
 
     def _checkpoint_extra(self):
+        """函数作用：负责`AdversarialEvolutionRunner` 中的 `_checkpoint_extra` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；无其他显式输入。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         return {"generation_schema": "one_shot_llm_v2", "generation_episodes": self.audit}
 
     def _restore_extra(self, saved):
+        """函数作用：从检查点恢复 `_restore_extra` 所表示的数据，供当前模块后续流程使用。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；`saved`（未显式标注）需符合函数签名约定。
+        输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
         self.audit = saved.get("generation_episodes", {})
         if saved and (
             saved.get("generation_schema") != "one_shot_llm_v2"
@@ -123,6 +144,9 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             raise ValueError("generation checkpoint episode audit is incompatible or incomplete")
 
     def _commit_generation(self, path, run_id):
+        """函数作用：原子提交 `_commit_generation` 所表示的数据，供当前模块后续流程使用。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；`path`（未显式标注）需符合函数签名约定；`run_id`（未显式标注）需符合函数签名约定。
+        输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
         current = (
             json.loads(path.read_text(encoding="utf-8"))
             if path.exists()
@@ -139,6 +163,9 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         MetaCheckpointStore(path).save(current)
 
     async def _evolve_episode(self, train_rows, episode, firewall):
+        """函数作用：负责`AdversarialEvolutionRunner` 中的 `_evolve_episode` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；`train_rows`（未显式标注）需符合函数签名约定；`episode`（未显式标注）需符合函数签名约定；`firewall`（未显式标注）需符合函数签名约定。
+        输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         cfg = self.config.generation
         allowed = {s.sample_id for s in train_rows}
         train_facts = [f for f in self.facts if f.sample_id in allowed]

@@ -33,9 +33,15 @@ class FakeJSONBackend:
     """Test double only; no offline generation mode in production."""
 
     def __init__(self):
+        """函数作用：创建并初始化 `FakeJSONBackend` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `FakeJSONBackend` 实例；无其他显式输入。
+        输出：返回 `None`；初始化 `FakeJSONBackend` 的实例状态，构造参数非法时可能抛出异常。"""
         self.calls = []
 
     async def _call(self, system, payload):
+        """函数作用：负责`FakeJSONBackend` 中的 `_call` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `FakeJSONBackend` 实例；`system`（未显式标注）需符合函数签名约定；`payload`（未显式标注）需符合函数签名约定。
+        输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         self.calls.append((system, deepcopy(payload)))
         if system == VERIFIER_SYSTEM:
             return {
@@ -79,6 +85,9 @@ class FakeJSONBackend:
 
 
 def config_for(directory):
+    """函数作用：负责当前模块中的 `config_for` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`directory`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     config = load_config(ROOT / "configs/adversarial_llm.yaml")
     return replace(
         config,
@@ -95,6 +104,9 @@ def config_for(directory):
 
 class GenerationTests(unittest.TestCase):
     def setUp(self):
+        """函数作用：为当前测试用例准备可复用的样本、配置和测试替身。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         self.samples, self.facts = fixture_adversarial_data()
         self.config = GenerationConfig(batch_size=4)
         self.backend = FakeJSONBackend()
@@ -110,6 +122,9 @@ class GenerationTests(unittest.TestCase):
         self.response = asyncio.run(ChallengeGenerator().generate(self.backend, self.request))
 
     def test_only_llm_config_and_success_failure_context(self):
+        """函数作用：验证 `only_llm_config_and_success_failure_context` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with self.assertRaisesRegex(ValueError, "only supports llm"):
             GenerationConfig(proposer="deterministic")
         with self.assertRaises(TypeError):
@@ -121,6 +136,9 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(set(self.response), {"samples", "decisions"})
 
     def test_free_text_survives_and_reviewer_is_blind(self):
+        """函数作用：验证 `free_text_survives_and_reviewer_is_blind` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         checked, rejected = ChallengeVerifier().validate(
             self.response, self.request, config=self.config, existing=self.samples[:4]
         )
@@ -140,6 +158,9 @@ class GenerationTests(unittest.TestCase):
         )
 
     def test_provenance_schema_and_leakage_reject(self):
+        """函数作用：验证 `provenance_schema_and_leakage_reject` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         for field, value in (
             ("dataset", "held-out"),
             ("event_id", "unknown"),
@@ -178,6 +199,9 @@ class GenerationTests(unittest.TestCase):
         self.assertTrue(rejected)
 
     def test_bad_batch_rejected_without_retry(self):
+        """函数作用：验证 `bad_batch_rejected_without_retry` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         for response in (
             {},
             {"samples": [], "decisions": [{}]},
@@ -188,10 +212,16 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(len(self.backend.calls), 1)
 
     def test_unknown_or_wrong_label_not_used_for_training(self):
+        """函数作用：验证 `unknown_or_wrong_label_not_used_for_training` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         checked, _ = ChallengeVerifier().validate(self.response, self.request, config=self.config)
 
         class Reviewer:
             async def _call(self, system, payload):
+                """函数作用：负责`Reviewer` 中的 `_call` 处理，封装调用方需要复用的业务步骤。
+                输入要求：`self` 应为已初始化的 `Reviewer` 实例；`system`（未显式标注）需符合函数签名约定；`payload`（未显式标注）需符合函数签名约定。
+                输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
                 return {
                     "reviews": [
                         {"sample_id": s["sample_id"], "label": "UNKNOWN", "reason": "insufficient"}
@@ -205,6 +235,9 @@ class GenerationTests(unittest.TestCase):
 
         class WrongReviewer:
             async def _call(self, system, payload):
+                """函数作用：负责`WrongReviewer` 中的 `_call` 处理，封装调用方需要复用的业务步骤。
+                输入要求：`self` 应为已初始化的 `WrongReviewer` 实例；`system`（未显式标注）需符合函数签名约定；`payload`（未显式标注）需符合函数签名约定。
+                输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
                 return {
                     "reviews": [
                         {
@@ -222,12 +255,18 @@ class GenerationTests(unittest.TestCase):
 
         class MissingReviewer:
             async def _call(self, system, payload):
+                """函数作用：负责`MissingReviewer` 中的 `_call` 处理，封装调用方需要复用的业务步骤。
+                输入要求：`self` 应为已初始化的 `MissingReviewer` 实例；`system`（未显式标注）需符合函数签名约定；`payload`（未显式标注）需符合函数签名约定。
+                输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
                 return {"reviews": []}
 
         with self.assertRaisesRegex(ValueError, "every sample"):
             asyncio.run(ChallengeVerifier().verify(checked, MissingReviewer()))
 
     def test_split_preserves_groups_without_numeric_facts(self):
+        """函数作用：验证 `split_preserves_groups_without_numeric_facts` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         train = [s for s in self.samples if s.domain != "outer_holdout"]
         construction, probe, facts = split_construction_probe(train, [], fraction=0.4, seed="x")
         self.assertFalse({s.event_id for s in construction} & {s.event_id for s in probe})
@@ -246,6 +285,9 @@ class GenerationTests(unittest.TestCase):
             validate_fact_links(self.samples, [replace(self.facts[0], source="wrong")])
 
     def test_source_snapshot_groups_even_when_evidence_wording_differs(self):
+        """函数作用：验证 `source_snapshot_groups_even_when_evidence_wording_differs` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples = list(self.samples[:8])
         shared = "archive://shared-document"
         for i in (0, 1, 2, 3):
@@ -260,6 +302,9 @@ class GenerationTests(unittest.TestCase):
         )
 
     def test_real_backend_serializes_evidence_dates_without_network(self):
+        """函数作用：验证 `real_backend_serializes_evidence_dates_without_network` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         backend = OpenAICompatibleBackend("https://example.invalid/v1", "test-key", "test-model")
         with patch("evofact.runtime.openai_backend.urllib.request.urlopen") as request:
             request.return_value.__enter__.return_value.read.return_value = json.dumps(
@@ -274,6 +319,9 @@ class GenerationTests(unittest.TestCase):
 
 class AdversarialRunnerTests(unittest.TestCase):
     def test_future_evidence_and_cross_domain_sources_rejected_before_calls(self):
+        """函数作用：验证 `future_evidence_and_cross_domain_sources_rejected_before_calls` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, _ = fixture_adversarial_data()
         when = datetime(2026, 1, 1)
         with tempfile.TemporaryDirectory() as temp:
@@ -310,6 +358,9 @@ class AdversarialRunnerTests(unittest.TestCase):
                 self.assertFalse(backend.calls)
 
     def test_end_to_end_one_call_isolation_and_resume(self):
+        """函数作用：验证 `end_to_end_one_call_isolation_and_resume` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, facts = fixture_adversarial_data()
         with tempfile.TemporaryDirectory() as temp:
             config = config_for(Path(temp))
@@ -361,6 +412,9 @@ class AdversarialRunnerTests(unittest.TestCase):
             self.assertEqual(runner.audit, restored.audit)
 
     def test_commit_audit_idempotent_no_policy_weights(self):
+        """函数作用：验证 `commit_audit_idempotent_no_policy_weights` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, facts = fixture_adversarial_data()
         with tempfile.TemporaryDirectory() as temp:
             config = config_for(Path(temp))
@@ -380,6 +434,9 @@ class AdversarialRunnerTests(unittest.TestCase):
             self.assertEqual(before, config.generation.store_path.read_bytes())
 
     def test_changed_generation_budget_cannot_resume(self):
+        """函数作用：验证 `changed_generation_budget_cannot_resume` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, facts = fixture_adversarial_data()
         with tempfile.TemporaryDirectory() as temp:
             config = config_for(Path(temp))
@@ -402,6 +459,9 @@ class AdversarialRunnerTests(unittest.TestCase):
                 )
 
     def test_cli_samples_without_facts_and_no_mock_fallback(self):
+        """函数作用：验证 `cli_samples_without_facts_and_no_mock_fallback` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, _ = fixture_adversarial_data()
         with tempfile.TemporaryDirectory() as temp:
             config = config_for(Path(temp))
@@ -423,6 +483,9 @@ class AdversarialRunnerTests(unittest.TestCase):
             original = AdversarialEvolutionRunner.__init__
 
             def injected(instance, *args, **kwargs):
+                """函数作用：负责当前模块中的 `injected` 处理，封装调用方需要复用的业务步骤。
+                输入要求：`instance`（未显式标注）需符合函数签名约定；额外位置参数 `*args` 需符合调用方协议；额外关键字参数 `**kwargs` 需为当前接口支持的选项。
+                输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
                 original(instance, *args, **kwargs, generation_backend=FakeJSONBackend())
 
             with (
@@ -435,6 +498,9 @@ class AdversarialRunnerTests(unittest.TestCase):
             self.assertEqual(result["accepted_samples"], 20)
 
     def test_interrupt_after_generation_reuses_response(self):
+        """函数作用：验证 `interrupt_after_generation_reuses_response` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, _ = fixture_adversarial_data()
         with tempfile.TemporaryDirectory() as temp:
             config = config_for(Path(temp))
@@ -462,10 +528,16 @@ class AdversarialRunnerTests(unittest.TestCase):
             self.assertEqual(sum(s == GENERATOR_SYSTEM for s, _ in backend.calls), 5)
 
     def test_all_rejected_falls_back_to_original_construction(self):
+        """函数作用：验证 `all_rejected_falls_back_to_original_construction` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples, _ = fixture_adversarial_data()
 
         class EmptyBackend(FakeJSONBackend):
             async def _call(self, system, payload):
+                """函数作用：负责`EmptyBackend` 中的 `_call` 处理，封装调用方需要复用的业务步骤。
+                输入要求：`self` 应为已初始化的 `EmptyBackend` 实例；`system`（未显式标注）需符合函数签名约定；`payload`（未显式标注）需符合函数签名约定。
+                输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
                 self.calls.append((system, deepcopy(payload)))
                 return {"samples": [], "decisions": []}
 
@@ -481,6 +553,9 @@ class AdversarialRunnerTests(unittest.TestCase):
             self.assertTrue(all(e["metrics"]["accepted"] == 0 for e in runner.audit.values()))
 
     def test_ordinary_config_keeps_generation_disabled(self):
+        """函数作用：验证 `ordinary_config_keeps_generation_disabled` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `AdversarialRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         self.assertFalse(load_config(ROOT / "configs/dry_run.yaml").generation.enabled)
 
 

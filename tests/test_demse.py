@@ -34,6 +34,9 @@ from evofact.validation.transfer import CrossEpisodeAggregator
 
 class DomainEpisodeTests(unittest.TestCase):
     def test_deterministic_disjoint_and_covering(self):
+        """函数作用：验证 `deterministic_disjoint_and_covering` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `DomainEpisodeTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples = fixture_meta_samples()
         source, final = split_source_and_final(samples, ("outer_holdout",))
         config = MetaLearningConfig(enabled=True, episodes=2)
@@ -52,6 +55,9 @@ class DomainEpisodeTests(unittest.TestCase):
         )
 
     def test_leave_one_out_and_invalid_overlap(self):
+        """函数作用：验证 `leave_one_out_and_invalid_overlap` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `DomainEpisodeTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples = fixture_meta_samples()
         source, final = split_source_and_final(samples, ("outer_holdout",))
         config = MetaLearningConfig(enabled=True, strategy="leave_one_domain_out")
@@ -63,6 +69,9 @@ class DomainEpisodeTests(unittest.TestCase):
 
 class FirewallIdentityTests(unittest.TestCase):
     def test_identity_ignores_random_ids(self):
+        """函数作用：验证 `identity_ignores_random_ids` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `FirewallIdentityTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         seed = load_skill_package(
             ROOT / "skills/seeds/claim_decomposition", status=SkillStatus.CANDIDATE
         )
@@ -71,6 +80,9 @@ class FirewallIdentityTests(unittest.TestCase):
         self.assertEqual(candidate_identity(a).fingerprint, candidate_identity(b).fingerprint)
 
     def test_firewall_blocks_heldout_content(self):
+        """函数作用：验证 `firewall_blocks_heldout_content` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `FirewallIdentityTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         samples = fixture_meta_samples()
         source, final = split_source_and_final(samples, ("outer_holdout",))
         episode = DomainEpisodeSampler(MetaLearningConfig(enabled=True), 1).build(
@@ -96,6 +108,9 @@ class FirewallIdentityTests(unittest.TestCase):
 class TransferGateTests(unittest.TestCase):
     @staticmethod
     def result(domain, old_correct, new_correct, fingerprint="c"):
+        """函数作用：负责`TransferGateTests` 中的 `result` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`domain`（未显式标注）需符合函数签名约定；`old_correct`（未显式标注）需符合函数签名约定；`new_correct`（未显式标注）需符合函数签名约定；`fingerprint`（未显式标注，默认 `'c'`）需符合函数签名约定。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         old = evaluate(
             [SampleEvaluation(domain, "FAKE", "FAKE" if old_correct else "REAL", 0.8, domain)]
         )
@@ -108,6 +123,9 @@ class TransferGateTests(unittest.TestCase):
         return EpisodeEvaluation(domain, fingerprint, "p", old, new, delta, {domain: delta})
 
     def test_aggregate_and_generalize(self):
+        """函数作用：验证 `aggregate_and_generalize` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `TransferGateTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         utility = CrossEpisodeAggregator(1).aggregate(
             [self.result(x, False, True) for x in ("a", "b", "c")]
         )["c"]
@@ -119,11 +137,17 @@ class TransferGateTests(unittest.TestCase):
         self.assertGreater(utility.confidence_interval[0], 0)
 
     def test_no_cross_episode_aggregation_ablation(self):
+        """函数作用：验证 `no_cross_episode_aggregation_ablation` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `TransferGateTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         rows = [self.result(x, False, True) for x in ("a", "b", "c")]
         utility = CrossEpisodeAggregator(1, aggregate_across_episodes=False).aggregate(rows)["c"]
         self.assertEqual(utility.episode_count, 1)
 
     def test_specialize_and_reject(self):
+        """函数作用：验证 `specialize_and_reject` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `TransferGateTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         utility = TransferUtility(
             "x",
             3,
@@ -151,6 +175,9 @@ class TransferGateTests(unittest.TestCase):
         self.assertEqual(blocked.disposition, "rejected")
 
     def test_pareto_review_retire_and_ablation_switches(self):
+        """函数作用：验证 `pareto_review_retire_and_ablation_switches` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `TransferGateTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         pareto = TransferUtility(
             "p",
             3,
@@ -236,6 +263,9 @@ class TransferGateTests(unittest.TestCase):
 
 class MetaCheckpointAndRunnerTests(unittest.TestCase):
     def test_checkpoint_fingerprint_guard(self):
+        """函数作用：验证 `checkpoint_fingerprint_guard` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `MetaCheckpointAndRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with tempfile.TemporaryDirectory() as directory:
             store = MetaCheckpointStore(Path(directory) / "c.json")
             store.save(
@@ -248,6 +278,9 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
                 store.load(config_fingerprint="x", data_fingerprint="b", skillbank_snapshot_id="c")
 
     def test_end_to_end_evaluation_only(self):
+        """函数作用：验证 `end_to_end_evaluation_only` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `MetaCheckpointAndRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         config = load_config(ROOT / "configs/demse_dry_run.yaml")
         with tempfile.TemporaryDirectory() as directory:
             meta = replace(
@@ -276,6 +309,9 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
             self.assertEqual(outcome.episode_results, resumed.episode_results)
 
     def test_atomic_commit_uses_repository_snapshot(self):
+        """函数作用：验证 `atomic_commit_uses_repository_snapshot` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `MetaCheckpointAndRunnerTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         config = load_config(ROOT / "configs/demse_dry_run.yaml")
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

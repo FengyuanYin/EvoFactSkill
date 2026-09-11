@@ -6,6 +6,9 @@ LABELS = ("REAL", "FAKE")
 
 
 def compute_metrics(rows: list[SampleEvaluation]) -> dict[str, float]:
+    """函数作用：计算包含弃权在分母中的分类、覆盖率、风险和成本指标。
+    输入要求：`rows`（list[SampleEvaluation]）需符合函数签名约定。
+    输出：返回 `dict[str, float]` 类型结果；校验或下游调用失败时异常向上传递。"""
     n = len(rows)
     covered = [r for r in rows if r.predicted in LABELS]
     correct = sum(r.gold == r.predicted for r in rows)
@@ -30,6 +33,9 @@ def compute_metrics(rows: list[SampleEvaluation]) -> dict[str, float]:
 
 
 def grouped_metrics(rows: list[SampleEvaluation], field: str) -> dict[str, dict[str, float]]:
+    """函数作用：负责当前模块中的 `grouped_metrics` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`rows`（list[SampleEvaluation]）需符合函数签名约定；`field`（str）需符合函数签名约定。
+    输出：返回 `dict[str, dict[str, float]]` 类型结果；校验或下游调用失败时异常向上传递。"""
     groups = defaultdict(list)
     for row in rows:
         groups[str(getattr(row, field) or "unknown")].append(row)

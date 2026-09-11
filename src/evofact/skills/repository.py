@@ -13,6 +13,9 @@ from evofact.core.models import SkillKind, SkillScope, SkillSpec, SkillStatus, T
 
 
 def _jsonable(value):
+    """函数作用：负责当前模块中的 `_jsonable` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`value`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -23,6 +26,9 @@ def _jsonable(value):
 
 
 def _skill_from(data: dict) -> SkillSpec:
+    """函数作用：负责当前模块中的 `_skill_from` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`data`（dict）需符合函数签名约定。
+    输出：返回 `SkillSpec` 类型结果；校验或下游调用失败时异常向上传递。"""
     data = dict(data)
     data["kind"] = SkillKind(data["kind"])
     data["status"] = SkillStatus(data["status"])
@@ -34,6 +40,9 @@ def _skill_from(data: dict) -> SkillSpec:
 
 class SkillRepository:
     def __init__(self, root: Path):
+        """函数作用：创建并初始化 `SkillRepository` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`root`（Path）需符合函数签名约定。
+        输出：返回 `None`；初始化 `SkillRepository` 的实例状态，构造参数非法时可能抛出异常。"""
         self.root = Path(root)
         self.snapshots = self.root / "snapshots"
         self.events = self.root / "events.jsonl"
@@ -42,6 +51,9 @@ class SkillRepository:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _atomic_json(self, path: Path, value) -> None:
+        """函数作用：负责`SkillRepository` 中的 `_atomic_json` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`path`（Path）需符合函数签名约定；`value`（未显式标注）需符合函数签名约定。
+        输出：返回 `None`；可能按函数职责修改对象状态或持久化文件。"""
         if path == self.active_file and "schema_version" not in value and path.exists():
             previous = json.loads(path.read_text(encoding="utf-8"))
             if previous.get("schema_version") == "active_v2":
@@ -56,6 +68,9 @@ class SkillRepository:
                 os.unlink(tmp)
 
     def _event(self, action: str, **payload) -> None:
+        """函数作用：负责`SkillRepository` 中的 `_event` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`action`（str）需符合函数签名约定；额外关键字参数 `**payload` 需为当前接口支持的选项。
+        输出：返回 `None`；可能按函数职责修改对象状态或持久化文件。"""
         event = {
             "schema_version": "skill_event_v1",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -66,6 +81,9 @@ class SkillRepository:
             stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _active(self) -> dict[str, str]:
+        """函数作用：负责`SkillRepository` 中的 `_active` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；无其他显式输入。
+        输出：返回 `dict[str, str]` 类型结果；校验或下游调用失败时异常向上传递。"""
         payload = (
             json.loads(self.active_file.read_text(encoding="utf-8"))
             if self.active_file.exists()
@@ -78,6 +96,9 @@ class SkillRepository:
         )
 
     def transaction(self, run_id: str) -> dict | None:
+        """函数作用：负责`SkillRepository` 中的 `transaction` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`run_id`（str）需符合函数签名约定。
+        输出：返回 `dict | None` 类型结果；校验或下游调用失败时异常向上传递。"""
         if not self.active_file.exists():
             return None
         payload = json.loads(self.active_file.read_text(encoding="utf-8"))
@@ -90,7 +111,9 @@ class SkillRepository:
     def commit_bank(
         self, skills: list[SkillSpec], *, run_id: str, baseline: list[SkillSpec], audit: dict
     ) -> tuple[str, ...]:
-        """Commit one complete bank and its audit record in the same atomic pointer write."""
+        """函数作用：通过一次原子指针写入提交完整技能库及其审计记录。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`skills`（list[SkillSpec]）需符合函数签名约定；`run_id`（str）需以关键字传入并符合签名约定；`baseline`（list[SkillSpec]）需以关键字传入并符合签名约定；`audit`（dict）需以关键字传入并符合签名约定。
+        输出：返回 `tuple[str, ...]` 类型结果；校验或下游调用失败时异常向上传递。"""
         from evofact.data.domains import skillbank_fingerprint
 
         previous = self.transaction(run_id)
@@ -134,6 +157,9 @@ class SkillRepository:
         return tuple(active.values())
 
     def diff(self, name: str, snapshot: str | None = None) -> str:
+        """函数作用：负责`SkillRepository` 中的 `diff` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`name`（str）需符合函数签名约定；`snapshot`（str | None，默认 `None`）需符合函数签名约定。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         current = self._active()[name]
         if snapshot is None:
             choices = [
@@ -157,6 +183,9 @@ class SkillRepository:
         return "".join(difflib.unified_diff(left, right, fromfile=snapshot, tofile=current))
 
     def save(self, skill: SkillSpec, action: str = "stage") -> str:
+        """函数作用：将当前对象负责的数据安全写入持久化存储。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`skill`（SkillSpec）需符合函数签名约定；`action`（str，默认 `'stage'`）需符合函数签名约定。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         data = _jsonable(asdict(skill))
         digest = hashlib.sha256(
             json.dumps(data, sort_keys=True, ensure_ascii=False).encode()
@@ -170,6 +199,9 @@ class SkillRepository:
         return digest
 
     def get_snapshot(self, digest: str) -> SkillSpec:
+        """函数作用：负责`SkillRepository` 中的 `get_snapshot` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`digest`（str）需符合函数签名约定。
+        输出：返回 `SkillSpec` 类型结果；校验或下游调用失败时异常向上传递。"""
         if (
             not isinstance(digest, str)
             or len(digest) != 64
@@ -181,13 +213,22 @@ class SkillRepository:
         )
 
     def list(self, status: SkillStatus | None = None) -> list[SkillSpec]:
+        """函数作用：负责`SkillRepository` 中的 `list` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`status`（SkillStatus | None，默认 `None`）需符合函数签名约定。
+        输出：返回 `list[SkillSpec]` 类型结果；校验或下游调用失败时异常向上传递。"""
         result = [self.get_snapshot(p.stem) for p in sorted(self.snapshots.glob("*.json"))]
         return [s for s in result if status is None or s.status == status]
 
     def active(self) -> dict[str, SkillSpec]:
+        """函数作用：负责`SkillRepository` 中的 `active` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；无其他显式输入。
+        输出：返回 `dict[str, SkillSpec]` 类型结果；校验或下游调用失败时异常向上传递。"""
         return {n: self.get_snapshot(d) for n, d in self._active().items()}
 
     def promote(self, skill: SkillSpec) -> str:
+        """函数作用：负责`SkillRepository` 中的 `promote` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`skill`（SkillSpec）需符合函数签名约定。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         if skill.status == SkillStatus.RETIRED:
             raise ValueError("cannot promote retired skill")
         promoted = replace(skill, status=SkillStatus.ACTIVE)
@@ -198,6 +239,9 @@ class SkillRepository:
         return digest
 
     def promote_batch(self, skills: list[SkillSpec]) -> list[str]:
+        """函数作用：负责`SkillRepository` 中的 `promote_batch` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`skills`（list[SkillSpec]）需符合函数签名约定。
+        输出：返回 `list[str]` 类型结果；校验或下游调用失败时异常向上传递。"""
         promoted = []
         digests = []
         for skill in skills:
@@ -229,6 +273,9 @@ class SkillRepository:
         return digests
 
     def freeze(self, name: str) -> str:
+        """函数作用：负责`SkillRepository` 中的 `freeze` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`name`（str）需符合函数签名约定。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         skill = self.active()[name]
         frozen = replace(skill, status=SkillStatus.FROZEN)
         digest = self.save(frozen, "freeze")
@@ -238,6 +285,9 @@ class SkillRepository:
         return digest
 
     def retire(self, name: str, reason: str) -> str:
+        """函数作用：负责`SkillRepository` 中的 `retire` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`name`（str）需符合函数签名约定；`reason`（str）需符合函数签名约定。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         skill = self.active()[name]
         retired = replace(skill, status=SkillStatus.RETIRED)
         digest = self.save(retired, "retire")
@@ -248,6 +298,9 @@ class SkillRepository:
         return digest
 
     def rollback(self, name: str, digest: str) -> None:
+        """函数作用：负责`SkillRepository` 中的 `rollback` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；`name`（str）需符合函数签名约定；`digest`（str）需符合函数签名约定。
+        输出：返回 `None`；可能按函数职责修改对象状态或持久化文件。"""
         skill = self.get_snapshot(digest)
         if skill.name != name or skill.status == SkillStatus.RETIRED:
             raise ValueError("invalid rollback target")
@@ -257,6 +310,9 @@ class SkillRepository:
         self._event("rollback", name=name, snapshot=digest)
 
     def history(self) -> list[dict]:
+        """函数作用：负责`SkillRepository` 中的 `history` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `SkillRepository` 实例；无其他显式输入。
+        输出：返回 `list[dict]` 类型结果；校验或下游调用失败时异常向上传递。"""
         events = (
             [json.loads(x) for x in self.events.read_text(encoding="utf-8").splitlines()]
             if self.events.exists()

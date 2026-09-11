@@ -6,6 +6,9 @@ from .manifests import sample_fingerprint
 
 
 def detect_leakage(samples: list[Sample], manifest: DataManifest) -> list[str]:
+    """函数作用：负责当前模块中的 `detect_leakage` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`samples`（list[Sample]）需符合函数签名约定；`manifest`（DataManifest）需符合函数签名约定。
+    输出：返回 `list[str]` 类型结果；校验或下游调用失败时异常向上传递。"""
     by_id = {s.sample_id: s for s in samples}
     split_of = {}
     errors = []

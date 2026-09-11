@@ -17,6 +17,9 @@ ARITY = {
 def execute(
     repo: SkillRepository, proposal: EvolutionProposal, *, rollback_snapshot: str | None = None
 ) -> list[str]:
+    """函数作用：负责当前模块中的 `execute` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`repo`（SkillRepository）需符合函数签名约定；`proposal`（EvolutionProposal）需符合函数签名约定；`rollback_snapshot`（str | None，默认 `None`）需以关键字传入并符合签名约定。
+    输出：返回 `list[str]` 类型结果；校验或下游调用失败时异常向上传递。"""
     targets, candidates = len(proposal.target_skill_ids), len(proposal.candidate_skills)
     min_targets, min_candidates = ARITY[proposal.operation]
     if targets < min_targets or candidates < min_candidates:

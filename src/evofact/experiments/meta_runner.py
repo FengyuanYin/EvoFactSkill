@@ -37,6 +37,9 @@ from .runner import ExperimentRunner
 
 
 def fixture_meta_samples() -> list[Sample]:
+    """函数作用：构造离线测试夹具 `fixture_meta_samples` 所表示的数据，供当前模块后续流程使用。
+    输入要求：无显式输入；若函数位于另一函数内部，则依赖已初始化的外层变量。
+    输出：返回 `list[Sample]` 类型结果；校验或下游调用失败时异常向上传递。"""
     domains = ("health", "politics", "science", "finance", "disaster", "outer_holdout")
     rows = []
     for index, domain in enumerate(domains):
@@ -72,6 +75,9 @@ class MetaEvolutionRunner:
     def __init__(
         self, config: AppConfig, project_root: Path, repository: SkillRepository | None = None
     ):
+        """函数作用：创建并初始化 `MetaEvolutionRunner` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`config`（AppConfig）需符合函数签名约定；`project_root`（Path）需符合函数签名约定；`repository`（SkillRepository | None，默认 `None`）需符合函数签名约定。
+        输出：返回 `None`；初始化 `MetaEvolutionRunner` 的实例状态，构造参数非法时可能抛出异常。"""
         self.config = config
         self.root = Path(project_root)
         self.base = ExperimentRunner(config, self.root)
@@ -89,7 +95,10 @@ class MetaEvolutionRunner:
         resume: bool = False,
         evaluation_only: bool = False,
     ) -> MetaEvolutionOutcome:
-        if not self.config.meta_learning.enabled:
+        """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`samples`（list[Sample]）需符合函数签名约定；`final_test_domains`（tuple[str, ...]，默认 `()`）需以关键字传入并符合签名约定；`resume`（bool，默认 `False`）需以关键字传入并符合签名约定；`evaluation_only`（bool，默认 `False`）需以关键字传入并符合签名约定。
+        输出：异步返回 `MetaEvolutionOutcome` 类型结果；校验或下游调用失败时异常向上传递。"""
+        if not self.config.meta_learning.enabled:  # 检查元学习功能是否开启
             raise ValueError("meta_learning.enabled must be true for DEMSE")
         source_domains, final_domains = split_source_and_final(samples, final_test_domains)
         from evofact.data.domains import effective_domain
@@ -301,6 +310,9 @@ class MetaEvolutionRunner:
         return outcome
 
     async def _evolve_episode(self, train_rows, episode, firewall):
+        """函数作用：负责`MetaEvolutionRunner` 中的 `_evolve_episode` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`train_rows`（未显式标注）需符合函数签名约定；`episode`（未显式标注）需符合函数签名约定；`firewall`（未显式标注）需符合函数签名约定。
+        输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         return await self.base.evolve_once(
             train_rows,
             generation_guard=lambda traces, reports: firewall.build_generation_view(
@@ -309,14 +321,23 @@ class MetaEvolutionRunner:
         )
 
     def _checkpoint_extra(self):
+        """函数作用：负责`MetaEvolutionRunner` 中的 `_checkpoint_extra` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；无其他显式输入。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         return {}
 
     def _restore_extra(self, saved):
+        """函数作用：从检查点恢复 `_restore_extra` 所表示的数据，供当前模块后续流程使用。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`saved`（未显式标注）需符合函数签名约定。
+        输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
         pass
 
     def _commit(
         self, decisions, proposals: dict[str, EvolutionProposal], run_id: str
     ) -> tuple[str, ...]:
+        """函数作用：原子提交 `_commit` 所表示的数据，供当前模块后续流程使用。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`decisions`（未显式标注）需符合函数签名约定；`proposals`（dict[str, EvolutionProposal]）需符合函数签名约定；`run_id`（str）需符合函数签名约定。
+        输出：返回 `tuple[str, ...]` 类型结果；校验或下游调用失败时异常向上传递。"""
         if self.repository is None:
             return ()
         previous = self.repository.transaction(run_id)
@@ -361,15 +382,24 @@ class MetaEvolutionRunner:
         )
 
     def _config_fingerprint(self) -> str:
+        """函数作用：计算当前运行配置的稳定标识 `_config_fingerprint` 所表示的数据，供当前模块后续流程使用。
+        输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；无其他显式输入。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         payload = json.dumps(asdict(self.config), sort_keys=True, default=str)
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _apply_candidate(skills: list[SkillSpec], proposal: EvolutionProposal) -> list[SkillSpec]:
+    """函数作用：负责当前模块中的 `_apply_candidate` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`skills`（list[SkillSpec]）需符合函数签名约定；`proposal`（EvolutionProposal）需符合函数签名约定。
+    输出：返回 `list[SkillSpec]` 类型结果；校验或下游调用失败时异常向上传递。"""
     return apply_candidate(skills, proposal)
 
 
 def _metric_deltas(old: dict[str, float], new: dict[str, float]) -> dict[str, float]:
+    """函数作用：负责当前模块中的 `_metric_deltas` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`old`（dict[str, float]）需符合函数签名约定；`new`（dict[str, float]）需符合函数签名约定。
+    输出：返回 `dict[str, float]` 类型结果；校验或下游调用失败时异常向上传递。"""
     return {
         key: float(new.get(key, 0.0)) - float(old.get(key, 0.0))
         for key in sorted(set(old) | set(new))
@@ -377,6 +407,9 @@ def _metric_deltas(old: dict[str, float], new: dict[str, float]) -> dict[str, fl
 
 
 def _evaluation_from(data: dict) -> EvaluationResult:
+    """函数作用：负责当前模块中的 `_evaluation_from` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`data`（dict）需符合函数签名约定。
+    输出：返回 `EvaluationResult` 类型结果；校验或下游调用失败时异常向上传递。"""
     rows = tuple(SampleEvaluation(**item) for item in data.get("per_sample", ()))
     usage = UsageRecord(**data.get("usage", {}))
     cis = {key: tuple(value) for key, value in data.get("confidence_intervals", {}).items()}
@@ -391,6 +424,9 @@ def _evaluation_from(data: dict) -> EvaluationResult:
 
 
 def _episode_result_from(data: dict) -> EpisodeEvaluation:
+    """函数作用：负责当前模块中的 `_episode_result_from` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`data`（dict）需符合函数签名约定。
+    输出：返回 `EpisodeEvaluation` 类型结果；校验或下游调用失败时异常向上传递。"""
     return EpisodeEvaluation(
         data["episode_id"],
         data["candidate_fingerprint"],
@@ -405,6 +441,9 @@ def _episode_result_from(data: dict) -> EpisodeEvaluation:
 
 
 def _proposal_from(data: dict) -> EvolutionProposal:
+    """函数作用：负责当前模块中的 `_proposal_from` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`data`（dict）需符合函数签名约定。
+    输出：返回 `EvolutionProposal` 类型结果；校验或下游调用失败时异常向上传递。"""
     candidates = []
     for raw in data.get("candidate_skills", ()):
         scope = SkillScope(**{key: tuple(value) for key, value in raw.get("scope", {}).items()})

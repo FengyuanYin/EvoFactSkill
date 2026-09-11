@@ -9,11 +9,17 @@ from .prompts import GENERATOR_SYSTEM
 
 
 def json_value(value):
+    """函数作用：负责当前模块中的 `json_value` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`value`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
 class ChallengeGenerator:
     def build_request(self, samples, traces, attributions, *, config, episode_id):
+        """函数作用：把 construction 样本、成功/失败轨迹和归因整理成单次生成请求。
+        输入要求：`self` 应为已初始化的 `ChallengeGenerator` 实例；`samples`（未显式标注）需符合函数签名约定；`traces`（未显式标注）需符合函数签名约定；`attributions`（未显式标注）需符合函数签名约定；`config`（未显式标注）需以关键字传入并符合签名约定；`episode_id`（未显式标注）需以关键字传入并符合签名约定。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         by_id = {s.sample_id: s for s in samples}
         reports = {a.trace_id: a for a in attributions}
         success, failure = [], []
@@ -51,5 +57,8 @@ class ChallengeGenerator:
         )
 
     async def generate(self, backend, request):
+        """函数作用：调用 LLM 一次，在同一响应中取得完整样本和策略决策。
+        输入要求：`self` 应为已初始化的 `ChallengeGenerator` 实例；`backend`（未显式标注）需符合函数签名约定；`request`（未显式标注）需符合函数签名约定。
+        输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         # No proposal stage, deterministic fallback, text renderer or repair call.
         return await backend._call(GENERATOR_SYSTEM, request)

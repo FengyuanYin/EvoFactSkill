@@ -6,6 +6,9 @@ from evofact.core.models import MetaGateDecision, TransferUtility
 
 class MetaValidationGate:
     def __init__(self, config: MetaLearningConfig):
+        """函数作用：创建并初始化 `MetaValidationGate` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `MetaValidationGate` 实例；`config`（MetaLearningConfig）需符合函数签名约定。
+        输出：返回 `None`；初始化 `MetaValidationGate` 的实例状态，构造参数非法时可能抛出异常。"""
         self.config = config
 
     def decide(
@@ -15,6 +18,9 @@ class MetaValidationGate:
         safety_level: str = "safe",
         retirement_candidate: bool = False,
     ) -> MetaGateDecision:
+        """函数作用：根据当前指标、安全结果和门控阈值产生候选处置决策。
+        输入要求：`self` 应为已初始化的 `MetaValidationGate` 实例；`utility`（TransferUtility）需符合函数签名约定；`safety_level`（str，默认 `'safe'`）需以关键字传入并符合签名约定；`retirement_candidate`（bool，默认 `False`）需以关键字传入并符合签名约定。
+        输出：返回 `MetaGateDecision` 类型结果；校验或下游调用失败时异常向上传递。"""
         if safety_level == "blocked":
             return self._decision(
                 utility, False, "rejected", (), ("security scan blocked candidate",)
@@ -83,6 +89,9 @@ class MetaValidationGate:
         domains: tuple[str, ...],
         failures: tuple[str, ...],
     ) -> MetaGateDecision:
+        """函数作用：负责`MetaValidationGate` 中的 `_decision` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`utility`（TransferUtility）需符合函数签名约定；`accepted`（bool）需符合函数签名约定；`disposition`（str）需符合函数签名约定；`domains`（tuple[str, ...]）需符合函数签名约定；`failures`（tuple[str, ...]）需符合函数签名约定。
+        输出：返回 `MetaGateDecision` 类型结果；校验或下游调用失败时异常向上传递。"""
         reason = (
             "all cross-domain promotion constraints passed" if not failures else "; ".join(failures)
         )

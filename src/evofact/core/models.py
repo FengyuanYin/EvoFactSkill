@@ -24,6 +24,9 @@ from typing import Any, Literal
 
 class ModelMixin:
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
+        """函数作用：负责`ModelMixin` 中的 `model_dump` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `ModelMixin` 实例；`mode`（str，默认 `'python'`）需符合函数签名约定。
+        输出：返回 `dict[str, Any]` 类型结果；校验或下游调用失败时异常向上传递。"""
         del mode
         return asdict(self)
 
@@ -52,7 +55,11 @@ class Sample(ModelMixin):
 
     def public_view(
         self,
-    ) -> dict[str, Any]:  # 返回经过敏感信息脱敏（redact_sensitive）后的字典视图，用于展示或日志
+    ) -> dict[str, Any]:
+        """函数作用：负责`Sample` 中的 `public_view` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `Sample` 实例；无其他显式输入。
+        输出：返回 `dict[str, Any]` 类型结果；校验或下游调用失败时异常向上传递。"""
+        # 返回经过敏感信息脱敏（redact_sensitive）后的字典视图，用于展示或日志
         from .redaction import redact_sensitive
 
         return redact_sensitive(self.model_dump())
@@ -72,6 +79,9 @@ class DataManifest(
     schema_version: str = "data_manifest_v1"
 
     def __post_init__(self) -> None:
+        """函数作用：在 `DataManifest` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `DataManifest` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         groups = [
             set(self.train_ids),
             set(self.evolution_validation_ids),
@@ -162,6 +172,9 @@ class RoutingDecision(
     fallback_used: bool = False
 
     def __post_init__(self) -> None:
+        """函数作用：在 `RoutingDecision` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `RoutingDecision` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be in [0, 1]")
 
@@ -325,6 +338,9 @@ class DomainEpisode(
     schema_version: str = "domain_episode_v1"
 
     def __post_init__(self) -> None:
+        """函数作用：在 `DomainEpisode` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `DomainEpisode` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         train, test, final = (
             set(self.meta_train_domains),
             set(self.meta_test_domains),
@@ -397,6 +413,9 @@ class TransferUtility(
     schema_version: str = "transfer_utility_v1"
 
     def __post_init__(self) -> None:
+        """函数作用：在 `TransferUtility` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `TransferUtility` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if self.episode_count < 1:
             raise ValueError("transfer utility requires at least one episode")
         if not 0 <= self.success_rate <= 1 or not 0 <= self.negative_transfer_rate <= 1:
@@ -436,6 +455,9 @@ class MetaCheckpoint(
     schema_version: str = "meta_checkpoint_v1"
 
     def __post_init__(self) -> None:
+        """函数作用：在 `MetaCheckpoint` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `MetaCheckpoint` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if not set(self.completed_episode_ids) <= set(self.planned_episode_ids):
             raise ValueError("completed episodes must be planned")
 

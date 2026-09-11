@@ -21,6 +21,9 @@ from evofact.skills.repository import SkillRepository
 
 
 def _json(value):
+    """函数作用：负责当前模块中的 `_json` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`value`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -30,7 +33,9 @@ def _json(value):
 
 
 def build_parser():
-    """创建顶层命令行解析器及其所有子命令。"""
+    """函数作用：创建顶层命令行解析器及其所有子命令。
+    输入要求：无显式输入；若函数位于另一函数内部，则依赖已初始化的外层变量。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     parser = argparse.ArgumentParser(prog="evofact")
 
     # 全局参数需要放在所选子命令之前。
@@ -107,6 +112,9 @@ def build_parser():
 
 
 async def _run(args):
+    """函数作用：根据命令行子命令装配数据、运行器和报告流程，并分派实际任务。
+    输入要求：`args`（未显式标注）需符合函数签名约定。
+    输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     root = Path(__file__).resolve().parents[2]
     config = load_config(root / args.config if not Path(args.config).is_absolute() else args.config)
     runner = ExperimentRunner(config, root)
@@ -136,6 +144,9 @@ async def _run(args):
             raise ValueError("dataset has no samples")
 
     def select(ids):
+        """函数作用：根据样本、技能范围、历史效用和预算选择本次调用的技能。
+        输入要求：`ids`（未显式标注）需符合函数签名约定。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         chosen = [s for s in (all_samples or []) if s.sample_id in set(ids)]
         return chosen[: args.limit] if args.limit > 0 else chosen
 
@@ -331,6 +342,9 @@ async def _run(args):
 
 
 def main(argv=None):
+    """函数作用：作为命令行入口解析参数、运行异步任务并输出 JSON 结果。
+    输入要求：`argv`（未显式标注，默认 `None`）需符合函数签名约定。
+    输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
     args = build_parser().parse_args(argv)
     print(_json(asyncio.run(_run(args))))
 

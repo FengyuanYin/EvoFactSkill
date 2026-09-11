@@ -1,3 +1,7 @@
+"""
+轻量级的 Skill 资源安全扫描器
+"""
+
 import ast
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -24,6 +28,9 @@ class SafetyReport:
 
 
 def scan_resources(resources: dict[str, str]) -> SafetyReport:
+    """函数作用：扫描并评估 `scan_resources` 所表示的数据，供当前模块后续流程使用。
+    输入要求：`resources`（dict[str, str]）需符合函数签名约定。
+    输出：返回 `SafetyReport` 类型结果；校验或下游调用失败时异常向上传递。"""
     findings = []
     has_scripts = False
     for rel, source in resources.items():
