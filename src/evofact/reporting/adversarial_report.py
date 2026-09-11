@@ -5,6 +5,9 @@ from .meta_report import write_meta_report
 
 
 def write_adversarial_report(path, outcome, audit, config):
+    """函数作用：输出对抗生成审计、逐 episode 样本和对应 DEMSE 报告。
+    输入要求：`path`（未显式标注）需符合函数签名约定；`outcome`（未显式标注）需符合函数签名约定；`audit`（未显式标注）需符合函数签名约定；`config`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     path = Path(path)
     paths = write_meta_report(path, outcome)
     # Each episode stays separate: never pool synthetic data across held-out domains.

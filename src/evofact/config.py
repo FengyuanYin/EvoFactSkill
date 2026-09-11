@@ -18,6 +18,9 @@ class GateConfig:  # 验证门配置
     max_cost_ratio: float = 1.5
 
     def __post_init__(self) -> None:
+        """函数作用：在 `GateConfig` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `GateConfig` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if self.repeats < 2 or not 0 <= self.min_coverage <= 1:
             raise ValueError("invalid gate configuration")
 
@@ -43,6 +46,9 @@ class MetaLearningConfig:  # 元学习配置
     checkpoint_path: Path = Path("outputs/demse/checkpoint.json")
 
     def __post_init__(self) -> None:
+        """函数作用：在 `MetaLearningConfig` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `MetaLearningConfig` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if self.strategy not in {"repeated_holdout", "leave_one_domain_out"}:
             raise ValueError("invalid meta-learning strategy")
         if self.episodes < 1 or self.meta_test_domain_count < 1:
@@ -74,12 +80,18 @@ class AppConfig:  # runner 配置
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
     def __post_init__(self) -> None:
+        """函数作用：在 `AppConfig` 数据类初始化后检查字段之间的业务约束。
+        输入要求：`self` 应为已初始化的 `AppConfig` 实例；无其他显式输入。
+        输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if self.backend not in {"mock", "openai-compatible"}:
             raise ValueError("backend must be mock or openai-compatible")
         if self.max_skills_per_item < 1:
             raise ValueError("max_skills_per_item must be positive")
 
     def resolved_api_key(self) -> str:
+        """函数作用：负责`AppConfig` 中的 `resolved_api_key` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `AppConfig` 实例；无其他显式输入。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         value = os.getenv(self.api_key_env, "")
         if not value:
             raise ValueError(f"missing API key environment variable: {self.api_key_env}")
@@ -87,6 +99,9 @@ class AppConfig:  # runner 配置
 
 
 def _scalar(value: str) -> Any:
+    """函数作用：负责当前模块中的 `_scalar` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`value`（str）需符合函数签名约定。
+    输出：返回 `Any` 类型结果；校验或下游调用失败时异常向上传递。"""
     value = value.strip()
     if value.casefold() in {"true", "false"}:
         return value.casefold() == "true"
@@ -99,6 +114,9 @@ def _scalar(value: str) -> Any:
 
 
 def _simple_yaml(text: str) -> dict[str, Any]:
+    """函数作用：负责当前模块中的 `_simple_yaml` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`text`（str）需符合函数签名约定。
+    输出：返回 `dict[str, Any]` 类型结果；校验或下游调用失败时异常向上传递。"""
     root: dict[str, Any] = {}
     stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
     for raw in text.splitlines():
@@ -121,6 +139,9 @@ def _simple_yaml(text: str) -> dict[str, Any]:
 
 
 def load_config(path: str | Path) -> AppConfig:
+    """函数作用：读取简化 YAML 配置并构造经过校验的应用配置对象。
+    输入要求：`path`（str | Path）需符合函数签名约定。
+    输出：返回 `AppConfig` 类型结果；校验或下游调用失败时异常向上传递。"""
     raw = _simple_yaml(Path(path).read_text(encoding="utf-8"))
     gate = GateConfig(**raw.pop("gate", {}))
     generation_raw = raw.pop("generation", {})

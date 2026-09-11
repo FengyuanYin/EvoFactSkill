@@ -5,6 +5,9 @@ from collections import defaultdict
 
 
 def split_construction_probe(samples, facts, *, fraction: float, seed: str):
+    """函数作用：按事件、证据正文和来源分组，将 meta-train 隔离为 construction 与 probe。
+    输入要求：`samples`（未显式标注）需符合函数签名约定；`facts`（未显式标注）需符合函数签名约定；`fraction`（float）需以关键字传入并符合签名约定；`seed`（str）需以关键字传入并符合签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     by_id = {s.sample_id: s for s in samples}
     if len(by_id) != len(samples):
         raise ValueError("duplicate training sample IDs")
@@ -12,6 +15,9 @@ def split_construction_probe(samples, facts, *, fraction: float, seed: str):
     parent = {s.sample_id: s.sample_id for s in samples}
 
     def find(key):
+        """函数作用：负责当前模块中的 `find` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`key`（未显式标注）需符合函数签名约定。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         while parent[key] != key:
             parent[key] = parent[parent[key]]
             key = parent[key]

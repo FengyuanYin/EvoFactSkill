@@ -14,6 +14,9 @@ from .domains import data_fingerprint, domain_index
 
 class DomainEpisodeSampler:
     def __init__(self, config: MetaLearningConfig, seed: int = 42):
+        """函数作用：创建并初始化 `DomainEpisodeSampler` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `DomainEpisodeSampler` 实例；`config`（MetaLearningConfig）需符合函数签名约定；`seed`（int，默认 `42`）需符合函数签名约定。
+        输出：返回 `None`；初始化 `DomainEpisodeSampler` 的实例状态，构造参数非法时可能抛出异常。"""
         self.config = config
         self.seed = seed
 
@@ -24,6 +27,9 @@ class DomainEpisodeSampler:
         final_test_domains: Sequence[str],
         skillbank_snapshot_id: str,
     ) -> tuple[DomainEpisode, ...]:
+        """函数作用：负责`DomainEpisodeSampler` 中的 `build` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `DomainEpisodeSampler` 实例；`samples`（Sequence[Sample]）需符合函数签名约定；`source_domains`（Sequence[str]）需符合函数签名约定；`final_test_domains`（Sequence[str]）需符合函数签名约定；`skillbank_snapshot_id`（str）需符合函数签名约定。
+        输出：返回 `tuple[DomainEpisode, ...]` 类型结果；校验或下游调用失败时异常向上传递。"""
         groups = domain_index(samples)
         source = tuple(sorted(set(source_domains)))
         final = tuple(sorted(set(final_test_domains)))
@@ -75,6 +81,9 @@ class DomainEpisodeSampler:
         return tuple(episodes)
 
     def _test_sets(self, source: tuple[str, ...]) -> list[tuple[str, ...]]:
+        """函数作用：负责`DomainEpisodeSampler` 中的 `_test_sets` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `DomainEpisodeSampler` 实例；`source`（tuple[str, ...]）需符合函数签名约定。
+        输出：返回 `list[tuple[str, ...]]` 类型结果；校验或下游调用失败时异常向上传递。"""
         if self.config.strategy == "leave_one_domain_out":
             return [(domain,) for domain in source]
         shuffled = list(source)

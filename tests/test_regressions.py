@@ -39,9 +39,15 @@ from evofact.validation.transfer import CrossEpisodeAggregator
 
 class RuntimeRegressionTests(unittest.TestCase):
     def setUp(self):
+        """函数作用：为当前测试用例准备可复用的样本、配置和测试替身。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         self.runner = ExperimentRunner(AppConfig(), ROOT)
 
     def test_console_entry_exists(self):
+        """函数作用：验证 `console_entry_exists` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         import evofact.cli
 
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
@@ -49,19 +55,31 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(callable(evofact.cli.main))
 
     def test_empty_samples_do_not_use_fixtures(self):
+        """函数作用：验证 `empty_samples_do_not_use_fixtures` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         traces, result = asyncio.run(self.runner.run([]))
         self.assertEqual(traces, [])
         self.assertEqual(result.per_sample, ())
 
     def test_empty_bank_does_not_use_seed_bank(self):
+        """函数作用：验证 `empty_bank_does_not_use_seed_bank` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with self.assertRaisesRegex(RuntimeError, "judge"):
             asyncio.run(self.runner.run(fixture_samples()[:1], skills=[]))
 
     def test_validation_rejects_training_overlap(self):
+        """函数作用：验证 `validation_rejects_training_overlap` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with self.assertRaises(ValueError):
             asyncio.run(self.runner.closed_loop(fixture_samples(), fixture_samples()))
 
     def test_scopes_are_hard_filters_for_all_strategies(self):
+        """函数作用：验证 `scopes_are_hard_filters_for_all_strategies` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         skill = next(s for s in self.runner.skills if s.name == "claim_decomposition")
         skill = replace(skill, scope=SkillScope(domains=("health",)))
         for strategy in ("static", "random", "all-experts", "utility-aware"):
@@ -72,18 +90,27 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertEqual(route.selected_skill_ids, ())
 
     def test_rollback_requires_snapshot(self):
+        """函数作用：验证 `rollback_requires_snapshot` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `RuntimeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with self.assertRaises(SystemExit):
             build_parser().parse_args(["skills", "rollback", "claim_decomposition"])
 
 
 class LifecycleRegressionTests(unittest.TestCase):
     def setUp(self):
+        """函数作用：为当前测试用例准备可复用的样本、配置和测试替身。
+        输入要求：`self` 应为已初始化的 `LifecycleRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         self.bank = ExperimentRunner(AppConfig(), ROOT).skills
         self.old = self.bank[0]
         self.a = replace(self.old, name="child_a", skill_id="child_a")
         self.b = replace(self.old, name="child_b", skill_id="child_b")
 
     def test_split_and_merge_replace_all_targets(self):
+        """函数作用：验证 `split_and_merge_replace_all_targets` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `LifecycleRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         split = EvolutionProposal("s", Op.SPLIT, "split", (self.old.name,), (self.a, self.b))
         bank = apply_candidate(self.bank, split)
         self.assertNotIn(self.old.name, [s.name for s in bank])
@@ -94,10 +121,16 @@ class LifecycleRegressionTests(unittest.TestCase):
         )
 
     def test_retire_removes_target(self):
+        """函数作用：验证 `retire_removes_target` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `LifecycleRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         proposal = EvolutionProposal("r", Op.RETIRE, "remove", (self.old.name,))
         self.assertEqual(len(apply_candidate(self.bank, proposal)), len(self.bank) - 1)
 
     def test_missing_frozen_duplicate_targets_rejected(self):
+        """函数作用：验证 `missing_frozen_duplicate_targets_rejected` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `LifecycleRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         proposals = [
             EvolutionProposal("x", Op.EDIT, "bad", ("missing",), (self.a,)),
             EvolutionProposal("x", Op.ADD, "bad", (), (self.old,)),
@@ -112,6 +145,9 @@ class LifecycleRegressionTests(unittest.TestCase):
             )
 
     def test_atomic_failure_and_idempotent_commit(self):
+        """函数作用：验证 `atomic_failure_and_idempotent_commit` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `LifecycleRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with tempfile.TemporaryDirectory() as directory:
             repo = SkillRepository(Path(directory))
             repo.promote(self.old)
@@ -119,6 +155,9 @@ class LifecycleRegressionTests(unittest.TestCase):
             original = repo._atomic_json
 
             def fail_active(path, value):
+                """函数作用：负责当前模块中的 `fail_active` 处理，封装调用方需要复用的业务步骤。
+                输入要求：`path`（未显式标注）需符合函数签名约定；`value`（未显式标注）需符合函数签名约定。
+                输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
                 if path == repo.active_file:
                     raise OSError("injected pointer failure")
                 return original(path, value)
@@ -134,6 +173,9 @@ class LifecycleRegressionTests(unittest.TestCase):
             self.assertEqual(before, repo.active_file.read_bytes())
 
     def test_diff_and_snapshot_path_validation(self):
+        """函数作用：验证 `diff_and_snapshot_path_validation` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `LifecycleRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with tempfile.TemporaryDirectory() as directory:
             repo = SkillRepository(Path(directory))
             old = repo.promote(self.old)
@@ -146,6 +188,9 @@ class LifecycleRegressionTests(unittest.TestCase):
 
 class ResumeRegressionTests(unittest.TestCase):
     def test_fingerprints_cover_labels_resources_and_triggers(self):
+        """函数作用：验证 `fingerprints_cover_labels_resources_and_triggers` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `ResumeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         rows = fixture_meta_samples()
         self.assertNotEqual(
             data_fingerprint(rows), data_fingerprint([replace(rows[0], label="FAKE"), *rows[1:]])
@@ -161,6 +206,9 @@ class ResumeRegressionTests(unittest.TestCase):
             )
 
     def test_resume_rejects_changed_budget_or_domain_policy(self):
+        """函数作用：验证 `resume_rejects_changed_budget_or_domain_policy` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `ResumeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with tempfile.TemporaryDirectory() as directory:
             config = load_config(ROOT / "configs/demse_dry_run.yaml")
             config = replace(
@@ -191,6 +239,9 @@ class ResumeRegressionTests(unittest.TestCase):
                     )
 
     def test_committed_run_resumes_without_recommit(self):
+        """函数作用：验证 `committed_run_resumes_without_recommit` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `ResumeRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         with tempfile.TemporaryDirectory() as directory:
             config = load_config(ROOT / "configs/demse_dry_run.yaml")
             config = replace(
@@ -218,6 +269,9 @@ class ResumeRegressionTests(unittest.TestCase):
 
 class StatisticalRegressionTests(unittest.TestCase):
     def test_invalid_pairs_fail(self):
+        """函数作用：验证 `invalid_pairs_fail` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `StatisticalRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         row = SampleEvaluation("a", "REAL", "REAL", 0.8)
         for other in ([], [row, row], [replace(row, gold="FAKE")]):
             for function in (paired_bootstrap, mcnemar):
@@ -225,11 +279,17 @@ class StatisticalRegressionTests(unittest.TestCase):
                     function([row], other)
 
     def test_duplicate_episode_does_not_inflate_evidence(self):
+        """函数作用：验证 `duplicate_episode_does_not_inflate_evidence` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `StatisticalRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         row = test_demse.TransferGateTests.result("health", False, True)
         with self.assertRaises(ValueError):
             CrossEpisodeAggregator().aggregate([row, row])
 
     def test_specialization_cannot_bypass_hard_constraints(self):
+        """函数作用：验证 `specialization_cannot_bypass_hard_constraints` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `StatisticalRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         base = TransferUtility(
             "c",
             3,

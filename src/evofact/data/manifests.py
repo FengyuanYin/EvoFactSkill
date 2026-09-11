@@ -9,6 +9,9 @@ from evofact.core.models import DataManifest, Sample
 
 
 def sample_fingerprint(sample: Sample) -> str:
+    """函数作用：负责当前模块中的 `sample_fingerprint` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`sample`（Sample）需符合函数签名约定。
+    输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
     normalized = " ".join(sample.text.casefold().split())
     return hashlib.sha256(f"{sample.dataset}\0{normalized}".encode()).hexdigest()
 
@@ -20,6 +23,9 @@ def build_manifest(
     evolution_ratio: float = 0.15,
     protected_ratio: float = 0.15,
 ) -> DataManifest:
+    """函数作用：构造 `build_manifest` 所表示的数据，供当前模块后续流程使用。
+    输入要求：`samples`（Iterable[Sample]）需符合函数签名约定；`seed`（int，默认 `42`）需以关键字传入并符合签名约定；`evolution_ratio`（float，默认 `0.15`）需以关键字传入并符合签名约定；`protected_ratio`（float，默认 `0.15`）需以关键字传入并符合签名约定。
+    输出：返回 `DataManifest` 类型结果；校验或下游调用失败时异常向上传递。"""
     rows = list(samples)
     grouped: dict[str, list[Sample]] = defaultdict(list)
     event_groups: dict[str, list[Sample]] = defaultdict(list)
@@ -84,4 +90,7 @@ def build_manifest(
 
 
 def manifest_json(manifest: DataManifest) -> str:
+    """函数作用：负责当前模块中的 `manifest_json` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`manifest`（DataManifest）需符合函数签名约定。
+    输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
     return json.dumps(asdict(manifest), ensure_ascii=False, sort_keys=True, indent=2)

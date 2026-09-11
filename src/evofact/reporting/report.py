@@ -7,6 +7,9 @@ from statistics import mean, stdev
 
 
 def summarize_runs(metric_runs: list[dict[str, float]]) -> dict:
+    """函数作用：负责当前模块中的 `summarize_runs` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`metric_runs`（list[dict[str, float]]）需符合函数签名约定。
+    输出：返回 `dict` 类型结果；校验或下游调用失败时异常向上传递。"""
     keys = sorted(set().union(*(x.keys() for x in metric_runs))) if metric_runs else []
     summary = {}
     for key in keys:
@@ -24,6 +27,9 @@ def summarize_runs(metric_runs: list[dict[str, float]]) -> dict:
 
 
 def skill_evolution_curve(events: list[dict]) -> list[dict]:
+    """函数作用：负责当前模块中的 `skill_evolution_curve` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`events`（list[dict]）需符合函数签名约定。
+    输出：返回 `list[dict]` 类型结果；校验或下游调用失败时异常向上传递。"""
     return [
         {
             "step": index + 1,
@@ -37,6 +43,9 @@ def skill_evolution_curve(events: list[dict]) -> list[dict]:
 
 
 def write_report(path: Path, title: str, payload: dict) -> dict[str, str]:
+    """函数作用：将一次实验结果序列化为 JSON、CSV 和 Markdown 报告。
+    输入要求：`path`（Path）需符合函数签名约定；`title`（str）需符合函数签名约定；`payload`（dict）需符合函数签名约定。
+    输出：返回 `dict[str, str]` 类型结果；校验或下游调用失败时异常向上传递。"""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     json_path = path / "report.json"

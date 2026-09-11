@@ -7,6 +7,9 @@ from evofact.core.models import EvolutionProposal, SkillSpec, SkillStatus
 
 
 def apply_candidate(skills: list[SkillSpec], proposal: EvolutionProposal) -> list[SkillSpec]:
+    """函数作用：在技能列表副本上应用结构化进化候选，得到待评估的新技能库。
+    输入要求：`skills`（list[SkillSpec]）需符合函数签名约定；`proposal`（EvolutionProposal）需符合函数签名约定。
+    输出：返回 `list[SkillSpec]` 类型结果；校验或下游调用失败时异常向上传递。"""
     targets = proposal.target_skill_ids
     candidates = proposal.candidate_skills
     count = (len(targets), len(candidates))

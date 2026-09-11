@@ -9,6 +9,9 @@ from evofact.core.models import MetaEvolutionOutcome
 
 
 def write_meta_report(path: Path, outcome: MetaEvolutionOutcome) -> dict[str, str]:
+    """函数作用：输出 DEMSE 运行结果、迁移效用和门控决策报告。
+    输入要求：`path`（Path）需符合函数签名约定；`outcome`（MetaEvolutionOutcome）需符合函数签名约定。
+    输出：返回 `dict[str, str]` 类型结果；校验或下游调用失败时异常向上传递。"""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     payload = asdict(outcome)

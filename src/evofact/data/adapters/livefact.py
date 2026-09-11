@@ -13,6 +13,9 @@ class LiveFactAdapter:
     name = "livefact"
 
     def discover(self, root: Path) -> DatasetDiagnostic:
+        """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。
+        输入要求：`self` 应为已初始化的 `LiveFactAdapter` 实例；`root`（Path）需符合函数签名约定。
+        输出：返回 `DatasetDiagnostic` 类型结果；校验或下游调用失败时异常向上传递。"""
         files = tuple(str(p) for p in sorted(root.glob("**/livefact_*_*.jsonl")))
         return DatasetDiagnostic(
             self.name,
@@ -22,6 +25,9 @@ class LiveFactAdapter:
         )
 
     def load(self, root: Path) -> Iterable[Sample]:
+        """函数作用：从配置的存储位置读取并标准化当前对象负责的数据。
+        输入要求：`self` 应为已初始化的 `LiveFactAdapter` 实例；`root`（Path）需符合函数签名约定。
+        输出：返回迭代器并逐项产出 `Iterable[Sample]` 所约定的结果；读取或解析失败时异常在迭代阶段抛出。"""
         diag = self.discover(root)
         if not diag.available:
             raise FileNotFoundError(diag.message)

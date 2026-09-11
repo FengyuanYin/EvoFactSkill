@@ -5,6 +5,9 @@ from evofact.core.models import SkillUtility
 
 class UtilityTracker:
     def __init__(self, retire_after: int = 3):
+        """函数作用：创建并初始化 `UtilityTracker` 对象，为后续方法调用准备依赖和初始状态。
+        输入要求：`self` 应为已初始化的 `UtilityTracker` 实例；`retire_after`（int，默认 `3`）需符合函数签名约定。
+        输出：返回 `None`；初始化 `UtilityTracker` 的实例状态，构造参数非法时可能抛出异常。"""
         self.values: dict[str, SkillUtility] = {}
         self.retire_after = retire_after
 
@@ -18,6 +21,9 @@ class UtilityTracker:
         domain: str | None = None,
         window: str | None = None,
     ) -> SkillUtility:
+        """函数作用：负责`UtilityTracker` 中的 `update` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `UtilityTracker` 实例；`skill_id`（str）需符合函数签名约定；`success`（bool）需以关键字传入并符合签名约定；`delta`（float）需以关键字传入并符合签名约定；`cost`（float）需以关键字传入并符合签名约定；`domain`（str | None，默认 `None`）需以关键字传入并符合签名约定；`window`（str | None，默认 `None`）需以关键字传入并符合签名约定。
+        输出：返回 `SkillUtility` 类型结果；校验或下游调用失败时异常向上传递。"""
         old = self.values.get(skill_id, SkillUtility(skill_id))
         uses = old.uses + 1
         du = dict(old.domain_utility)
@@ -40,6 +46,9 @@ class UtilityTracker:
         return value
 
     def recommendation(self, skill_id: str) -> str:
+        """函数作用：负责`UtilityTracker` 中的 `recommendation` 处理，封装调用方需要复用的业务步骤。
+        输入要求：`self` 应为已初始化的 `UtilityTracker` 实例；`skill_id`（str）需符合函数签名约定。
+        输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
         value = self.values[skill_id]
         return (
             "retire"

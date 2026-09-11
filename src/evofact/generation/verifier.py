@@ -14,11 +14,17 @@ DECISION_FIELDS = {"sample_id", "source_sample_id", "strategy", "reason", "sourc
 
 
 def normalized(text):
+    """函数作用：负责当前模块中的 `normalized` 处理，封装调用方需要复用的业务步骤。
+    输入要求：`text`（未显式标注）需符合函数签名约定。
+    输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     return " ".join(text.casefold().split())
 
 
 class ChallengeVerifier:
     def validate(self, response, request, *, config, forbidden=(), existing=()):
+        """函数作用：校验生成响应的结构、来源、策略、重复内容和留出数据隔离。
+        输入要求：`self` 应为已初始化的 `ChallengeVerifier` 实例；`response`（未显式标注）需符合函数签名约定；`request`（未显式标注）需符合函数签名约定；`config`（未显式标注）需以关键字传入并符合签名约定；`forbidden`（未显式标注，默认 `()`）需以关键字传入并符合签名约定；`existing`（未显式标注，默认 `()`）需以关键字传入并符合签名约定。
+        输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         if not isinstance(response, dict) or set(response) != {"samples", "decisions"}:
             raise ValueError("generator must return samples and decisions")
         rows, decisions = response["samples"], response["decisions"]
@@ -118,6 +124,9 @@ class ChallengeVerifier:
         return accepted, rejected
 
     async def verify(self, samples, backend):
+        """函数作用：使用看不到生成标签的独立审核模型核对样本正文与证据是否一致。
+        输入要求：`self` 应为已初始化的 `ChallengeVerifier` 实例；`samples`（未显式标注）需符合函数签名约定；`backend`（未显式标注）需符合函数签名约定。
+        输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         if not samples:
             return [], [], []
         # Blind review excludes generated labels, decisions and trace outcomes.
