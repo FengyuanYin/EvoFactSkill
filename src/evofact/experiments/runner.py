@@ -7,7 +7,7 @@ from evofact.config import AppConfig
 from evofact.core.models import RunBudget, Sample, SampleEvaluation, SkillStatus
 from evofact.evolution.distiller import distill
 from evofact.evolution.proposer import propose_from_cluster
-from evofact.routing.router import SkillRouter
+from evofact.routing.router import LLMSkillRouter, SkillRouter
 from evofact.runtime.inference import InferenceRuntime
 from evofact.runtime.mock_backend import MockBackend
 from evofact.runtime.openai_backend import OpenAICompatibleBackend
@@ -84,9 +84,25 @@ class ExperimentRunner:
         rows = (
             fixture_samples() if samples is None else samples
         )  # 这里做一个samples判断 如果没有samples则使用固定的测试用例
+
+        backend = self._backend()
+        if strategy == "llm":
+            router = LLMSkillRouter(
+                backend=backend,
+                fallback=SkillRouter(
+                    strategy="utility-aware",
+                    seed = self.config.seed,
+                )
+            )
+        else:
+            router = SkillRouter(
+                strategy=strategy,
+                seed=self.config.seed,
+            )
+
         runtime = InferenceRuntime(
-            self._backend(),
-            SkillRouter(strategy, self.config.seed),
+            backend,
+            router,
             self.skills if skills is None else skills,
         )
         traces = []

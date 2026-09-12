@@ -1,4 +1,5 @@
 import random
+from dataclasses import replace
 
 from evofact.core.models import (
     RoutingDecision,
@@ -7,7 +8,9 @@ from evofact.core.models import (
     SkillSpec,
     SkillStatus,
     SkillUtility,
+    UsageRecord,
 )
+from evofact.runtime.backend import BackendResult, ModelBackend
 
 
 # 规则匹配的方式选择agent路由
@@ -101,6 +104,267 @@ class SkillRouter:
             fallback,
         )
 
+    async def route(
+        self,
+        sample: dict,
+        skills: list[SkillSpec],
+        utilities: dict[str, SkillUtility],
+        budget: RunBudget,
+    ) -> BackendResult:
+
+        decision = self.select(
+            sample,
+            skills,
+            utilities,
+            budget
+        )
+
+        return BackendResult(
+            decision,
+            UsageRecord(),
+        )
+
+
+class LLMSkillRouter:
+    def __init__(
+        self,
+        backend: ModelBackend,
+        fallback: SkillRouter | None = None,
+    ):
+        self.backend = backend
+        self.fallback = (
+            fallback
+            if fallback is not None
+            else SkillRouter("utility-aware")
+        )
+
+    async def route(
+        self,
+        sample: dict,
+        skills: list[SkillSpec],
+        utilities: dict[str, SkillUtility],
+        budget: RunBudget,
+    ) -> BackendResult:
+        candidates = tuple(
+            skill
+            for skill in skills
+            if skill.kind == SkillKind.SPECIALIST
+            and skill.status
+            in {
+                SkillStatus.ACTIVE,
+                SkillStatus.FROZEN,
+            }
+            and matches_scope(skill, sample)
+        )
+
+        if not candidates:
+            decision = self._fallback_decision(
+                sample,
+                skills,
+                utilities,
+                budget,
+                "no legal specialist candidates",
+            )
+            return BackendResult(
+                decision,
+                UsageRecord(),
+            )
+
+        router_skills = sorted(
+        (
+            skill
+            for skill in skills
+            if skill.kind == SkillKind.ROUTER
+            and skill.status
+            in {
+                SkillStatus.ACTIVE,
+                SkillStatus.FROZEN,
+            }
+            and matches_scope(skill, sample)
+        ),
+            key = lambda skill:skill.name
+        )
+
+        if not router_skills:
+            decision = self._fallback_decision(
+                sample,
+                skills,
+                utilities,
+                budget,
+                "no active router skill",
+            )
+            return BackendResult(
+                decision,
+                UsageRecord(),
+            )
+
+        router_skill = router_skills[0]
+
+        try:
+            result = await self.backend.route(
+                sample,
+                candidates,
+                router_skill,
+                utilities,
+                budget,
+            )
+
+            decision = self._parse_decision(
+                result.value,
+                candidates,
+                budget,
+            )
+
+            return BackendResult(
+                decision,
+                result.usage,
+            )
+        except Exception as exc:
+            decision = self._fallback_decision(
+                sample,
+                skills,
+                utilities,
+                budget,
+                f"LLM router failed: {type(exc).__name__}",
+            )
+
+            # 这里只能粗略记录一次失败调用。
+            return BackendResult(
+                decision,
+                UsageRecord(calls=1),
+            )
+
+    @staticmethod
+    def _parse_decision(
+        data: object,
+        candidates: tuple[SkillSpec, ...],
+        budget: RunBudget,
+    ) -> RoutingDecision:
+        if not isinstance(data, dict):
+            raise ValueError(
+                "router response must be a JSON object"
+            )
+        raw_ids = data.get("selected_skill_ids")
+
+        if not isinstance(raw_ids, list):
+            raise ValueError(
+                "selected_skill_ids must be a list"
+            )
+
+        if not all(
+            isinstance(skill_id, str)
+            for skill_id in raw_ids
+        ):
+            raise ValueError(
+                "selected_skill_ids must contain strings"
+            )
+
+        selected = tuple(dict.fromkeys(raw_ids))
+        if not selected:
+            raise ValueError(
+                "LLM router selected no skills"
+            )
+
+
+        if len(selected) > budget.max_skills:
+            raise ValueError(
+                "LLM router exceeded max_skills"
+            )
+
+        allowed = {
+            skill.skill_id: skill
+            for skill in candidates
+        }
+        unknown = [
+            skill_id
+            for skill_id in selected
+            if skill_id not in allowed
+        ]
+        if unknown:
+            raise ValueError(
+                f"LLM router returned unknown skills: "
+                f"{unknown}"
+            )
+
+        raw_confidence = data.get("confidence", 0.0)
+        if isinstance(raw_confidence, bool):
+            raise ValueError(
+                "router confidence must be numeric"
+            )
+
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "router confidence must be numeric"
+            ) from exc
+
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(
+                "router confidence must be in [0, 1]"
+            )
+
+        raw_reasons = data.get("reasons", {})
+        if not isinstance(raw_reasons, dict):
+            raw_reasons = {}
+
+        reasons = {
+            skill_id: str(
+                raw_reasons.get(
+                    skill_id,
+                    "selected by LLM router",
+                )
+            )
+            for skill_id in selected
+        }
+
+        rejected = tuple(
+            skill.skill_id
+            for skill in candidates
+            if skill.skill_id not in selected
+        )
+
+        return RoutingDecision(
+            selected_skill_ids=selected,
+            rejected_skill_ids=rejected,
+            reasons=reasons,
+            confidence=confidence,
+            budget=budget,
+            fallback_used=False,
+        )
+
+    def _fallback_decision(
+            self,
+            sample: dict,
+            skills: list[SkillSpec],
+            utilities: dict[str, SkillUtility],
+            budget: RunBudget,
+            cause: str,
+    ) -> RoutingDecision:
+
+        decision = self.fallback.select(
+            sample,
+            skills,
+            utilities,
+            budget,
+        )
+
+        reasons = dict(decision.reasons)
+
+        for skill_id in decision.selected_skill_ids:
+            previous = reasons.get(
+                skill_id,
+                self.fallback.strategy,
+            )
+            reasons[skill_id] = (
+                f"{previous}; fallback reason: {cause}"
+            )
+
+        return replace(
+            decision,
+            reasons = reasons,
+            fallback_used = True,
+        )
 
 def matches_scope(skill: SkillSpec, sample: dict) -> bool:
     """函数作用：检查样本的领域、数据集和时间窗口是否都落在技能的适用范围内。 某项范围为空表示该项不设限制；非空时则要求样本值包含在允许列表中。
@@ -115,3 +379,337 @@ def matches_scope(skill: SkillSpec, sample: dict) -> bool:
             or str(sample.get("metadata", {}).get("temporal_window")) in scope.temporal_windows
         )
     )
+
+async def _router_demo(
+        *,
+        live: bool = False,
+        config_path: str = "configs/adversarial_llm.yaml",
+) -> None:
+    import json
+    from pathlib import Path
+
+    from evofact.config import load_config
+    from evofact.runtime.mock_backend import MockBackend
+    from evofact.runtime.openai_backend import OpenAICompatibleBackend
+    from evofact.skills.loader import load_skill_package
+
+    project_root = Path(__file__).resolve().parents[3]
+    seed_root = project_root / "skills" / "seeds"
+
+    skills = [
+        load_skill_package(path)
+        for path in sorted(seed_root.iterdir())
+        if (path / "SKILL.md").is_file()
+    ]
+
+    if live:
+        path = Path(config_path)
+
+        if not path.is_absolute():
+            path = project_root / path
+
+        config = load_config(path)
+
+        backend = OpenAICompatibleBackend(
+            config.base_url,
+            config.resolved_api_key(),
+            config.model,
+        )
+
+        mode = "live LLM"
+
+    else:
+        backend = MockBackend()
+        mode = "mock"
+
+
+    router = LLMSkillRouter(
+        backend=backend,
+        fallback=SkillRouter(
+            strategy="utility-aware",
+            seed = 42,
+        ),
+    )
+
+
+    budget = RunBudget(
+        max_skills=3,
+        max_calls=6,
+        max_tokens=4000,
+    )
+
+    samples = [
+        {
+            "sample_id": "router-test-1",
+            "dataset": "manual",
+            "domain": "finance",
+            "text": (
+                "官方报告称，2025年该公司的收入"
+                "同比增长了30%。"
+            ),
+            "metadata": {
+                "temporal_window": "2025",
+            },
+        },
+        {
+            "sample_id": "router-test-2",
+            "dataset": "manual",
+            "domain": "health",
+            "text": (
+                "网传某种饮料可以治愈所有疾病，"
+                "但没有提供临床研究证据。"
+            ),
+            "metadata": {},
+        },
+        {
+            "sample_id": "router-test-3",
+            "dataset": "manual",
+            "domain": "science",
+            "text": (
+                "两家研究机构对同一实验给出了"
+                "互相矛盾的结论。"
+            ),
+            "metadata": {},
+        },
+    ]
+
+    skill_names = {
+        skill.skill_id: skill.name
+        for skill in skills
+    }
+
+    print(f"\nRouter mode: {mode}")
+    print(f"Loaded skills: {len(skills)}")
+    print(
+        "Router skills:",
+        [
+            skill.name
+            for skill in skills
+            if skill.kind == SkillKind.ROUTER
+        ],
+    )
+
+    for sample in samples:
+        result = await router.route(
+            sample,
+            skills,
+            {},
+            budget,
+        )
+
+        decision = result.value
+
+        output = {
+            "sample_id": sample["sample_id"],
+            "text": sample["text"],
+            "selected": [
+                {
+                    "skill_id": skill_id,
+                    "name": skill_names.get(
+                        skill_id,
+                        "<unknown>",
+                    ),
+                    "reason": decision.reasons.get(
+                        skill_id,
+                        "",
+                    ),
+                }
+                for skill_id
+                in decision.selected_skill_ids
+            ],
+            "rejected_names": [
+                skill_names.get(
+                    skill_id,
+                    "<unknown>",
+                )
+                for skill_id
+                in decision.rejected_skill_ids
+            ],
+            "confidence": decision.confidence,
+            "fallback_used": decision.fallback_used,
+            "router_usage": {
+                "calls": result.usage.calls,
+                "prompt_tokens":
+                    result.usage.prompt_tokens,
+                "completion_tokens":
+                    result.usage.completion_tokens,
+                "latency_ms":
+                    result.usage.latency_ms,
+                "estimated_cost":
+                    result.usage.estimated_cost,
+            },
+        }
+
+        print(
+            json.dumps(
+                output,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+    if live:
+        fallback_count = 0
+
+        for sample in samples:
+            result = await router.route(
+                sample,
+                skills,
+                {},
+                budget,
+            )
+
+            if result.value.fallback_used:
+                fallback_count += 1
+
+        if fallback_count:
+            print(
+                "\nLive connection result: "
+                f"{fallback_count}/{len(samples)} "
+                "requests used fallback."
+            )
+            print(
+                "The API request, response format, "
+                "or validation may have failed."
+            )
+        else:
+            print(
+                "\nLive connection result: "
+                "all LLM router requests succeeded."
+            )
+
+async def _invalid_output_demo() -> None:
+    """验证 LLM 返回非法 Skill ID 时是否触发规则回退。"""
+
+    import json
+    from pathlib import Path
+
+    from evofact.runtime.mock_backend import MockBackend
+    from evofact.skills.loader import load_skill_package
+
+    class InvalidRouterBackend(MockBackend):
+        async def route(
+            self,
+            sample,
+            candidates,
+            router_skill,
+            utilities,
+            budget,
+        ) -> BackendResult:
+            del (
+                sample,
+                candidates,
+                router_skill,
+                utilities,
+                budget,
+            )
+
+            return BackendResult(
+                {
+                    "selected_skill_ids": [
+                        "invented-skill-id"
+                    ],
+                    "reasons": {
+                        "invented-skill-id":
+                            "invalid test output"
+                    },
+                    "confidence": 0.99,
+                },
+                UsageRecord(calls=1),
+            )
+
+    project_root = Path(__file__).resolve().parents[3]
+    seed_root = project_root / "skills" / "seeds"
+
+    skills = [
+        load_skill_package(path)
+        for path in sorted(seed_root.iterdir())
+        if (path / "SKILL.md").is_file()
+    ]
+
+    router = LLMSkillRouter(
+        backend=InvalidRouterBackend(),
+        fallback=SkillRouter(
+            "utility-aware",
+            seed=42,
+        ),
+    )
+
+    result = await router.route(
+        {
+            "sample_id": "invalid-output-test",
+            "dataset": "manual",
+            "domain": "health",
+            "text": "一项未经证实的健康声明。",
+            "metadata": {},
+        },
+        skills,
+        {},
+        RunBudget(max_skills=2),
+    )
+
+    decision = result.value
+
+    print("\nInvalid-output fallback test:")
+    print(
+        json.dumps(
+            {
+                "selected_skill_ids":
+                    decision.selected_skill_ids,
+                "reasons": decision.reasons,
+                "fallback_used":
+                    decision.fallback_used,
+                "expected_fallback": True,
+                "test_passed":
+                    decision.fallback_used is True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+def _main() -> None:
+    """解析 Router 演示参数并运行异步测试。"""
+
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Test the rule-constrained LLM skill router"
+        )
+    )
+
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="connect to the configured real LLM API",
+    )
+
+    parser.add_argument(
+        "--config",
+        default="configs/adversarial_llm.yaml",
+        help="configuration used by --live",
+    )
+
+    parser.add_argument(
+        "--skip-invalid-test",
+        action="store_true",
+        help="skip the invalid-output fallback test",
+    )
+
+    args = parser.parse_args()
+
+    asyncio.run(
+        _router_demo(
+            live=args.live,
+            config_path=args.config,
+        )
+    )
+
+    if not args.skip_invalid_test:
+        asyncio.run(_invalid_output_demo())
+
+
+if __name__ == "__main__":
+    _main()

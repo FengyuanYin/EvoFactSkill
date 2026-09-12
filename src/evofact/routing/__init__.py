@@ -1,3 +1,9 @@
-from .router import SkillRouter
+from .router import (
+    LLMSkillRouter,
+    SkillRouter,
+)
 
-__all__ = ["SkillRouter"]
+__all__ = [
+    "LLMSkillRouter",
+    "SkillRouter",
+]
