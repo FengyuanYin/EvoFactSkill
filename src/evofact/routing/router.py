@@ -112,12 +112,7 @@ class SkillRouter:
         budget: RunBudget,
     ) -> BackendResult:
 
-        decision = self.select(
-            sample,
-            skills,
-            utilities,
-            budget
-        )
+        decision = self.select(sample, skills, utilities, budget)
 
         return BackendResult(
             decision,
@@ -132,11 +127,7 @@ class LLMSkillRouter:
         fallback: SkillRouter | None = None,
     ):
         self.backend = backend
-        self.fallback = (
-            fallback
-            if fallback is not None
-            else SkillRouter("utility-aware")
-        )
+        self.fallback = fallback if fallback is not None else SkillRouter("utility-aware")
 
     async def route(
         self,
@@ -171,18 +162,18 @@ class LLMSkillRouter:
             )
 
         router_skills = sorted(
-        (
-            skill
-            for skill in skills
-            if skill.kind == SkillKind.ROUTER
-            and skill.status
-            in {
-                SkillStatus.ACTIVE,
-                SkillStatus.FROZEN,
-            }
-            and matches_scope(skill, sample)
-        ),
-            key = lambda skill:skill.name
+            (
+                skill
+                for skill in skills
+                if skill.kind == SkillKind.ROUTER
+                and skill.status
+                in {
+                    SkillStatus.ACTIVE,
+                    SkillStatus.FROZEN,
+                }
+                and matches_scope(skill, sample)
+            ),
+            key=lambda skill: skill.name,
         )
 
         if not router_skills:
@@ -241,68 +232,38 @@ class LLMSkillRouter:
         budget: RunBudget,
     ) -> RoutingDecision:
         if not isinstance(data, dict):
-            raise ValueError(
-                "router response must be a JSON object"
-            )
+            raise ValueError("router response must be a JSON object")
         raw_ids = data.get("selected_skill_ids")
 
         if not isinstance(raw_ids, list):
-            raise ValueError(
-                "selected_skill_ids must be a list"
-            )
+            raise ValueError("selected_skill_ids must be a list")
 
-        if not all(
-            isinstance(skill_id, str)
-            for skill_id in raw_ids
-        ):
-            raise ValueError(
-                "selected_skill_ids must contain strings"
-            )
+        if not all(isinstance(skill_id, str) for skill_id in raw_ids):
+            raise ValueError("selected_skill_ids must contain strings")
 
         selected = tuple(dict.fromkeys(raw_ids))
         if not selected:
-            raise ValueError(
-                "LLM router selected no skills"
-            )
-
+            raise ValueError("LLM router selected no skills")
 
         if len(selected) > budget.max_skills:
-            raise ValueError(
-                "LLM router exceeded max_skills"
-            )
+            raise ValueError("LLM router exceeded max_skills")
 
-        allowed = {
-            skill.skill_id: skill
-            for skill in candidates
-        }
-        unknown = [
-            skill_id
-            for skill_id in selected
-            if skill_id not in allowed
-        ]
+        allowed = {skill.skill_id: skill for skill in candidates}
+        unknown = [skill_id for skill_id in selected if skill_id not in allowed]
         if unknown:
-            raise ValueError(
-                f"LLM router returned unknown skills: "
-                f"{unknown}"
-            )
+            raise ValueError(f"LLM router returned unknown skills: {unknown}")
 
         raw_confidence = data.get("confidence", 0.0)
         if isinstance(raw_confidence, bool):
-            raise ValueError(
-                "router confidence must be numeric"
-            )
+            raise ValueError("router confidence must be numeric")
 
         try:
             confidence = float(raw_confidence)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "router confidence must be numeric"
-            ) from exc
+            raise ValueError("router confidence must be numeric") from exc
 
         if not 0.0 <= confidence <= 1.0:
-            raise ValueError(
-                "router confidence must be in [0, 1]"
-            )
+            raise ValueError("router confidence must be in [0, 1]")
 
         raw_reasons = data.get("reasons", {})
         if not isinstance(raw_reasons, dict):
@@ -318,11 +279,7 @@ class LLMSkillRouter:
             for skill_id in selected
         }
 
-        rejected = tuple(
-            skill.skill_id
-            for skill in candidates
-            if skill.skill_id not in selected
-        )
+        rejected = tuple(skill.skill_id for skill in candidates if skill.skill_id not in selected)
 
         return RoutingDecision(
             selected_skill_ids=selected,
@@ -334,12 +291,12 @@ class LLMSkillRouter:
         )
 
     def _fallback_decision(
-            self,
-            sample: dict,
-            skills: list[SkillSpec],
-            utilities: dict[str, SkillUtility],
-            budget: RunBudget,
-            cause: str,
+        self,
+        sample: dict,
+        skills: list[SkillSpec],
+        utilities: dict[str, SkillUtility],
+        budget: RunBudget,
+        cause: str,
     ) -> RoutingDecision:
 
         decision = self.fallback.select(
@@ -356,15 +313,14 @@ class LLMSkillRouter:
                 skill_id,
                 self.fallback.strategy,
             )
-            reasons[skill_id] = (
-                f"{previous}; fallback reason: {cause}"
-            )
+            reasons[skill_id] = f"{previous}; fallback reason: {cause}"
 
         return replace(
             decision,
-            reasons = reasons,
-            fallback_used = True,
+            reasons=reasons,
+            fallback_used=True,
         )
+
 
 def matches_scope(skill: SkillSpec, sample: dict) -> bool:
     """函数作用：检查样本的领域、数据集和时间窗口是否都落在技能的适用范围内。 某项范围为空表示该项不设限制；非空时则要求样本值包含在允许列表中。
@@ -380,10 +336,11 @@ def matches_scope(skill: SkillSpec, sample: dict) -> bool:
         )
     )
 
+
 async def _router_demo(
-        *,
-        live: bool = False,
-        config_path: str = "configs/adversarial_llm.yaml",
+    *,
+    live: bool = False,
+    config_path: str = "configs/adversarial_llm.yaml",
 ) -> None:
     import json
     from pathlib import Path
@@ -422,15 +379,13 @@ async def _router_demo(
         backend = MockBackend()
         mode = "mock"
 
-
     router = LLMSkillRouter(
         backend=backend,
         fallback=SkillRouter(
             strategy="utility-aware",
-            seed = 42,
+            seed=42,
         ),
     )
-
 
     budget = RunBudget(
         max_skills=3,
@@ -443,10 +398,7 @@ async def _router_demo(
             "sample_id": "router-test-1",
             "dataset": "manual",
             "domain": "finance",
-            "text": (
-                "官方报告称，2025年该公司的收入"
-                "同比增长了30%。"
-            ),
+            "text": ("官方报告称，2025年该公司的收入同比增长了30%。"),
             "metadata": {
                 "temporal_window": "2025",
             },
@@ -455,38 +407,25 @@ async def _router_demo(
             "sample_id": "router-test-2",
             "dataset": "manual",
             "domain": "health",
-            "text": (
-                "网传某种饮料可以治愈所有疾病，"
-                "但没有提供临床研究证据。"
-            ),
+            "text": ("网传某种饮料可以治愈所有疾病，但没有提供临床研究证据。"),
             "metadata": {},
         },
         {
             "sample_id": "router-test-3",
             "dataset": "manual",
             "domain": "science",
-            "text": (
-                "两家研究机构对同一实验给出了"
-                "互相矛盾的结论。"
-            ),
+            "text": ("两家研究机构对同一实验给出了互相矛盾的结论。"),
             "metadata": {},
         },
     ]
 
-    skill_names = {
-        skill.skill_id: skill.name
-        for skill in skills
-    }
+    skill_names = {skill.skill_id: skill.name for skill in skills}
 
     print(f"\nRouter mode: {mode}")
     print(f"Loaded skills: {len(skills)}")
     print(
         "Router skills:",
-        [
-            skill.name
-            for skill in skills
-            if skill.kind == SkillKind.ROUTER
-        ],
+        [skill.name for skill in skills if skill.kind == SkillKind.ROUTER],
     )
 
     for sample in samples:
@@ -514,29 +453,23 @@ async def _router_demo(
                         "",
                     ),
                 }
-                for skill_id
-                in decision.selected_skill_ids
+                for skill_id in decision.selected_skill_ids
             ],
             "rejected_names": [
                 skill_names.get(
                     skill_id,
                     "<unknown>",
                 )
-                for skill_id
-                in decision.rejected_skill_ids
+                for skill_id in decision.rejected_skill_ids
             ],
             "confidence": decision.confidence,
             "fallback_used": decision.fallback_used,
             "router_usage": {
                 "calls": result.usage.calls,
-                "prompt_tokens":
-                    result.usage.prompt_tokens,
-                "completion_tokens":
-                    result.usage.completion_tokens,
-                "latency_ms":
-                    result.usage.latency_ms,
-                "estimated_cost":
-                    result.usage.estimated_cost,
+                "prompt_tokens": result.usage.prompt_tokens,
+                "completion_tokens": result.usage.completion_tokens,
+                "latency_ms": result.usage.latency_ms,
+                "estimated_cost": result.usage.estimated_cost,
             },
         }
 
@@ -564,19 +497,12 @@ async def _router_demo(
 
         if fallback_count:
             print(
-                "\nLive connection result: "
-                f"{fallback_count}/{len(samples)} "
-                "requests used fallback."
+                f"\nLive connection result: {fallback_count}/{len(samples)} requests used fallback."
             )
-            print(
-                "The API request, response format, "
-                "or validation may have failed."
-            )
+            print("The API request, response format, or validation may have failed.")
         else:
-            print(
-                "\nLive connection result: "
-                "all LLM router requests succeeded."
-            )
+            print("\nLive connection result: all LLM router requests succeeded.")
+
 
 async def _invalid_output_demo() -> None:
     """验证 LLM 返回非法 Skill ID 时是否触发规则回退。"""
@@ -606,13 +532,8 @@ async def _invalid_output_demo() -> None:
 
             return BackendResult(
                 {
-                    "selected_skill_ids": [
-                        "invented-skill-id"
-                    ],
-                    "reasons": {
-                        "invented-skill-id":
-                            "invalid test output"
-                    },
+                    "selected_skill_ids": ["invented-skill-id"],
+                    "reasons": {"invented-skill-id": "invalid test output"},
                     "confidence": 0.99,
                 },
                 UsageRecord(calls=1),
@@ -654,19 +575,17 @@ async def _invalid_output_demo() -> None:
     print(
         json.dumps(
             {
-                "selected_skill_ids":
-                    decision.selected_skill_ids,
+                "selected_skill_ids": decision.selected_skill_ids,
                 "reasons": decision.reasons,
-                "fallback_used":
-                    decision.fallback_used,
+                "fallback_used": decision.fallback_used,
                 "expected_fallback": True,
-                "test_passed":
-                    decision.fallback_used is True,
+                "test_passed": decision.fallback_used is True,
             },
             ensure_ascii=False,
             indent=2,
         )
     )
+
 
 def _main() -> None:
     """解析 Router 演示参数并运行异步测试。"""
@@ -674,11 +593,7 @@ def _main() -> None:
     import argparse
     import asyncio
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Test the rule-constrained LLM skill router"
-        )
-    )
+    parser = argparse.ArgumentParser(description=("Test the rule-constrained LLM skill router"))
 
     parser.add_argument(
         "--live",

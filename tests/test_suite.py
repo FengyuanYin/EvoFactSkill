@@ -212,16 +212,13 @@ class SkillTests(unittest.TestCase):
         """函数作用：验证 `seed_bank` 场景的正常行为、边界条件或错误处理。
         输入要求：`self` 应为已初始化的 `SkillTests` 实例；无其他显式输入。
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
-        self.assertEqual(
-            len(
-                [
-                    load_skill_package(p)
-                    for p in (ROOT / "skills/seeds").iterdir()
-                    if (p / "SKILL.md").exists()
-                ]
-            ),
-            9,
-        )
+        skills = [
+            load_skill_package(p)
+            for p in (ROOT / "skills/seeds").iterdir()
+            if (p / "SKILL.md").exists()
+        ]
+        self.assertEqual(len(skills), 10)
+        self.assertIn("skill_optimizer", {skill.name for skill in skills})
 
     def test_repository(self):
         """函数作用：验证 `repository` 场景的正常行为、边界条件或错误处理。

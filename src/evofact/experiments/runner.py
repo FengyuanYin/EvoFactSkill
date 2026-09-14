@@ -6,6 +6,7 @@ from evofact.attribution.rules import attribute_trace
 from evofact.config import AppConfig
 from evofact.core.models import RunBudget, Sample, SampleEvaluation, SkillStatus
 from evofact.evolution.distiller import distill
+from evofact.evolution.optimizer import SkillOptimizerAgent
 from evofact.evolution.proposer import propose_from_cluster
 from evofact.routing.router import LLMSkillRouter, SkillRouter
 from evofact.runtime.inference import InferenceRuntime
@@ -76,27 +77,30 @@ class ExperimentRunner:
         )
 
     async def run(
-        self, samples: list[Sample] | None = None, strategy: str = "utility-aware", skills=None
+        self, samples: list[Sample] | None = None, strategy: str | None = None, skills=None
     ):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`strategy`（str，默认 `'utility-aware'`）需符合函数签名约定；`skills`（未显式标注，默认 `None`）需符合函数签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
+
+        effective_strategy = self.config.routing_strategy if strategy is None else strategy
+
         rows = (
             fixture_samples() if samples is None else samples
         )  # 这里做一个samples判断 如果没有samples则使用固定的测试用例
 
         backend = self._backend()
-        if strategy == "llm":
+        if effective_strategy == "llm":
             router = LLMSkillRouter(
                 backend=backend,
                 fallback=SkillRouter(
                     strategy="utility-aware",
-                    seed = self.config.seed,
-                )
+                    seed=self.config.seed,
+                ),
             )
         else:
             router = SkillRouter(
-                strategy=strategy,
+                strategy=effective_strategy,
                 seed=self.config.seed,
             )
 
@@ -157,10 +161,39 @@ class ExperimentRunner:
         reports = credited
         if generation_guard is not None:
             generation_guard(traces, reports)
-        clusters = cluster_reports([r for r in reports if r.error_types])
-        proposals = [
-            propose_from_cluster(cid, group, self.skills) for cid, group in clusters.items()
-        ]
+        clusters = cluster_reports([report for report in reports if report.error_types])
+
+        if self.config.evolution.proposer == "llm":
+            optimizer = SkillOptimizerAgent(
+                backend=self._backend(),
+                config=self.config.evolution,
+            )
+
+            proposals = []
+
+            for cluster_id, group in clusters.items():
+                proposal = await optimizer.propose(
+                    cluster_id=cluster_id,
+                    reports=group,
+                    traces=traces,
+                    bank=self.skills,
+                )
+
+                # NO_CHANGE 返回 None，不进入后续评估和 Gate。
+                if proposal is not None:
+                    proposals.append(proposal)
+
+        else:
+            # 保留原来的规则 proposer，保证向后兼容。
+            proposals = [
+                propose_from_cluster(
+                    cluster_id,
+                    group,
+                    self.skills,
+                )
+                for cluster_id, group in clusters.items()
+            ]
+
         return {
             "traces": traces,
             "evaluation": result,

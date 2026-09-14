@@ -63,6 +63,45 @@ class MetaLearningConfig:  # 元学习配置
             raise ValueError("max_calibration_increase must be non-negative")
 
 
+@dataclass
+class EvolutionConfig:
+    proposer: str = "rule"
+
+    fallback_to_rule: bool = True
+
+    optimizer_skill: str = "skill_optimizer"
+
+    max_reports: int = 12
+
+    max_skills: int = 12
+
+    max_text_chars: int = 8000
+
+    max_instructions_chars: int = 60000
+
+    max_total_chars: int = 300000
+
+    def __post_init__(self) -> None:
+        if self.proposer not in {"rule", "llm"}:
+            raise ValueError("evolution.proposer must be rule or llm")
+
+        if not self.optimizer_skill.strip():
+            raise ValueError("evolution.optimizer_skill must not be empty")
+
+        limits = {
+            "max_reports": self.max_reports,
+            "max_skills": self.max_skills,
+            "max_text_chars": self.max_text_chars,
+            "max_instructions_chars": self.max_instructions_chars,
+            "max_total_chars": self.max_total_chars,
+        }
+
+        invalid = [name for name, value in limits.items() if value < 1]
+
+        if invalid:
+            raise ValueError("evolution limits must be positive: " + ", ".join(invalid))
+
+
 @dataclass(frozen=True)
 class AppConfig:  # runner 配置
     seed: int = 42
@@ -73,11 +112,13 @@ class AppConfig:  # runner 配置
     model: str = "mock-v1"
     base_url: str = "https://api.deepseek.com/v1"
     api_key_env: str = "DEEPSEEK_API_KEY"
+    routing_strategy: str = "utility-aware"
     meta_evolution: bool = False
     max_skills_per_item: int = 3
     gate: GateConfig = field(default_factory=GateConfig)
     meta_learning: MetaLearningConfig = field(default_factory=MetaLearningConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
 
     def __post_init__(self) -> None:
         """函数作用：在 `AppConfig` 数据类初始化后检查字段之间的业务约束。
@@ -87,6 +128,16 @@ class AppConfig:  # runner 配置
             raise ValueError("backend must be mock or openai-compatible")
         if self.max_skills_per_item < 1:
             raise ValueError("max_skills_per_item must be positive")
+        if self.routing_strategy not in {
+            "utility-aware",
+            "all-experts",
+            "random",
+            "static",
+            "llm",
+        }:
+            raise ValueError(
+                "routing_strategy must be utility-aware, all-experts, random, static, or llm"
+            )
 
     def resolved_api_key(self) -> str:
         """函数作用：负责`AppConfig` 中的 `resolved_api_key` 处理，封装调用方需要复用的业务步骤。
@@ -144,6 +195,8 @@ def load_config(path: str | Path) -> AppConfig:
     输出：返回 `AppConfig` 类型结果；校验或下游调用失败时异常向上传递。"""
     raw = _simple_yaml(Path(path).read_text(encoding="utf-8"))
     gate = GateConfig(**raw.pop("gate", {}))
+    evolution_raw = raw.pop("evolution", {})
+    evolution = EvolutionConfig(**evolution_raw)
     generation_raw = raw.pop("generation", {})
     if "store_path" in generation_raw:
         generation_raw["store_path"] = Path(generation_raw["store_path"])
@@ -156,4 +209,6 @@ def load_config(path: str | Path) -> AppConfig:
         if key in raw:
             raw[key] = Path(raw[key])
     raw["dataset_roots"] = {k: Path(v) for k, v in raw.get("dataset_roots", {}).items()}
-    return AppConfig(gate=gate, meta_learning=meta_learning, generation=generation, **raw)
+    return AppConfig(
+        gate=gate, meta_learning=meta_learning, generation=generation, evolution=evolution, **raw
+    )
