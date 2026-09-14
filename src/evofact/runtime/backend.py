@@ -28,6 +28,14 @@ class ModelBackend(Protocol):
         """让模型从合法候选技能中选择本次需要执行的专家技能。"""
         ...
 
+    async def optimize(
+        self,
+        context: dict[str, Any],
+        optimizer_skill: SkillSpec,
+    ) -> BackendResult:
+        """根据错误上下文和优化器提示词生成原始 JSON 决策。"""
+        ...
+
     async def analyze(self, sample: dict[str, Any], skill: SkillSpec) -> BackendResult:
         """函数作用：负责`ModelBackend` 中的 `analyze` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `ModelBackend` 实例；`sample`（dict[str, Any]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。

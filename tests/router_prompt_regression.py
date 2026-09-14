@@ -108,9 +108,7 @@ async def run_live(config_path: Path, case_ids: set[str]) -> int:
     by_id = {skill.skill_id: skill.name for skill in skills}
     known_names = set(by_id.values())
 
-    selected_cases = [
-        case for case in ROUTER_CASES if not case_ids or case.case_id in case_ids
-    ]
+    selected_cases = [case for case in ROUTER_CASES if not case_ids or case.case_id in case_ids]
     unknown_cases = case_ids - {case.case_id for case in ROUTER_CASES}
     if unknown_cases:
         print(f"Unknown case IDs: {', '.join(sorted(unknown_cases))}")
@@ -119,9 +117,7 @@ async def run_live(config_path: Path, case_ids: set[str]) -> int:
         print("No router cases selected.")
         return 2
 
-    expected_names = {
-        name for case in selected_cases for name in case.expected_names
-    }
+    expected_names = {name for case in selected_cases for name in case.expected_names}
     missing_skills = expected_names - known_names
     if missing_skills:
         print(f"Expected skills are not installed: {', '.join(sorted(missing_skills))}")
@@ -169,8 +165,7 @@ async def run_live(config_path: Path, case_ids: set[str]) -> int:
         )
         decision = result.value
         actual_names = tuple(
-            by_id.get(skill_id, f"<unknown:{skill_id}>")
-            for skill_id in decision.selected_skill_ids
+            by_id.get(skill_id, f"<unknown:{skill_id}>") for skill_id in decision.selected_skill_ids
         )
         expected_set = set(case.expected_names)
         actual_set = set(actual_names)
@@ -187,7 +182,9 @@ async def run_live(config_path: Path, case_ids: set[str]) -> int:
         print(f"  fallback: {decision.fallback_used}")
         print(f"  confidence: {decision.confidence:.3f}")
         for skill_id in decision.selected_skill_ids:
-            print(f"  reason[{by_id.get(skill_id, skill_id)}]: {decision.reasons.get(skill_id, '')}")
+            print(
+                f"  reason[{by_id.get(skill_id, skill_id)}]: {decision.reasons.get(skill_id, '')}"
+            )
 
     total = len(selected_cases)
     print(f"\nResult: {passed}/{total} passed ({passed / total:.0%})")

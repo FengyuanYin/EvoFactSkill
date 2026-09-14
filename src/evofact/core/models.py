@@ -248,6 +248,12 @@ class AttributionReport(
     counterfactual_deltas: dict[str, float] = field(default_factory=dict)
 
 
+class OptimizerAction(StrEnum):
+    ADD = "add"
+    EDIT = "edit"
+    NO_CHANGE = "no_change"
+
+
 class EvolutionOperation(
     StrEnum
 ):  # 进化操作枚举，定义技能演化的方式（添加、编辑、拆分、合并、泛化、特化、退役、回滚）
@@ -273,6 +279,75 @@ class EvolutionProposal(
     source_trace_ids: tuple[str, ...] = ()
     error_cluster_id: str | None = None
     risk_flags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SkillOptimizerDecision(ModelMixin):
+    action: OptimizerAction
+    rationale: str
+    confidence: float = 0.0
+
+    # EDIT 时指定已有 Skill；ADD 和 NO_CHANGE 时必须为 None。
+    target_skill_id: str | None = None
+
+    # 只有 ADD 时使用；EDIT 不允许重命名已有 Skill。
+    skill_name: str | None = None
+
+    # ADD 只能是 SPECIALIST；EDIT 可以指向三种核心角色。
+    skill_kind: SkillKind | None = None
+
+    # ADD 表示新 Skill 指令；EDIT 表示替换后的完整指令。
+    instructions: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.rationale.strip():
+            raise ValueError("optimizer rationale must not be empty")
+
+        if not 0 <= self.confidence <= 1:
+            raise ValueError("optimizer confidence must be in [0, 1]")
+
+        candidate_fields = (
+            self.target_skill_id,
+            self.skill_name,
+            self.skill_kind,
+            self.instructions,
+        )
+
+        if self.action == OptimizerAction.NO_CHANGE:
+            if any(value is not None for value in candidate_fields):
+                raise ValueError("no_change must not contain skill fields")
+            return
+
+        if not self.instructions or not self.instructions.strip():
+            raise ValueError("add/edit must provide instructions")
+
+        if self.action == OptimizerAction.ADD:
+            if self.target_skill_id is not None:
+                raise ValueError("add must not specify target_skill_id")
+
+            if not self.skill_name or not self.skill_name.strip():
+                raise ValueError("add must provide skill_name")
+
+            if self.skill_kind != SkillKind.SPECIALIST:
+                raise ValueError("optimizer may only add specialist skills")
+            return
+
+        if self.action == OptimizerAction.EDIT:
+            if not self.target_skill_id:
+                raise ValueError("edit must provide target_skill_id")
+
+            if self.skill_name is not None:
+                raise ValueError("edit must not rename an existing skill")
+
+            if self.skill_kind not in {
+                SkillKind.SPECIALIST,
+                SkillKind.ROUTER,
+                SkillKind.JUDGE,
+            }:
+                raise ValueError("optimizer may only edit specialist, router, or judge")
+            return
+
+        raise ValueError(f"unsupported optimizer action: {self.action}")
 
 
 @dataclass(frozen=True)

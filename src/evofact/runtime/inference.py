@@ -16,12 +16,8 @@ from .aggregator import aggregate_evidence
 
 class InferenceRuntime:
     def __init__(
-        self,
-        backend,
-        router: SkillRouter | LLMSkillRouter,
-        skills: list[SkillSpec],
-        utilities=None
-        ):
+        self, backend, router: SkillRouter | LLMSkillRouter, skills: list[SkillSpec], utilities=None
+    ):
         """函数作用：创建并初始化 `InferenceRuntime` 对象，为后续方法调用准备依赖和初始状态。
         输入要求：`self` 应为已初始化的 `InferenceRuntime` 实例；`backend`（未显式标注）需符合函数签名约定；`router`（SkillRouter）需符合函数签名约定；`skills`（list[SkillSpec]）需符合函数签名约定；`utilities`（未显式标注，默认 `None`）需符合函数签名约定。
         输出：返回 `None`；初始化 `InferenceRuntime` 的实例状态，构造参数非法时可能抛出异常。"""
@@ -47,9 +43,7 @@ class InferenceRuntime:
             routing_result.value,
             RoutingDecision,
         ):
-            raise TypeError(
-                "router must return a RoutingDecision"
-            )
+            raise TypeError("router must return a RoutingDecision")
 
         decision = routing_result.value
 
@@ -58,10 +52,7 @@ class InferenceRuntime:
             routing_result.usage,
         )
 
-        by_id = {
-            skill.skill_id: skill
-            for skill in self.skills
-        }
+        by_id = {skill.skill_id: skill for skill in self.skills}
 
         reports = []
         errors = []
