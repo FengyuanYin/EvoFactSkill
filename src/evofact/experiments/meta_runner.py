@@ -92,6 +92,7 @@ class MetaEvolutionRunner:
         samples: list[Sample],
         *,
         final_test_domains: tuple[str, ...] = (),
+        train_domains: tuple[str, ...] | None = None,
         resume: bool = False,
         evaluation_only: bool = False,
     ) -> MetaEvolutionOutcome:
@@ -100,7 +101,11 @@ class MetaEvolutionRunner:
         输出：异步返回 `MetaEvolutionOutcome` 类型结果；校验或下游调用失败时异常向上传递。"""
         if not self.config.meta_learning.enabled:  # 检查元学习功能是否开启
             raise ValueError("meta_learning.enabled must be true for DEMSE")
-        source_domains, final_domains = split_source_and_final(samples, final_test_domains)
+        source_domains, final_domains = split_source_and_final(
+            samples,
+            final_test_domains,
+            train_domains,
+        )
         from evofact.data.domains import effective_domain
         from evofact.data.manifests import sample_fingerprint
 

@@ -49,10 +49,10 @@ class SkillRouter:
             # 按输入顺序选取尽可能多的专家，但不超过预算上限。
             chosen = candidates[: budget.max_skills]
         elif self.strategy == "random":
-            # 将全局 seed 与 sample_id 组合，使同一样本的随机结果可以复现。
-            chosen = random.Random(f"{self.seed}:{sample.get('sample_id')}").sample(
-                candidates, min(len(candidates), budget.max_skills)
-            )
+            # 公共视图没有内部 sample_id 时使用文本，仍保证同一样本结果可复现。
+            chosen = random.Random(
+                f"{self.seed}:{sample.get('sample_id') or sample.get('text', '')}"
+            ).sample(candidates, min(len(candidates), budget.max_skills))
         elif self.strategy == "static":
             # 固定选择三个通用技能；候选池中不存在的技能会被自动忽略。
             chosen = [
@@ -70,7 +70,11 @@ class SkillRouter:
                 输入要求：`skill`（未显式标注）需符合函数签名约定。
                 输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
                 # matches_scope 已过滤不匹配项；这里保留范围分，强调领域匹配程度。
-                scope = 1 if not skill.scope.domains or domain in skill.scope.domains else -10
+                scope = (
+                    1
+                    if not skill.scope.domains or not domain or domain in skill.scope.domains
+                    else -10
+                )
                 # 文本每命中一个 trigger.pattern，就累加该触发器的权重。
                 trigger = sum(t.weight for t in skill.triggers if t.pattern.casefold() in text)
                 # 没有历史统计时，以全零的默认效用记录参与计算。
@@ -327,12 +331,17 @@ def matches_scope(skill: SkillSpec, sample: dict) -> bool:
     输入要求：`skill`（SkillSpec）需符合函数签名约定；`sample`（dict）需符合函数签名约定。
     输出：返回 `bool` 类型结果；校验或下游调用失败时异常向上传递。"""
     scope = skill.scope
+    metadata = sample.get("metadata")
     return (
-        (not scope.domains or sample.get("domain") in scope.domains)
-        and (not scope.datasets or sample.get("dataset") in scope.datasets)
+        (not scope.domains or "domain" not in sample or sample.get("domain") in scope.domains)
+        and (
+            not scope.datasets or "dataset" not in sample or sample.get("dataset") in scope.datasets
+        )
         and (
             not scope.temporal_windows
-            or str(sample.get("metadata", {}).get("temporal_window")) in scope.temporal_windows
+            or not isinstance(metadata, dict)
+            or "temporal_window" not in metadata
+            or str(metadata.get("temporal_window")) in scope.temporal_windows
         )
     )
 

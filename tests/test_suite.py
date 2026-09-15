@@ -61,8 +61,12 @@ class CoreTests(unittest.TestCase):
         输入要求：`self` 应为已初始化的 `CoreTests` 实例；无其他显式输入。
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         s = Sample("1", "x", "claim", 1, metadata={"gold": "x", "nested": {"Answer": 2}})
+        self.assertEqual(
+            set(s.public_view()),
+            {"text", "published_at", "evidence"},
+        )
         self.assertNotIn("label", s.public_view())
-        self.assertEqual(s.public_view()["metadata"], {"nested": {}})
+        self.assertNotIn("metadata", s.public_view())
         with self.assertRaises(FrozenInstanceError):
             s.text = "changed"
 
@@ -123,8 +127,9 @@ class DataTests(unittest.TestCase):
             registry = DataRegistry()
             weibo = root / "weibo"
             weibo.mkdir()
-            (weibo / "train.jsonl").write_text(
-                '{"content":"claim","label":1,"category":"tech"}\n', encoding="utf-8"
+            (weibo / "weibo21_all.jsonl").write_text(
+                '{"content":"claim","label":1,"category":"tech","split":"train"}\n',
+                encoding="utf-8",
             )
             amt = root / "amt"
             amt.mkdir()
@@ -143,6 +148,7 @@ class DataTests(unittest.TestCase):
             )
             self.assertEqual(len(registry.load("weibo21", weibo)), 1)
             self.assertEqual(registry.load("amtcele", amt)[0].domain, "tech")
+            self.assertEqual(registry.load("amtcele", amt)[0].event_id, "tech1")
             self.assertEqual(
                 registry.load("livefact", root / "live")[0].metadata["split_role"], "test"
             )

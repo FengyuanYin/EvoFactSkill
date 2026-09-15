@@ -24,7 +24,7 @@ class ChallengeGenerator:
         reports = {a.trace_id: a for a in attributions}
         success, failure = [], []
         for trace in sorted(traces, key=lambda t: t.trace_id):
-            source = by_id.get(trace.sample_public.get("sample_id"))
+            source = by_id.get(trace.sample_id)
             if source is None:
                 raise ValueError("generator trace outside construction")
             gold = _gold(source.label)
@@ -39,7 +39,6 @@ class ChallengeGenerator:
                 "attribution": asdict(reports[trace.trace_id]),
             }
             row["trace"]["sample_public"] = source.public_view()
-            row["trace"]["sample_public"]["metadata"] = {}
             (success if row["outcome"] == "success" else failure).append(row)
         chosen = []
         # Preserve both outcomes when available; never invent a successful trace.

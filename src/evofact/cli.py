@@ -67,7 +67,7 @@ def build_parser():
     meta_parser = subparsers.add_parser("meta-evolve")
     meta_parser.add_argument(
         "--final-test-domains",
-        default="outer_holdout",
+        default=None,
     )
     meta_parser.add_argument("--episodes", type=int)
     meta_parser.add_argument(
@@ -91,7 +91,7 @@ def build_parser():
         "--samples", help="normalized Sample JSONL including evidence snapshots"
     )
     adversarial.add_argument("--facts", help="verified structured evidence facts JSONL")
-    adversarial.add_argument("--final-test-domains", default="outer_holdout")
+    adversarial.add_argument("--final-test-domains", default=None)
     adversarial.add_argument("--resume", action="store_true")
     adversarial.add_argument("--evaluation-only", action="store_true")
 
@@ -125,23 +125,67 @@ async def _run(args):
         runner.skills = list(SkillRepository(root / config.skill_store).active().values())
     if args.limit < 0:
         raise ValueError("--limit must be non-negative")
-    if args.data_root and not args.dataset:
-        raise ValueError("--data-root requires --dataset")
+
+    configured_dataset = config.data.dataset
+    if args.dataset and configured_dataset and args.dataset != configured_dataset:
+        raise ValueError(
+            f"--dataset {args.dataset!r} conflicts with configured dataset {configured_dataset!r}"
+        )
+    dataset = args.dataset or configured_dataset
+    if args.data_root and not dataset:
+        raise ValueError("--data-root requires a configured or command-line dataset")
+    raw_cli_final = getattr(args, "final_test_domains", None)
+    cli_final_domains = (
+        tuple(sorted(x.strip() for x in raw_cli_final.split(",") if x.strip()))
+        if raw_cli_final
+        else ()
+    )
+
     all_samples = None
     manifest = None
-    if args.dataset:  # 加载数据集
-        data_root = (
-            Path(args.data_root) if args.data_root else config.dataset_roots.get(args.dataset)
-        )
+    train_domains: tuple[str, ...] | None = None
+    final_test_domains: tuple[str, ...] | None = None
+    if dataset:  # 加载单一数据集，并应用配置中的领域边界。
+        uses_data_config = dataset == configured_dataset and configured_dataset is not None
+        data_root = Path(args.data_root) if args.data_root else None
+        if data_root is None and uses_data_config:
+            data_root = config.data.root
+        if data_root is None:
+            data_root = config.dataset_roots.get(dataset)
         if not data_root:
-            raise ValueError(f"no data root configured for {args.dataset}")
-        all_samples = DataRegistry().load(args.dataset, data_root)
-        manifest = build_manifest(all_samples, seed=config.seed)
+            raise ValueError(f"no data root configured for {dataset}")
+        if not data_root.is_absolute():
+            data_root = root / data_root
+
+        excluded_domains = config.data.excluded_domains if uses_data_config else ()
+        all_samples = DataRegistry().load(
+            dataset,
+            data_root,
+            excluded_domains=excluded_domains,
+        )
+        if not all_samples:
+            raise ValueError("dataset has no samples")
+
+        if uses_data_config:
+            train_domains = config.data.train_domains
+            final_test_domains = config.data.final_test_domains
+        if cli_final_domains:
+            if final_test_domains and set(cli_final_domains) != set(final_test_domains):
+                raise ValueError("--final-test-domains conflicts with data.final_test_domains")
+            final_test_domains = cli_final_domains
+        if final_test_domains and train_domains is None:
+            known = {str(sample.domain or sample.dataset) for sample in all_samples}
+            train_domains = tuple(sorted(known - set(final_test_domains)))
+
+        manifest = build_manifest(
+            all_samples,
+            seed=config.seed,
+            train_domains=train_domains,
+            final_test_domains=final_test_domains,
+        )
         errors = detect_leakage(all_samples, manifest)
         if errors:
             raise ValueError("dataset leakage: " + "; ".join(errors))
-        if not all_samples:
-            raise ValueError("dataset has no samples")
 
     def select(ids):
         """函数作用：根据样本、技能范围、历史效用和预算选择本次调用的技能。
@@ -152,7 +196,13 @@ async def _run(args):
 
     if args.command == "data":
         if args.data_command == "inspect":
-            return [asdict(x) for x in DataRegistry().inspect(config.dataset_roots)]
+            roots = dict(config.dataset_roots)
+            if configured_dataset and config.data.root:
+                configured_root = config.data.root
+                if not configured_root.is_absolute():
+                    configured_root = root / configured_root
+                roots[configured_dataset] = configured_root
+            return [asdict(x) for x in DataRegistry().inspect(roots)]
         manifest = manifest or build_manifest(fixture_samples(), seed=config.seed)
         text = manifest_json(manifest)
         if args.output:
@@ -208,9 +258,7 @@ async def _run(args):
         return result
     if args.command == "meta-evolve":  # 使用元进化
         rows = fixture_meta_samples() if all_samples is None else all_samples
-        final_domains = tuple(
-            sorted(x.strip() for x in args.final_test_domains.split(",") if x.strip())
-        )
+        final_domains = final_test_domains or cli_final_domains or ("outer_holdout",)
         overrides = {}
         if args.episodes is not None:
             overrides["episodes"] = args.episodes
@@ -230,6 +278,7 @@ async def _run(args):
         outcome = await MetaEvolutionRunner(config, root, repository).run(
             rows,
             final_test_domains=final_domains,
+            train_domains=train_domains,
             resume=args.resume,
             evaluation_only=args.evaluation_only,
         )
@@ -263,7 +312,7 @@ async def _run(args):
             if args.facts:
                 raise ValueError("--facts requires --samples or --dataset")
             rows, facts = fixture_adversarial_data()
-        final = tuple(sorted(x.strip() for x in args.final_test_domains.split(",") if x.strip()))
+        final = final_test_domains or cli_final_domains or ("outer_holdout",)
         repo = None if args.evaluation_only else SkillRepository(root / config.skill_store)
         adversarial_runner = AdversarialEvolutionRunner(config, root, facts, repo)
         outcome = await adversarial_runner.run(

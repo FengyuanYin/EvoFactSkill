@@ -33,9 +33,7 @@ class CandidateFirewall:
         if set(episode.final_test_domains) != self.final_test_domains:
             raise ValueError("firewall final-test domain policy mismatch")
         allowed_ids = set(episode.meta_train_sample_ids)
-        selected = tuple(
-            trace for trace in traces if str(trace.sample_public.get("sample_id")) in allowed_ids
-        )
+        selected = tuple(trace for trace in traces if trace.sample_id in allowed_ids)
         if len(selected) != len(traces):
             raise ValueError("generation traces contain non-meta-train samples")
         allowed_trace_ids = {trace.trace_id for trace in selected}

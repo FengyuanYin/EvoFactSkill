@@ -3,17 +3,19 @@ import json
 import random
 from collections import defaultdict
 from dataclasses import asdict
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from evofact.core.models import DataManifest, Sample
+
+from .deduplication import content_fingerprint
+from .domains import effective_domain, split_source_and_final
 
 
 def sample_fingerprint(sample: Sample) -> str:
     """函数作用：负责当前模块中的 `sample_fingerprint` 处理，封装调用方需要复用的业务步骤。
     输入要求：`sample`（Sample）需符合函数签名约定。
     输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
-    normalized = " ".join(sample.text.casefold().split())
-    return hashlib.sha256(f"{sample.dataset}\0{normalized}".encode()).hexdigest()
+    return content_fingerprint(sample.dataset, sample.text)
 
 
 def build_manifest(
@@ -22,20 +24,40 @@ def build_manifest(
     seed: int = 42,
     evolution_ratio: float = 0.15,
     protected_ratio: float = 0.15,
+    train_domains: Sequence[str] | None = None,
+    final_test_domains: Sequence[str] | None = None,
 ) -> DataManifest:
     """函数作用：构造 `build_manifest` 所表示的数据，供当前模块后续流程使用。
     输入要求：`samples`（Iterable[Sample]）需符合函数签名约定；`seed`（int，默认 `42`）需以关键字传入并符合签名约定；`evolution_ratio`（float，默认 `0.15`）需以关键字传入并符合签名约定；`protected_ratio`（float，默认 `0.15`）需以关键字传入并符合签名约定。
     输出：返回 `DataManifest` 类型结果；校验或下游调用失败时异常向上传递。"""
     rows = list(samples)
+    explicit_domain_partition = train_domains is not None or final_test_domains is not None
+    if explicit_domain_partition and (train_domains is None or final_test_domains is None):
+        raise ValueError("train_domains and final_test_domains must be provided together")
+    if explicit_domain_partition:
+        source_domains, final_domains = split_source_and_final(
+            rows,
+            final_test_domains or (),
+            train_domains,
+        )
+    else:
+        source_domains, final_domains = (), ()
+    final_domain_set = set(final_domains)
+
     grouped: dict[str, list[Sample]] = defaultdict(list)
     event_groups: dict[str, list[Sample]] = defaultdict(list)
     test = []
     fps = {}
     for sample in rows:
         fps[sample.sample_id] = sample_fingerprint(sample)
+        if explicit_domain_partition:
+            domain = effective_domain(sample)
+            if domain in final_domain_set:
+                test.append(sample.sample_id)
+                continue
         official = str(sample.metadata.get("official_split", "")).casefold()
         role = sample.metadata.get("split_role")
-        if role == "test" or official == "test":
+        if not explicit_domain_partition and (role == "test" or official == "test"):
             test.append(sample.sample_id)
         elif role == "protected":
             protected_id = sample.sample_id
@@ -76,6 +98,8 @@ def build_manifest(
         "protected": sorted(protected),
         "test": sorted(test),
         "fingerprints": dict(sorted(fps.items())),
+        "train_domains": list(source_domains),
+        "final_test_domains": list(final_domains),
     }
     mid = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
     return DataManifest(
@@ -85,7 +109,13 @@ def build_manifest(
         tuple(payload["evolution"]),
         tuple(payload["protected"]),
         tuple(payload["test"]),
-        {"seed": seed, "evolution_ratio": evolution_ratio, "protected_ratio": protected_ratio},
+        {
+            "seed": seed,
+            "evolution_ratio": evolution_ratio,
+            "protected_ratio": protected_ratio,
+            "train_domains": list(source_domains),
+            "final_test_domains": list(final_domains),
+        },
     )
 
 

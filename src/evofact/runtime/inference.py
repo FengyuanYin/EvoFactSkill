@@ -31,10 +31,16 @@ class InferenceRuntime:
         输入要求：`self` 应为已初始化的 `InferenceRuntime` 实例；`sample`（Sample）需符合函数签名约定；`budget`（RunBudget，默认 `RunBudget()`）需符合函数签名约定。
         输出：异步返回 `InferenceTrace` 类型结果；校验或下游调用失败时异常向上传递。"""
         public = sample.public_view()
+        scope_view = {
+            "dataset": sample.dataset,
+            "domain": sample.domain,
+            "metadata": {"temporal_window": sample.metadata.get("temporal_window")},
+        }
+        eligible_skills = [skill for skill in self.skills if matches_scope(skill, scope_view)]
 
         routing_result = await self.router.route(
             public,
-            self.skills,
+            eligible_skills,
             self.utilities,
             budget,
         )
@@ -52,7 +58,7 @@ class InferenceRuntime:
             routing_result.usage,
         )
 
-        by_id = {skill.skill_id: skill for skill in self.skills}
+        by_id = {skill.skill_id: skill for skill in eligible_skills}
 
         reports = []
         errors = []
@@ -68,10 +74,8 @@ class InferenceRuntime:
                 errors.append(f"specialist {sid}: {type(exc).__name__}: {exc}")
         judges = [
             s
-            for s in self.skills
-            if s.kind == SkillKind.JUDGE
-            and s.status.value in {"active", "frozen"}
-            and matches_scope(s, public)
+            for s in eligible_skills
+            if s.kind == SkillKind.JUDGE and s.status.value in {"active", "frozen"}
         ]
         if not judges:
             raise RuntimeError("no active judge skill")
@@ -81,12 +85,13 @@ class InferenceRuntime:
             f"{sample.sample_id}:{','.join(decision.selected_skill_ids)}".encode()
         ).hexdigest()[:20]
         return InferenceTrace(
-            trace_id,
-            public,
-            decision,
-            tuple(reports),
-            result.value,
-            {s.skill_id: s.version for s in self.skills},
+            trace_id=trace_id,
+            sample_id=sample.sample_id,
+            sample_public=public,
+            routing=decision,
+            specialist_reports=tuple(reports),
+            decision=result.value,
+            skill_versions={s.skill_id: s.version for s in self.skills},
             aggregated_evidence=aggregate_evidence(tuple(reports)),
             usage=usage,
             errors=tuple(errors),

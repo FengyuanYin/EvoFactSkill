@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,11 +104,48 @@ class EvolutionConfig:
 
 
 @dataclass(frozen=True)
+class DataConfig:
+    dataset: str | None = None
+    root: Path | None = None
+    train_domains: tuple[str, ...] = ()
+    final_test_domains: tuple[str, ...] = ()
+    excluded_domains: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        configured = bool(
+            self.dataset
+            or self.root
+            or self.train_domains
+            or self.final_test_domains
+            or self.excluded_domains
+        )
+        if not configured:
+            return
+        if not self.dataset or self.root is None:
+            raise ValueError("data.dataset and data.root must be configured together")
+        if not self.train_domains or not self.final_test_domains:
+            raise ValueError("data.train_domains and data.final_test_domains must be non-empty")
+
+        train = set(self.train_domains)
+        final = set(self.final_test_domains)
+        excluded = set(self.excluded_domains)
+        if len(train) != len(self.train_domains):
+            raise ValueError("data.train_domains must not contain duplicates")
+        if len(final) != len(self.final_test_domains):
+            raise ValueError("data.final_test_domains must not contain duplicates")
+        if len(excluded) != len(self.excluded_domains):
+            raise ValueError("data.excluded_domains must not contain duplicates")
+        if train & final or train & excluded or final & excluded:
+            raise ValueError("train, final-test and excluded domains must be disjoint")
+
+
+@dataclass(frozen=True)
 class AppConfig:  # runner 配置
     seed: int = 42
     output_dir: Path = Path("outputs")
     skill_store: Path = Path("skills/store")
     dataset_roots: dict[str, Path] = field(default_factory=dict)
+    data: DataConfig = field(default_factory=DataConfig)
     backend: str = "mock"
     model: str = "mock-v1"
     base_url: str = "https://api.deepseek.com/v1"
@@ -158,6 +196,11 @@ def _scalar(value: str) -> Any:
         return value.casefold() == "true"
     if value.casefold() in {"null", "none"}:
         return None
+    if value.startswith("[") and value.endswith("]"):
+        parsed = json.loads(value)
+        if not isinstance(parsed, list):
+            raise ValueError("config sequence must be a JSON-style list")
+        return parsed
     try:
         return float(value) if "." in value else int(value)
     except ValueError:
@@ -194,6 +237,18 @@ def load_config(path: str | Path) -> AppConfig:
     输入要求：`path`（str | Path）需符合函数签名约定。
     输出：返回 `AppConfig` 类型结果；校验或下游调用失败时异常向上传递。"""
     raw = _simple_yaml(Path(path).read_text(encoding="utf-8"))
+    data_raw = raw.pop("data", {})
+    if "root" in data_raw and data_raw["root"] is not None:
+        data_raw["root"] = Path(data_raw["root"])
+    for key in ("train_domains", "final_test_domains", "excluded_domains"):
+        if key in data_raw:
+            value = data_raw[key]
+            if isinstance(value, str):
+                value = [item.strip() for item in value.split(",") if item.strip()]
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"data.{key} must be a list")
+            data_raw[key] = tuple(str(item).strip() for item in value if str(item).strip())
+    data = DataConfig(**data_raw)
     gate = GateConfig(**raw.pop("gate", {}))
     evolution_raw = raw.pop("evolution", {})
     evolution = EvolutionConfig(**evolution_raw)
@@ -210,5 +265,10 @@ def load_config(path: str | Path) -> AppConfig:
             raw[key] = Path(raw[key])
     raw["dataset_roots"] = {k: Path(v) for k, v in raw.get("dataset_roots", {}).items()}
     return AppConfig(
-        gate=gate, meta_learning=meta_learning, generation=generation, evolution=evolution, **raw
+        gate=gate,
+        meta_learning=meta_learning,
+        generation=generation,
+        evolution=evolution,
+        data=data,
+        **raw,
     )

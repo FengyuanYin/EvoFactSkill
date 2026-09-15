@@ -59,10 +59,20 @@ class Sample(ModelMixin):
         """函数作用：负责`Sample` 中的 `public_view` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `Sample` 实例；无其他显式输入。
         输出：返回 `dict[str, Any]` 类型结果；校验或下游调用失败时异常向上传递。"""
-        # 返回经过敏感信息脱敏（redact_sensitive）后的字典视图，用于展示或日志
-        from .redaction import redact_sensitive
-
-        return redact_sensitive(self.model_dump())
+        # Use an allow-list: internal IDs, labels, domains and metadata must not
+        # enter router, specialist or judge prompts.
+        return {
+            "text": self.text,
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "evidence": [
+                {
+                    "text": item.text,
+                    "source": item.source,
+                    "published_at": item.published_at.isoformat() if item.published_at else None,
+                }
+                for item in self.evidence
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -212,6 +222,7 @@ class InferenceTrace(
     ModelMixin
 ):  # 完整推理过程记录，包括样本公共视图、路由决策、专家报告、最终决策、技能版本、聚合证据、资源使用和错误列表
     trace_id: str
+    sample_id: str  # Internal correlation ID; never included in sample_public.
     sample_public: dict[str, Any]
     routing: RoutingDecision
     specialist_reports: tuple[SpecialistReport, ...]

@@ -149,7 +149,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(accepted[0].text, self.response["samples"][0]["text"])
         for sample in accepted:
             self.assertEqual(sample.dataset, "fixture")
-            self.assertEqual(sample.public_view()["metadata"], {})
+            self.assertNotIn("metadata", sample.public_view())
             self.assertNotIn("label", sample.public_view())
         review_payload = self.backend.calls[-1][1]
         self.assertNotIn("decisions", review_payload)

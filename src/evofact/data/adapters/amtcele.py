@@ -5,6 +5,7 @@ from typing import Iterable
 
 from evofact.core.models import Sample
 from evofact.data.base import DatasetDiagnostic
+from evofact.data.deduplication import stable_sample_id
 
 
 class AMTCeleAdapter:
@@ -37,14 +38,21 @@ class AMTCeleAdapter:
             path = next(iter(sorted(root.glob("*.csv"))))
             with path.open("r", encoding="utf-8-sig", newline="") as stream:
                 rows = list(csv.DictReader(stream))
-        for i, row in enumerate(rows):
+        samples = []
+        for row in rows:
             text = str(row.get("text") or row.get("content") or "").strip()
-            if text:
-                yield Sample(
-                    str(row.get("id") or f"amtcele:{i}"),
-                    self.name,
-                    text,
-                    row.get("label"),
-                    str(row.get("domain") or "").rstrip("0123456789") or None,
-                    metadata={"source_file": path.name},
+            pair_id = str(row.get("domain") or "").strip()
+            domain = pair_id.rstrip("0123456789") or None
+            if text and domain and pair_id:
+                samples.append(
+                    Sample(
+                        stable_sample_id(self.name, text),
+                        self.name,
+                        text,
+                        row.get("label"),
+                        domain,
+                        pair_id,
+                        metadata={"source_file": path.name, "pair_id": pair_id},
+                    )
                 )
+        yield from samples

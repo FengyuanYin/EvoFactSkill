@@ -5,6 +5,7 @@ from .adapters.amtcele import AMTCeleAdapter
 from .adapters.livefact import LiveFactAdapter
 from .adapters.weibo21 import Weibo21Adapter
 from .base import DatasetAdapter, DatasetDiagnostic
+from .deduplication import deduplicate_samples
 
 
 class DataRegistry:
@@ -38,10 +39,18 @@ class DataRegistry:
             self._adapters[n].discover(roots.get(n, Path("data/raw") / n)) for n in self.names()
         ]
 
-    def load(self, name: str, root: Path):
+    def load(self, name: str, root: Path, *, excluded_domains=()):
         """函数作用：从配置的存储位置读取并标准化当前对象负责的数据。
         输入要求：`self` 应为已初始化的 `DataRegistry` 实例；`name`（str）需符合函数签名约定；`root`（Path）需符合函数签名约定。
         输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         if name not in self._adapters:
             raise KeyError(name)
-        return list(self._adapters[name].load(root))
+        excluded = {str(domain).strip() for domain in excluded_domains}
+        rows = [
+            sample
+            for sample in self._adapters[name].load(root)
+            if (sample.domain or sample.dataset) not in excluded
+        ]
+        if name in {"weibo21", "amtcele"}:
+            rows = list(deduplicate_samples(rows))
+        return rows

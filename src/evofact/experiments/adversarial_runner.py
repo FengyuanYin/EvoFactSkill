@@ -198,9 +198,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         else:
             traces, _ = await self.base.run(construction)
             by_id = {s.sample_id: s for s in construction}
-            reports = [
-                attribute_trace(t, _gold(by_id[t.sample_public["sample_id"]].label)) for t in traces
-            ]
+            reports = [attribute_trace(t, _gold(by_id[t.sample_id].label)) for t in traces]
             firewall.build_generation_view(episode, traces, reports)
             request = self.generator.build_request(
                 construction, traces, reports, config=cfg, episode_id=episode.episode_id
