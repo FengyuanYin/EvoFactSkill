@@ -1,8 +1,62 @@
 import json
 import os
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from evofact.governance import META_CHECKPOINT_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class CheckpointIdentity:
+    config_digest: str
+    real_data_digest: str
+    split_digest: str
+    lineage_digest: str
+    package_bank_digest: str
+    generator_package_digest: str
+    governance_digest: str
+    dag_policy_digest: str
+    budget_policy_digest: str
+    pricing_version: str
+    episode_plan_digest: str
+
+
+class CheckpointV2Store:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def save(self, identity: CheckpointIdentity, state: dict) -> None:
+        payload = {
+            "schema_version": META_CHECKPOINT_SCHEMA_VERSION,
+            "identity": asdict(identity),
+            "state": state,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            dir=self.path.parent, prefix=".checkpoint-v2-", suffix=".json"
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(
+                    payload, stream, ensure_ascii=False, sort_keys=True, indent=2, default=str
+                )
+            os.replace(temporary, self.path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def load(self, identity: CheckpointIdentity) -> dict:
+        if not self.path.exists():
+            return {}
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != META_CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError("checkpoint v1 may be read for reports but cannot resume as v2")
+        expected = asdict(identity)
+        for key, value in expected.items():
+            if payload.get("identity", {}).get(key) != value:
+                raise ValueError(f"checkpoint identity mismatch: {key}")
+        return payload.get("state", {})
 
 
 class Checkpoint:

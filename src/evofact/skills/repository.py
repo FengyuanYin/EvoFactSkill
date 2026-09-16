@@ -10,6 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from evofact.core.models import SkillKind, SkillScope, SkillSpec, SkillStatus, Trigger
+from evofact.core.package_models import SkillContract, SkillEntrypoints, SkillPackage
+from evofact.governance import ACTIVE_BANK_SCHEMA_VERSION
+from evofact.governance.package_policy import require_valid_package
+from evofact.skills.package_serializer import dumps_package, loads_package
 
 
 def _jsonable(value):
@@ -35,6 +39,20 @@ def _skill_from(data: dict) -> SkillSpec:
     data["scope"] = SkillScope(**{k: tuple(v) for k, v in data.get("scope", {}).items()})
     data["triggers"] = tuple(Trigger(**x) for x in data.get("triggers", []))
     data["parent_ids"] = tuple(data.get("parent_ids", []))
+    if isinstance(data.get("contract"), dict):
+        raw = data["contract"]
+        data["contract"] = SkillContract(
+            **{
+                **raw,
+                "consumes": tuple(raw.get("consumes", ())),
+                "produces": tuple(raw.get("produces", ())),
+                "requires_capabilities": tuple(raw.get("requires_capabilities", ())),
+                "optional_capabilities": tuple(raw.get("optional_capabilities", ())),
+            }
+        )
+    if isinstance(data.get("entrypoints"), dict):
+        raw = data["entrypoints"]
+        data["entrypoints"] = SkillEntrypoints(**{**raw, "tests": tuple(raw.get("tests", ()))})
     return SkillSpec(**data)
 
 
@@ -47,7 +65,10 @@ class SkillRepository:
         self.snapshots = self.root / "snapshots"
         self.events = self.root / "events.jsonl"
         self.active_file = self.root / "active.json"
+        self.blobs = self.root / "blobs"
+        self.package_active_file = self.root / "active-packages.json"
         self.snapshots.mkdir(parents=True, exist_ok=True)
+        self.blobs.mkdir(parents=True, exist_ok=True)
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _atomic_json(self, path: Path, value) -> None:
@@ -339,3 +360,123 @@ class SkillRepository:
                         }
                     )
         return events
+
+    def save_package(self, package: SkillPackage) -> str:
+        require_valid_package(package)
+        path = self.blobs / f"{package.package_digest}.json"
+        if not path.exists():
+            fd, temporary = tempfile.mkstemp(dir=self.blobs, prefix=".tmp-", suffix=".json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(dumps_package(package))
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        return package.package_digest
+
+    def get_package(self, digest: str) -> SkillPackage:
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("package snapshot must be a SHA-256 digest")
+        package = loads_package((self.blobs / f"{digest}.json").read_text(encoding="utf-8"))
+        if package.package_digest != digest:
+            raise ValueError("package blob digest mismatch")
+        return package
+
+    def _package_active_payload(self) -> dict:
+        if not self.package_active_file.exists():
+            return {
+                "schema_version": ACTIVE_BANK_SCHEMA_VERSION,
+                "packages": {},
+                "transactions": {},
+            }
+        payload = json.loads(self.package_active_file.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != ACTIVE_BANK_SCHEMA_VERSION:
+            raise ValueError("unsupported active Package bank schema")
+        return payload
+
+    def active_packages(self) -> dict[str, SkillPackage]:
+        payload = self._package_active_payload()
+        return {
+            name: self.get_package(digest) for name, digest in payload.get("packages", {}).items()
+        }
+
+    def package_transaction(self, run_id: str) -> dict | None:
+        return self._package_active_payload().get("transactions", {}).get(run_id)
+
+    def commit_package_bank(
+        self,
+        packages: list[SkillPackage],
+        *,
+        run_id: str,
+        expected_active: dict[str, str] | None = None,
+        audit: dict | None = None,
+    ) -> tuple[str, ...]:
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        if len({item.manifest.name for item in packages}) != len(packages):
+            raise ValueError("duplicate names in Package bank")
+        payload = self._package_active_payload()
+        existing_transaction = payload.get("transactions", {}).get(run_id)
+        target = {item.manifest.name: item.package_digest for item in packages}
+        if existing_transaction:
+            if existing_transaction["after"] != target:
+                raise ValueError("run_id was already committed with different content")
+            return tuple(existing_transaction["snapshots"])
+        if expected_active is not None and payload.get("packages", {}) != expected_active:
+            raise ValueError("active Package bank changed during evaluation")
+        for package in packages:
+            self.save_package(package)
+        transactions = dict(payload.get("transactions", {}))
+        transactions[run_id] = {
+            "before": payload.get("packages", {}),
+            "after": target,
+            "snapshots": list(target.values()),
+            "audit": audit or {},
+        }
+        self._atomic_json(
+            self.package_active_file,
+            {
+                "schema_version": ACTIVE_BANK_SCHEMA_VERSION,
+                "packages": target,
+                "transactions": transactions,
+            },
+        )
+        return tuple(target.values())
+
+    def promote_package(self, package: SkillPackage, *, run_id: str | None = None) -> str:
+        active = self._package_active_payload().get("packages", {})
+        packages = list(self.active_packages().values())
+        packages = [item for item in packages if item.manifest.name != package.manifest.name]
+        packages.append(package)
+        self.commit_package_bank(
+            packages,
+            run_id=run_id or f"promote-{package.package_digest}",
+            expected_active=active,
+        )
+        return package.package_digest
+
+    def rollback_package(self, name: str, digest: str, *, run_id: str | None = None) -> None:
+        package = self.get_package(digest)
+        if package.manifest.name != name or package.status == SkillStatus.RETIRED:
+            raise ValueError("invalid Package rollback target")
+        packages = self.active_packages()
+        expected = {key: value.package_digest for key, value in packages.items()}
+        packages[name] = package
+        self.commit_package_bank(
+            list(packages.values()),
+            run_id=run_id or f"rollback-{name}-{digest}",
+            expected_active=expected,
+        )
+
+    def migrate_active_v2(self, *, run_id: str = "migrate-active-v2") -> tuple[str, ...]:
+        from evofact.skills.package_adapter import skill_spec_to_package
+
+        if self.package_active_file.exists():
+            return tuple(self._package_active_payload().get("packages", {}).values())
+        packages = [skill_spec_to_package(skill) for skill in self.active().values()]
+        return self.commit_package_bank(packages, run_id=run_id)

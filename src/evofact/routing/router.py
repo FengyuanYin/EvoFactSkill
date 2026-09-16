@@ -123,6 +123,15 @@ class SkillRouter:
             UsageRecord(),
         )
 
+    async def plan(self, sample, skills, utilities, budget):
+        from evofact.governance.dag_policy import require_valid_plan
+        from evofact.routing.rule_planner import contract_plan_from_decision
+
+        result = await self.route(sample, skills, utilities, budget)
+        plan = contract_plan_from_decision(result.value, skills)
+        require_valid_plan(plan, skills)
+        return BackendResult(plan, result.usage)
+
 
 class LLMSkillRouter:
     def __init__(
@@ -228,6 +237,15 @@ class LLMSkillRouter:
                 decision,
                 UsageRecord(calls=1),
             )
+
+    async def plan(self, sample, skills, utilities, budget):
+        from evofact.routing.llm_planner import LLMPlanner
+        from evofact.routing.rule_planner import RulePlanner
+
+        return await LLMPlanner(
+            self.backend,
+            RulePlanner(self.fallback),
+        ).plan(sample, skills, utilities, budget)
 
     @staticmethod
     def _parse_decision(

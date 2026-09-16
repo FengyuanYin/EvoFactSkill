@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from evofact.core.budget_models import UsageDetails
 from evofact.core.models import (
     RunBudget,
     SkillSpec,
@@ -14,6 +15,7 @@ from evofact.core.models import (
 class BackendResult:
     value: Any
     usage: UsageRecord = UsageRecord()
+    usage_details: UsageDetails | None = None
 
 
 class ModelBackend(Protocol):
@@ -36,14 +38,34 @@ class ModelBackend(Protocol):
         """根据错误上下文和优化器提示词生成原始 JSON 决策。"""
         ...
 
-    async def analyze(self, sample: dict[str, Any], skill: SkillSpec) -> BackendResult:
+    async def optimize_package(
+        self,
+        context: dict[str, Any],
+        optimizer_skill: SkillSpec,
+    ) -> BackendResult:
+        """Return a strict full-package patch decision."""
+        ...
+
+    async def analyze(
+        self,
+        sample: dict[str, Any],
+        skill: SkillSpec,
+        *,
+        upstream: tuple[SpecialistReport, ...] = (),
+        resources: Any = None,
+    ) -> BackendResult:
         """函数作用：负责`ModelBackend` 中的 `analyze` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `ModelBackend` 实例；`sample`（dict[str, Any]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
         输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
         ...
 
     async def judge(
-        self, sample: dict[str, Any], reports: tuple[SpecialistReport, ...], skill: SkillSpec
+        self,
+        sample: dict[str, Any],
+        reports: tuple[SpecialistReport, ...],
+        skill: SkillSpec,
+        *,
+        execution_summary: Any = None,
     ) -> BackendResult:
         """函数作用：负责`ModelBackend` 中的 `judge` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `ModelBackend` 实例；`sample`（dict[str, Any]）需符合函数签名约定；`reports`（tuple[SpecialistReport, ...]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。

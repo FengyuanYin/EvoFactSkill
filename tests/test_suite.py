@@ -24,6 +24,7 @@ from evofact.core.models import (
     RoutingDecision,
     Sample,
     SampleEvaluation,
+    SkillKind,
     SkillStatus,
     SpecialistReport,
     StatisticalTestResult,
@@ -223,7 +224,9 @@ class SkillTests(unittest.TestCase):
             for p in (ROOT / "skills/seeds").iterdir()
             if (p / "SKILL.md").exists()
         ]
-        self.assertEqual(len(skills), 10)
+        self.assertEqual(len(skills), 11)
+        generation_agent = next(skill for skill in skills if skill.name == "generation_agent")
+        self.assertEqual(generation_agent.kind, SkillKind.WORKFLOW)
         self.assertIn("skill_optimizer", {skill.name for skill in skills})
 
     def test_repository(self):

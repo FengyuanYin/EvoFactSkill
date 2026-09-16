@@ -3,10 +3,58 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from evofact.generation.models import GenerationConfig
+
+
+@dataclass(frozen=True)
+class DAGConfig:
+    max_nodes: int = 8
+    max_depth: int = 4
+    strict_legacy_order: bool = False
+    node_timeout_ms: int = 120_000
+    sample_timeout_ms: int = 300_000
+
+    def __post_init__(self) -> None:
+        if min(self.max_nodes, self.max_depth, self.node_timeout_ms, self.sample_timeout_ms) < 1:
+            raise ValueError("DAG limits must be positive")
+
+
+@dataclass(frozen=True)
+class BudgetConfig:
+    max_calls_per_sample: int = 8
+    max_tokens_per_sample: int = 12000
+    max_cost_per_sample: Decimal = Decimal("1")
+    max_calls_per_run: int = 1000
+    max_tokens_per_run: int = 1_000_000
+    max_cost_per_run: Decimal = Decimal("100")
+    max_sample_concurrency: int = 4
+    max_global_concurrency: int = 16
+    judge_reserved_calls: int = 1
+    judge_reserved_tokens: int = 1000
+    judge_reserved_cost: Decimal = Decimal("0.10")
+
+    def __post_init__(self) -> None:
+        integer_values = (
+            self.max_calls_per_sample,
+            self.max_tokens_per_sample,
+            self.max_calls_per_run,
+            self.max_tokens_per_run,
+            self.max_sample_concurrency,
+            self.max_global_concurrency,
+        )
+        if any(value < 1 for value in integer_values):
+            raise ValueError("budget limits must be positive")
+
+
+@dataclass(frozen=True)
+class PricingConfig:
+    provider: str = "openai-compatible"
+    table_path: Path | None = None
+    require_cost_for_promotion: bool = True
 
 
 @dataclass(frozen=True)
@@ -157,6 +205,9 @@ class AppConfig:  # runner 配置
     meta_learning: MetaLearningConfig = field(default_factory=MetaLearningConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
+    dag: DAGConfig = field(default_factory=DAGConfig)
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def __post_init__(self) -> None:
         """函数作用：在 `AppConfig` 数据类初始化后检查字段之间的业务约束。
@@ -256,6 +307,16 @@ def load_config(path: str | Path) -> AppConfig:
     if "store_path" in generation_raw:
         generation_raw["store_path"] = Path(generation_raw["store_path"])
     generation = GenerationConfig(**generation_raw)
+    dag = DAGConfig(**raw.pop("dag", {}))
+    budget_raw = raw.pop("budget", {})
+    for key in ("max_cost_per_sample", "max_cost_per_run", "judge_reserved_cost"):
+        if key in budget_raw:
+            budget_raw[key] = Decimal(str(budget_raw[key]))
+    budget = BudgetConfig(**budget_raw)
+    pricing_raw = raw.pop("pricing", {})
+    if pricing_raw.get("table_path") is not None:
+        pricing_raw["table_path"] = Path(pricing_raw["table_path"])
+    pricing = PricingConfig(**pricing_raw)
     meta_raw = raw.pop("meta_learning", {})
     if "checkpoint_path" in meta_raw:
         meta_raw["checkpoint_path"] = Path(meta_raw["checkpoint_path"])
@@ -269,6 +330,9 @@ def load_config(path: str | Path) -> AppConfig:
         meta_learning=meta_learning,
         generation=generation,
         evolution=evolution,
+        dag=dag,
+        budget=budget,
+        pricing=pricing,
         data=data,
         **raw,
     )
