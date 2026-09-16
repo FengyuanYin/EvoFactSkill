@@ -32,8 +32,13 @@ from evofact.validation.evaluator import evaluate
 from evofact.validation.meta_gate import MetaValidationGate
 from evofact.validation.transfer import CrossEpisodeAggregator
 
-from .checkpoint import MetaCheckpointStore
+from .checkpoint import CheckpointIdentity, CheckpointV2Store
 from .runner import ExperimentRunner
+
+
+def _stable_digest(*values: object) -> str:
+    payload = json.dumps(values, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def fixture_meta_samples() -> list[Sample]:
@@ -127,14 +132,15 @@ class MetaEvolutionRunner:
             checkpoint_path = self.root / checkpoint_path
         if resume and checkpoint_path.exists() and self.repository is not None:
             raw = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-            transaction = self.repository.transaction(raw.get("run_id", ""))
+            raw_state = raw.get("state", raw)
+            transaction = self.repository.transaction(raw_state.get("run_id", ""))
             if transaction:
                 if (
                     skillbank_fingerprint(list(self.repository.active().values()))
                     != transaction["after"]
                 ):
                     raise ValueError("repository changed after completed run")
-                self.base.skills = [_skill_from(item) for item in raw["baseline_skills"]]
+                self.base.skills = [_skill_from(item) for item in raw_state["baseline_skills"]]
         data_id = data_fingerprint(samples)
         bank_id = skillbank_fingerprint(self.base.skills)
         episodes = DomainEpisodeSampler(self.config.meta_learning, self.config.seed).build(
@@ -150,18 +156,31 @@ class MetaEvolutionRunner:
         checkpoint_path = self.config.meta_learning.checkpoint_path
         if not checkpoint_path.is_absolute():
             checkpoint_path = self.root / checkpoint_path
-        store = MetaCheckpointStore(checkpoint_path)
-        saved = (
-            store.load(
-                config_fingerprint=config_id,
-                data_fingerprint=data_id,
-                skillbank_snapshot_id=bank_id,
-            )
-            if resume
-            else {}
-        )
-        self._restore_extra(saved)
         planned = [episode.episode_id for episode in episodes]
+        extra_identity = self._checkpoint_extra()
+        checkpoint_identity = CheckpointIdentity(
+            config_digest=config_id,
+            real_data_digest=data_id,
+            split_digest=_stable_digest(source_domains, final_domains, planned),
+            lineage_digest=_stable_digest("real-lineage-v1", data_id, source_domains),
+            package_bank_digest=bank_id,
+            generator_package_digest=str(
+                extra_identity.get("generator_package_digest", "not-applicable")
+            ),
+            governance_digest=_stable_digest(
+                "generation_audit_v3",
+                "skill_package_v2",
+                "execution_plan_v1",
+                extra_identity.get("verifier_fingerprint", "frozen-verifier"),
+            ),
+            dag_policy_digest=_stable_digest(asdict(self.config.dag)),
+            budget_policy_digest=_stable_digest(asdict(self.config.budget)),
+            pricing_version=_stable_digest(asdict(self.config.pricing)),
+            episode_plan_digest=_stable_digest(planned),
+        )
+        store = CheckpointV2Store(checkpoint_path)
+        saved = store.load(checkpoint_identity) if resume else {}
+        self._restore_extra(saved)
         if saved and (
             saved.get("planned_episode_ids") != planned
             or tuple(saved.get("final_test_domains", ())) != final_domains
@@ -244,9 +263,9 @@ class MetaEvolutionRunner:
                 )
             completed.add(episode.episode_id)
             store.save(
+                checkpoint_identity,
                 {
                     **self._checkpoint_extra(),
-                    "schema_version": "meta_checkpoint_v1",
                     "baseline_skills": [asdict(s) for s in self.base.skills],
                     "run_id": run_id,
                     "config_fingerprint": config_id,
@@ -259,7 +278,7 @@ class MetaEvolutionRunner:
                     "episode_results": [asdict(item) for item in results],
                     "candidates": {key: asdict(value) for key, value in proposals.items()},
                     "committed": False,
-                }
+                },
             )
         utilities = CrossEpisodeAggregator(
             self.config.seed,
@@ -295,9 +314,9 @@ class MetaEvolutionRunner:
             self.config.backend == "mock",
         )
         store.save(
+            checkpoint_identity,
             {
                 **self._checkpoint_extra(),
-                "schema_version": "meta_checkpoint_v1",
                 "baseline_skills": [asdict(s) for s in self.base.skills],
                 "run_id": run_id,
                 "config_fingerprint": config_id,
@@ -310,7 +329,7 @@ class MetaEvolutionRunner:
                 "episode_results": [asdict(item) for item in results],
                 "candidates": {key: asdict(value) for key, value in proposals.items()},
                 "committed": bool(committed),
-            }
+            },
         )
         return outcome
 

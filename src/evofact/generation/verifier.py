@@ -1,9 +1,11 @@
 """Structural provenance checks followed by one blind evidence review batch."""
 
+import asyncio
 import json
 from dataclasses import asdict
 from datetime import datetime
 
+from evofact.core.budget_models import BudgetRequest, CostStatus, UsageDetails
 from evofact.core.models import Evidence, Sample
 
 from .generator import json_value
@@ -123,7 +125,7 @@ class ChallengeVerifier:
                 rejected.append({"index": index, "reason": str(exc)})
         return accepted, rejected
 
-    async def verify(self, samples, backend):
+    async def verify(self, samples, backend, *, budget_manager=None, budget_sample_id="verifier"):
         """函数作用：使用看不到生成标签的独立审核模型核对样本正文与证据是否一致。
         输入要求：`self` 应为已初始化的 `ChallengeVerifier` 实例；`samples`（未显式标注）需符合函数签名约定；`backend`（未显式标注）需符合函数签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
@@ -140,7 +142,29 @@ class ChallengeVerifier:
                 for s in samples
             ]
         }
-        response = await backend._call(VERIFIER_SYSTEM, json_value(payload))
+        reservation = None
+        try:
+            if budget_manager is not None:
+                reservation = await budget_manager.reserve(
+                    budget_sample_id,
+                    BudgetRequest(calls=1, tokens=3000, purpose="frozen_verifier"),
+                )
+                async with budget_manager.concurrency(budget_sample_id):
+                    response = await asyncio.wait_for(
+                        backend._call(VERIFIER_SYSTEM, json_value(payload)),
+                        budget_manager.limits.call_timeout_ms / 1000,
+                    )
+                usage = getattr(backend, "_last_usage_details", None) or UsageDetails(
+                    calls=1,
+                    cost_status=CostStatus.UNAVAILABLE,
+                )
+                await budget_manager.reconcile(reservation, usage)
+                reservation = None
+            else:
+                response = await backend._call(VERIFIER_SYSTEM, json_value(payload))
+        finally:
+            if reservation is not None:
+                await budget_manager.release(reservation)
         if (
             not isinstance(response, dict)
             or set(response) != {"reviews"}

@@ -5,16 +5,21 @@ import json
 from dataclasses import asdict
 
 from evofact.attribution.rules import attribute_trace
+from evofact.core.budget_models import BudgetLimits
 from evofact.core.models import DomainEpisode
 from evofact.data.domains import skillbank_fingerprint
 from evofact.evolution.firewall import CandidateFirewall
 from evofact.generation.data import validate_fact_links
 from evofact.generation.generator import ChallengeGenerator, json_value
-from evofact.generation.prompts import GENERATOR_SYSTEM, VERIFIER_SYSTEM
+from evofact.generation.prompts import VERIFIER_SYSTEM
 from evofact.generation.split import split_construction_probe
 from evofact.generation.verifier import ChallengeVerifier, normalized
+from evofact.generation.workflow import GenerationWorkflow
+from evofact.governance import GENERATION_AUDIT_SCHEMA_VERSION
+from evofact.runtime.budget import BudgetManager
 from evofact.security.scanner import scan_resources
 from evofact.skills.candidates import apply_candidate
+from evofact.skills.package_loader import load_package
 
 from .checkpoint import MetaCheckpointStore
 from .meta_runner import MetaEvolutionRunner
@@ -49,10 +54,29 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         self.facts = list(facts)
         self.audit = {}
         self.generator = ChallengeGenerator()
+        self.generator_package = load_package(self.root / "skills" / "seeds" / "generation_agent")
+        self.generation_workflow = GenerationWorkflow(self.generator_package)
         self.verifier = ChallengeVerifier()
         # Dependency injection is for tests; CLI has no deterministic generation path.
         self.generation_backend = generation_backend
         self.resume_generation = False
+        self.generation_budget = BudgetManager(
+            BudgetLimits(
+                max_nodes=config.dag.max_nodes,
+                max_depth=config.dag.max_depth,
+                max_calls_per_sample=config.budget.max_calls_per_sample,
+                max_tokens_per_sample=config.budget.max_tokens_per_sample,
+                max_cost_per_sample=config.budget.max_cost_per_sample,
+                max_calls_per_run=config.budget.max_calls_per_run,
+                max_tokens_per_run=config.budget.max_tokens_per_run,
+                max_cost_per_run=config.budget.max_cost_per_run,
+                max_sample_concurrency=config.budget.max_sample_concurrency,
+                max_global_concurrency=config.budget.max_global_concurrency,
+                judge_reserved_calls=0,
+                judge_reserved_tokens=0,
+                judge_reserved_cost=0,
+            )
+        )
 
     async def run(self, samples, *, final_test_domains=(), resume=False, evaluation_only=False):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
@@ -96,7 +120,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             raise ValueError("generation store and checkpoint must be separate paths")
         if store_path.exists():
             stored = json.loads(store_path.read_text(encoding="utf-8"))
-            if stored.get("schema_version") != "generation_audit_v2":
+            if stored.get("schema_version") != GENERATION_AUDIT_SCHEMA_VERSION:
                 raise ValueError(
                     "legacy generation bank is incompatible; choose a new generation.store_path"
                 )
@@ -118,9 +142,9 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         return fingerprint(
             {
-                "schema": "one_shot_llm_v2",
+                "schema": "generation_workflow_v3",
                 "config": asdict(self.config),
-                "generator_system": GENERATOR_SYSTEM,
+                "generator_package_digest": self.generator_package.package_digest,
                 "verifier_system": VERIFIER_SYSTEM,
                 "facts": sorted((asdict(f) for f in self.facts), key=lambda f: f["fact_id"]),
             }
@@ -130,7 +154,11 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         """函数作用：负责`AdversarialEvolutionRunner` 中的 `_checkpoint_extra` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；无其他显式输入。
         输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
-        return {"generation_schema": "one_shot_llm_v2", "generation_episodes": self.audit}
+        return {
+            "generation_schema": "generation_workflow_v3",
+            "generator_package_digest": self.generator_package.package_digest,
+            "generation_episodes": self.audit,
+        }
 
     def _restore_extra(self, saved):
         """函数作用：从检查点恢复 `_restore_extra` 所表示的数据，供当前模块后续流程使用。
@@ -138,7 +166,8 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
         self.audit = saved.get("generation_episodes", {})
         if saved and (
-            saved.get("generation_schema") != "one_shot_llm_v2"
+            saved.get("generation_schema") != "generation_workflow_v3"
+            or saved.get("generator_package_digest") != self.generator_package.package_digest
             or set(self.audit) != set(saved.get("completed_episode_ids", ()))
         ):
             raise ValueError("generation checkpoint episode audit is incompatible or incomplete")
@@ -150,9 +179,15 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         current = (
             json.loads(path.read_text(encoding="utf-8"))
             if path.exists()
-            else {"schema_version": "generation_audit_v2", "runs": {}}
+            else {"schema_version": GENERATION_AUDIT_SCHEMA_VERSION, "runs": {}}
         )
-        record = json_value({"prompt_hash": fingerprint(GENERATOR_SYSTEM), "episodes": self.audit})
+        record = json_value(
+            {
+                "generator_package_digest": self.generator_package.package_digest,
+                "verifier_version": fingerprint(VERIFIER_SYSTEM),
+                "episodes": self.audit,
+            }
+        )
         if run_id in current["runs"]:
             if current["runs"][run_id] != record:
                 raise ValueError(
@@ -200,10 +235,17 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             by_id = {s.sample_id: s for s in construction}
             reports = [attribute_trace(t, _gold(by_id[t.sample_id].label)) for t in traces]
             firewall.build_generation_view(episode, traces, reports)
-            request = self.generator.build_request(
-                construction, traces, reports, config=cfg, episode_id=episode.episode_id
+            workflow_result = await self.generation_workflow.run(
+                backend,
+                construction,
+                traces,
+                reports,
+                config=cfg,
+                episode_id=episode.episode_id,
+                budget_manager=self.generation_budget,
             )
-            response = await self.generator.generate(backend, request)
+            request = workflow_result.request
+            response = workflow_result.response
             MetaCheckpointStore(cache_path).save(
                 {"input_fingerprint": key, "request": request, "response": response}
             )
@@ -216,7 +258,12 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         structured, rejected = self.verifier.validate(
             response, request, config=cfg, forbidden=forbidden, existing=construction
         )
-        synthetic, review_rejections, reviews = await self.verifier.verify(structured, backend)
+        synthetic, review_rejections, reviews = await self.verifier.verify(
+            structured,
+            backend,
+            budget_manager=self.generation_budget,
+            budget_sample_id=episode.episode_id,
+        )
         rejected.extend(review_rejections)
         rows = construction + synthetic
         inner_episode = DomainEpisode(
@@ -270,7 +317,8 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
                 "detector_baseline": frozen_id,
                 "generator_calls": 1,
                 "verifier_calls": int(bool(structured)),
-                "prompt_hash": fingerprint(GENERATOR_SYSTEM),
+                "generator_package_digest": self.generator_package.package_digest,
+                "verifier_version": fingerprint(VERIFIER_SYSTEM),
                 "request": request,
                 "response": response,
                 "samples": [asdict(s) for s in synthetic],

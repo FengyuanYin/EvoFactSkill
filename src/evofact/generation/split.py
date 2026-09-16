@@ -2,6 +2,54 @@
 
 import hashlib
 from collections import defaultdict
+from dataclasses import dataclass
+
+from evofact.generation.lineage import group_real_samples
+from evofact.governance.data_policy import DataIsolationPolicy
+
+
+@dataclass(frozen=True)
+class RealOnlySplit:
+    meta_train_ids: tuple[str, ...]
+    meta_test_ids: tuple[str, ...]
+    final_test_ids: tuple[str, ...]
+    lineage_by_sample: dict[str, str]
+    split_digest: str
+
+
+def split_real_only(samples, *, seed: str, policy: DataIsolationPolicy = DataIsolationPolicy()):
+    groups = group_real_samples(samples, policy=policy)
+    if len(groups) < 3:
+        raise ValueError("real-only split requires at least three independent lineage groups")
+    ordered = sorted(
+        groups,
+        key=lambda group: hashlib.sha256(f"{seed}:{group.lineage_id}".encode()).hexdigest(),
+    )
+    train_count = max(1, int(len(ordered) * policy.meta_train_fraction))
+    test_count = max(1, int(len(ordered) * policy.meta_test_fraction))
+    if train_count + test_count >= len(ordered):
+        train_count = len(ordered) - 2
+        test_count = 1
+    train_groups = ordered[:train_count]
+    test_groups = ordered[train_count : train_count + test_count]
+    final_groups = ordered[train_count + test_count :]
+    lineage = {sample_id: group.lineage_id for group in groups for sample_id in group.sample_ids}
+    payload = "|".join(
+        (
+            "train:"
+            + ",".join(sorted(item for group in train_groups for item in group.sample_ids)),
+            "test:" + ",".join(sorted(item for group in test_groups for item in group.sample_ids)),
+            "final:"
+            + ",".join(sorted(item for group in final_groups for item in group.sample_ids)),
+        )
+    )
+    return RealOnlySplit(
+        tuple(sorted(item for group in train_groups for item in group.sample_ids)),
+        tuple(sorted(item for group in test_groups for item in group.sample_ids)),
+        tuple(sorted(item for group in final_groups for item in group.sample_ids)),
+        lineage,
+        hashlib.sha256(payload.encode()).hexdigest(),
+    )
 
 
 def split_construction_probe(samples, facts, *, fraction: float, seed: str):

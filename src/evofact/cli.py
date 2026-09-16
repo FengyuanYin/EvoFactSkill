@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from evofact.config import load_config
-from evofact.core.models import SkillStatus
+from evofact.core.models import RunBudget, SkillStatus
 from evofact.data.leakage import detect_leakage
 from evofact.data.manifests import build_manifest, manifest_json
 from evofact.data.registry import DataRegistry
@@ -95,6 +95,32 @@ def build_parser():
     adversarial.add_argument("--resume", action="store_true")
     adversarial.add_argument("--evaluation-only", action="store_true")
 
+    package_parser = subparsers.add_parser("package")
+    package_subparsers = package_parser.add_subparsers(dest="package_command", required=True)
+    for name in ("show", "validate", "test"):
+        command = package_subparsers.add_parser(name)
+        command.add_argument("target")
+    package_diff = package_subparsers.add_parser("diff")
+    package_diff.add_argument("before")
+    package_diff.add_argument("after")
+
+    plan_parser = subparsers.add_parser("plan")
+    plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
+    for name in ("inspect", "validate"):
+        command = plan_subparsers.add_parser(name)
+        command.add_argument("path")
+
+    generation_parser = subparsers.add_parser("generation")
+    generation_subparsers = generation_parser.add_subparsers(
+        dest="generation_command", required=True
+    )
+    for name in ("audit", "report"):
+        command = generation_subparsers.add_parser(name)
+        command.add_argument("path")
+
+    generator_evolve = subparsers.add_parser("generator-evolve")
+    generator_evolve.add_argument("--evaluation-only", action="store_true")
+
     # 技能仓库查询及技能生命周期管理命令。
     skills_parser = subparsers.add_parser("skills")
     skills_subparsers = skills_parser.add_subparsers(
@@ -125,6 +151,75 @@ async def _run(args):
         runner.skills = list(SkillRepository(root / config.skill_store).active().values())
     if args.limit < 0:
         raise ValueError("--limit must be non-negative")
+
+    if args.command == "package":
+        from evofact.governance.package_policy import validate_package
+        from evofact.skills.package_diff import diff_packages
+        from evofact.skills.package_loader import load_package
+        from evofact.skills.package_serializer import package_to_dict
+
+        repository = SkillRepository(root / config.skill_store)
+
+        def resolve_package(target):
+            path = Path(target)
+            if path.is_dir():
+                return load_package(path)
+            if len(target) == 64:
+                return repository.get_package(target)
+            return repository.active_packages()[target]
+
+        if args.package_command == "diff":
+            return asdict(diff_packages(resolve_package(args.before), resolve_package(args.after)))
+        package = resolve_package(args.target)
+        if args.package_command == "show":
+            return package_to_dict(package)
+        report = validate_package(package)
+        return {
+            "command": args.package_command,
+            "package_digest": package.package_digest,
+            "validation": asdict(report),
+            "declared_tests": list(package.manifest.entrypoints.tests),
+        }
+
+    if args.command == "plan":
+        from evofact.governance.dag_policy import validate_plan
+        from evofact.routing.plan_normalizer import normalize_plan
+
+        raw = json.loads(Path(args.path).read_text(encoding="utf-8"))
+        budget = RunBudget(**raw.get("budget", {}))
+        plan = normalize_plan(
+            raw["nodes"],
+            reasons=raw.get("reasons", {}),
+            confidence=float(raw.get("confidence", 0)),
+            budget=budget,
+            fallback_used=bool(raw.get("fallback_used", False)),
+        )
+        report = validate_plan(plan, runner.skills)
+        return {
+            "command": args.plan_command,
+            "plan": asdict(plan),
+            "validation": asdict(report),
+        }
+
+    if args.command == "generation":
+        from evofact.generation.audit_store import GenerationAuditStore
+
+        payload = GenerationAuditStore(args.path).load_raw()
+        if args.generation_command == "audit":
+            return payload
+        entries = payload.get("entries", [])
+        return {
+            "schema_version": payload["schema_version"],
+            "accepted": sum(bool(item.get("accepted")) for item in entries),
+            "rejected": sum(not bool(item.get("accepted")) for item in entries),
+        }
+
+    if args.command == "generator-evolve":
+        if not args.evaluation_only:
+            raise ValueError(
+                "generator-evolve requires an explicit candidate/evaluation API; use --evaluation-only for inspection"
+            )
+        return {"mode": "generator-evolve", "evaluation_only": True, "active_bank_updated": False}
 
     configured_dataset = config.data.dataset
     if args.dataset and configured_dataset and args.dataset != configured_dataset:

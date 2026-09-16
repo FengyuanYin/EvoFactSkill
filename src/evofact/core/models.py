@@ -21,6 +21,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from evofact.governance import INFERENCE_TRACE_SCHEMA_VERSION
+
 
 class ModelMixin:
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
@@ -149,6 +151,9 @@ class SkillSpec(ModelMixin):
     parent_ids: tuple[str, ...] = ()
     safety_level: Literal["text_only", "review_required", "executable"] = "text_only"
     schema_version: str = "skill_spec_v1"
+    package_digest: str = ""
+    contract: Any | None = None
+    entrypoints: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -231,7 +236,11 @@ class InferenceTrace(
     aggregated_evidence: tuple[Evidence, ...] = ()
     usage: UsageRecord = field(default_factory=UsageRecord)
     errors: tuple[str, ...] = ()
-    schema_version: str = "inference_trace_v1"
+    schema_version: str = INFERENCE_TRACE_SCHEMA_VERSION
+    execution_plan: Any | None = None
+    node_executions: tuple[Any, ...] = ()
+    execution_summary: Any | None = None
+    resource_versions: dict[str, str] = field(default_factory=dict)
 
 
 class ErrorType(

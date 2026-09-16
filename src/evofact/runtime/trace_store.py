@@ -19,3 +19,33 @@ class TraceStore:
         输出：返回 `None`；可能按函数职责修改对象状态或持久化文件。"""
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(asdict(trace), ensure_ascii=False, default=str) + "\n")
+
+    def read_raw(self, *, allow_v1: bool = False) -> list[dict]:
+        if not self.path.exists():
+            return []
+        rows = [
+            json.loads(line)
+            for line in self.path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        for row in rows:
+            version = row.get("schema_version", "inference_trace_v1")
+            if version == "inference_trace_v1" and not allow_v1:
+                raise ValueError("trace v1 requires explicit compatibility adapter")
+            if version not in {"inference_trace_v1", "inference_trace_v2"}:
+                raise ValueError(f"unsupported trace schema: {version}")
+        return rows
+
+
+def adapt_trace_v1(row: dict) -> dict:
+    if row.get("schema_version", "inference_trace_v1") != "inference_trace_v1":
+        raise ValueError("adapter accepts only trace v1")
+    return {
+        **row,
+        "schema_version": "inference_trace_v2",
+        "execution_plan": None,
+        "node_executions": [],
+        "execution_summary": None,
+        "resource_versions": {},
+        "compatibility_adapter": "trace_v1_to_v2",
+    }

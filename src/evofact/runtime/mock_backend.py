@@ -1,3 +1,5 @@
+import asyncio
+
 from evofact.core.models import (
     Prediction,
     RunBudget,
@@ -13,6 +15,12 @@ FAKE_CUES = ("谣言", "不实", "假消息", "fake", "hoax", "fabricated")
 
 
 class MockBackend:
+    def __init__(self, *, delays: dict[str, float] | None = None, failures: set[str] | None = None):
+        self.delays = delays or {}
+        self.failures = failures or set()
+        self.active_calls = 0
+        self.max_active_calls = 0
+
     async def route(
         self,
         sample: dict,
@@ -104,18 +112,55 @@ class MockBackend:
             ),
         )
 
-    async def analyze(self, sample: dict, skill: SkillSpec) -> BackendResult:
+    async def optimize_package(self, context, optimizer_skill) -> BackendResult:
+        del optimizer_skill
+        return BackendResult(
+            {
+                "action": "no_change",
+                "rationale": "mock package optimizer proposed no deterministic change",
+                "file_operations": [],
+            },
+            UsageRecord(
+                calls=1,
+                prompt_tokens=len(str(context).split()),
+                completion_tokens=8,
+                latency_ms=1,
+            ),
+        )
+
+    async def analyze(
+        self,
+        sample: dict,
+        skill: SkillSpec,
+        *,
+        upstream: tuple[SpecialistReport, ...] = (),
+        resources=None,
+    ) -> BackendResult:
         """函数作用：负责`MockBackend` 中的 `analyze` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `MockBackend` 实例；`sample`（dict）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
         输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
-        text = str(sample.get("text", "")).casefold()
+        del resources
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            if skill.skill_id in self.failures or skill.name in self.failures:
+                raise RuntimeError(f"configured mock failure: {skill.name}")
+            delay = self.delays.get(skill.skill_id, self.delays.get(skill.name, 0))
+            if delay:
+                await asyncio.sleep(delay)
+            text = str(sample.get("text", "")).casefold()
+        finally:
+            self.active_calls -= 1
         fake = any(x in text for x in FAKE_CUES)
         if "recurring reasoning_error" in skill.instructions and "未经证实" in text:
             fake = True
         assessment = "fake" if fake else "real"
         report = SpecialistReport(
             skill.skill_id,
-            (str(sample.get("text", "")),),
+            (
+                str(sample.get("text", "")),
+                *(claim for report in upstream for claim in report.claims),
+            ),
             (),
             assessment,
             0.75,
@@ -129,11 +174,17 @@ class MockBackend:
         )
 
     async def judge(
-        self, sample: dict, reports: tuple[SpecialistReport, ...], skill: SkillSpec
+        self,
+        sample: dict,
+        reports: tuple[SpecialistReport, ...],
+        skill: SkillSpec,
+        *,
+        execution_summary=None,
     ) -> BackendResult:
         """函数作用：负责`MockBackend` 中的 `judge` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `MockBackend` 实例；`sample`（dict）需符合函数签名约定；`reports`（tuple[SpecialistReport, ...]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
         输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
+        del execution_summary
         votes = [r.assessment for r in reports]
         if not votes:
             label = "ABSTAIN"

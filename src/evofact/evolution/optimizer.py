@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -7,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from evofact.config import EvolutionConfig
+from evofact.core.budget_models import BudgetRequest
 from evofact.core.models import (
     AttributionReport,
     EvolutionOperation,
@@ -19,6 +21,7 @@ from evofact.core.models import (
     SkillStatus,
 )
 from evofact.runtime.backend import ModelBackend
+from evofact.runtime.node_runner import _usage_details
 
 from .proposer import propose_from_cluster
 
@@ -450,9 +453,11 @@ class SkillOptimizerAgent:
         self,
         backend: ModelBackend,
         config: EvolutionConfig,
+        budget_manager=None,
     ):
         self.backend = backend
         self.config = config
+        self.budget_manager = budget_manager
 
     def _find_optimizer_skill(
         self,
@@ -498,10 +503,27 @@ class SkillOptimizerAgent:
                 self.config,
             )
 
-            backend_result = await self.backend.optimize(
-                context,
-                optimizer_skill,
-            )
+            reservation = None
+            try:
+                if self.budget_manager is not None:
+                    reservation = await self.budget_manager.reserve(
+                        f"optimizer:{cluster_id}",
+                        BudgetRequest(calls=1, tokens=4000, purpose="optimizer"),
+                    )
+                if self.budget_manager is not None:
+                    async with self.budget_manager.concurrency(f"optimizer:{cluster_id}"):
+                        backend_result = await asyncio.wait_for(
+                            self.backend.optimize(context, optimizer_skill),
+                            self.budget_manager.limits.call_timeout_ms / 1000,
+                        )
+                else:
+                    backend_result = await self.backend.optimize(context, optimizer_skill)
+                if reservation is not None:
+                    await self.budget_manager.reconcile(reservation, _usage_details(backend_result))
+                    reservation = None
+            finally:
+                if reservation is not None:
+                    await self.budget_manager.release(reservation)
 
             decision = parse_optimizer_decision(
                 backend_result.value,

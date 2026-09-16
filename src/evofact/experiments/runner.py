@@ -4,11 +4,13 @@ from pathlib import Path
 from evofact.attribution.clustering import cluster_reports
 from evofact.attribution.rules import attribute_trace
 from evofact.config import AppConfig
+from evofact.core.budget_models import BudgetLimits
 from evofact.core.models import RunBudget, Sample, SampleEvaluation, SkillStatus
 from evofact.evolution.distiller import distill
 from evofact.evolution.optimizer import SkillOptimizerAgent
 from evofact.evolution.proposer import propose_from_cluster
 from evofact.routing.router import LLMSkillRouter, SkillRouter
+from evofact.runtime.budget import BudgetManager
 from evofact.runtime.inference import InferenceRuntime
 from evofact.runtime.mock_backend import MockBackend
 from evofact.runtime.openai_backend import OpenAICompatibleBackend
@@ -76,6 +78,27 @@ class ExperimentRunner:
             self.config.base_url, self.config.resolved_api_key(), self.config.model
         )
 
+    def _budget_manager(self) -> BudgetManager:
+        return BudgetManager(
+            BudgetLimits(
+                max_nodes=self.config.dag.max_nodes,
+                max_depth=self.config.dag.max_depth,
+                max_calls_per_sample=self.config.budget.max_calls_per_sample,
+                max_tokens_per_sample=self.config.budget.max_tokens_per_sample,
+                max_cost_per_sample=self.config.budget.max_cost_per_sample,
+                max_calls_per_run=self.config.budget.max_calls_per_run,
+                max_tokens_per_run=self.config.budget.max_tokens_per_run,
+                max_cost_per_run=self.config.budget.max_cost_per_run,
+                max_sample_concurrency=self.config.budget.max_sample_concurrency,
+                max_global_concurrency=self.config.budget.max_global_concurrency,
+                call_timeout_ms=self.config.dag.node_timeout_ms,
+                sample_timeout_ms=self.config.dag.sample_timeout_ms,
+                judge_reserved_calls=self.config.budget.judge_reserved_calls,
+                judge_reserved_tokens=self.config.budget.judge_reserved_tokens,
+                judge_reserved_cost=self.config.budget.judge_reserved_cost,
+            )
+        )
+
     async def run(
         self, samples: list[Sample] | None = None, strategy: str | None = None, skills=None
     ):
@@ -104,10 +127,12 @@ class ExperimentRunner:
                 seed=self.config.seed,
             )
 
+        budget_manager = self._budget_manager()
         runtime = InferenceRuntime(
             backend,
             router,
             self.skills if skills is None else skills,
+            budget_manager=budget_manager,
         )
         traces = []
         evaluations = []
@@ -167,6 +192,7 @@ class ExperimentRunner:
             optimizer = SkillOptimizerAgent(
                 backend=self._backend(),
                 config=self.config.evolution,
+                budget_manager=self._budget_manager(),
             )
 
             proposals = []
