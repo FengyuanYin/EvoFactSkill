@@ -67,6 +67,7 @@ class PlanValidationReport(ModelMixin):
     levels: tuple[tuple[str, ...], ...] = ()
     depth: int = 0
     findings: tuple[PlanFinding, ...] = ()
+    warnings: tuple[PlanFinding, ...] = ()
 
 
 class NodeStatus(StrEnum):
@@ -100,6 +101,9 @@ class NodeExecution(ModelMixin):
     finished_at: str | None = None
     latency_ms: float = 0.0
     error: str | None = None
+    usage_details: Any | None = None
+    started_sequence: int | None = None
+    completed_sequence: int | None = None
 
     def __post_init__(self) -> None:
         if self.status == NodeStatus.SUCCEEDED and self.report is None:
@@ -127,3 +131,4 @@ class DAGExecutionResult(ModelMixin):
     usage: UsageRecord = field(default_factory=UsageRecord)
     prediction: Prediction | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    usage_details: Any | None = None

@@ -58,6 +58,19 @@ class PricingConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionConfig:
+    batch_size: int = 16
+    max_concurrent_samples: int = 4
+    progress: str = "auto"
+
+    def __post_init__(self) -> None:
+        if self.batch_size < 1 or self.max_concurrent_samples < 1:
+            raise ValueError("execution batch size and sample concurrency must be positive")
+        if self.progress not in {"auto", "on", "off"}:
+            raise ValueError("execution.progress must be auto, on, or off")
+
+
+@dataclass(frozen=True)
 class GateConfig:  # 验证门配置
     repeats: int = 3
     min_macro_f1_gain: float = 0.01
@@ -65,12 +78,13 @@ class GateConfig:  # 验证门配置
     max_protected_domain_drop: float = 0.02
     alpha: float = 0.05
     max_cost_ratio: float = 1.5
+    max_calibration_increase: float = 0.2
 
     def __post_init__(self) -> None:
         """函数作用：在 `GateConfig` 数据类初始化后检查字段之间的业务约束。
         输入要求：`self` 应为已初始化的 `GateConfig` 实例；无其他显式输入。
         输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
-        if self.repeats < 2 or not 0 <= self.min_coverage <= 1:
+        if self.repeats < 2 or not 0 <= self.min_coverage <= 1 or self.max_calibration_increase < 0:
             raise ValueError("invalid gate configuration")
 
 
@@ -208,6 +222,7 @@ class AppConfig:  # runner 配置
     dag: DAGConfig = field(default_factory=DAGConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
 
     def __post_init__(self) -> None:
         """函数作用：在 `AppConfig` 数据类初始化后检查字段之间的业务约束。
@@ -317,6 +332,7 @@ def load_config(path: str | Path) -> AppConfig:
     if pricing_raw.get("table_path") is not None:
         pricing_raw["table_path"] = Path(pricing_raw["table_path"])
     pricing = PricingConfig(**pricing_raw)
+    execution = ExecutionConfig(**raw.pop("execution", {}))
     meta_raw = raw.pop("meta_learning", {})
     if "checkpoint_path" in meta_raw:
         meta_raw["checkpoint_path"] = Path(meta_raw["checkpoint_path"])
@@ -333,6 +349,7 @@ def load_config(path: str | Path) -> AppConfig:
         dag=dag,
         budget=budget,
         pricing=pricing,
+        execution=execution,
         data=data,
         **raw,
     )

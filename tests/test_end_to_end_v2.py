@@ -18,13 +18,18 @@ from evofact.skills.repository import SkillRepository
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_legacy_dry_run_now_emits_trace_v2_with_execution_plan():
+def test_legacy_dry_run_now_emits_trace_v4_with_execution_plan():
     runner = ExperimentRunner(load_config(ROOT / "configs" / "dry_run.yaml"), ROOT)
     traces, result = asyncio.run(runner.run(fixture_samples()[:1]))
     assert result.aggregate_metrics["n"] == 1
-    assert traces[0].schema_version == "inference_trace_v2"
+    assert traces[0].schema_version == "inference_trace_v4"
+    assert traces[0].label_schema_id == "default"
+    assert traces[0].label_contract_digest
     assert traces[0].execution_plan is not None
     assert traces[0].node_executions
+    assert traces[0].usage.calls >= 0
+    assert not hasattr(traces[0], "usage_details")
+    assert not hasattr(traces[0], "resource_versions")
 
 
 def test_complete_package_candidate_commit_and_rollback(tmp_path):

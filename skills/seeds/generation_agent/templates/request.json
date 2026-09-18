@@ -1,1 +1,1 @@
-{"request": "Use the structured request object supplied by the runtime."}
+{"request": "Use the structured request and immutable label_contracts supplied by the runtime; never infer labels from the examples."}

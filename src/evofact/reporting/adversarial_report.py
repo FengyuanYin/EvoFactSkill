@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from .generator_report import generator_report
 from .meta_report import write_meta_report
 
 
@@ -12,6 +13,7 @@ def write_adversarial_report(path, outcome, audit, config):
     paths = write_meta_report(path, outcome)
     # Each episode stays separate: never pool synthetic data across held-out domains.
     sample_paths = {}
+    lineage_paths = {}
     for identifier, episode in audit.items():
         target = path / f"samples-{identifier}.jsonl"
         target.write_text(
@@ -19,6 +21,36 @@ def write_adversarial_report(path, outcome, audit, config):
             encoding="utf-8",
         )
         sample_paths[identifier] = str(target)
+        lineage_target = path / f"lineage-{identifier}.jsonl"
+        lineage_target.write_text(
+            "".join(
+                json.dumps(entry, ensure_ascii=False) + "\n"
+                for entry in episode.get("generation_audit_entries", ())
+            ),
+            encoding="utf-8",
+        )
+        lineage_paths[identifier] = str(lineage_target)
+    layered = generator_report(
+        real_only={
+            "run_id": outcome.run_id,
+            "utilities": {key: value.model_dump() for key, value in outcome.utilities.items()},
+            "decisions": [decision.model_dump() for decision in outcome.decisions],
+        },
+        robustness={
+            identifier: episode.get("generated_robustness", {})
+            for identifier, episode in audit.items()
+        },
+        generation_quality={
+            identifier: episode.get("metrics", {}) for identifier, episode in audit.items()
+        },
+        safety={
+            identifier: {
+                "rejected": episode.get("rejected", ()),
+                "attribution": episode.get("generation_attribution", ()),
+            }
+            for identifier, episode in audit.items()
+        },
+    )
     payload = {
         "schema_version": "adversarial_report_v2",
         "run_id": outcome.run_id,
@@ -27,6 +59,8 @@ def write_adversarial_report(path, outcome, audit, config):
         "generator": "one-shot trace-conditioned LLM",
         "episodes": audit,
         "sample_files": sample_paths,
+        "lineage_files": lineage_paths,
+        "generator_report": layered,
         "detector_reports": paths,
     }
     json_path = path / "adversarial_report.json"
@@ -59,4 +93,5 @@ def write_adversarial_report(path, outcome, audit, config):
         "adversarial_json": str(json_path),
         "adversarial_markdown": str(md),
         "sample_files": sample_paths,
+        "lineage_files": lineage_paths,
     }

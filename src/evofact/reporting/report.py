@@ -65,6 +65,16 @@ def write_report(path: Path, title: str, payload: dict) -> dict[str, str]:
     if clean.get("parse_failures", 0) > 0:
         reasons.append("model output parse failures occurred")
     clean["run_status"] = {"valid": not reasons, "reasons": reasons}
+    evidence_coverage = float(metrics.get("evidence_coverage", 0.0))
+    clean["evidence_context"] = {
+        "coverage": evidence_coverage,
+        "evidence_grounded": evidence_coverage > 0,
+        "interpretation": (
+            "evaluation includes externally supplied evidence"
+            if evidence_coverage > 0
+            else "text and model-knowledge baseline; external-evidence specialists were not activated"
+        ),
+    }
     json_path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)

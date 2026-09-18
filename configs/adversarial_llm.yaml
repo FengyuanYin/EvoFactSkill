@@ -1,12 +1,20 @@
 # Requires a real LLM backend and DEEPSEEK_API_KEY. Offline tests inject a fake backend.
 backend: openai-compatible
-model: deepseek-chat
+model: deepseek-flash
 base_url: https://api.deepseek.com/v1
 api_key_env: DEEPSEEK_API_KEY
 seed: 42
 output_dir: outputs/adversarial-llm
 skill_store: outputs/adversarial-llm/detector-bank
 max_skills_per_item: 3
+pricing:
+  provider: deepseek
+  table_path: pricing/deepseek-2026-09-18-peak.json
+  require_cost_for_promotion: true
+execution:
+  batch_size: 8
+  max_concurrent_samples: 4
+  progress: auto
 meta_learning:
   enabled: true
   episodes: 5

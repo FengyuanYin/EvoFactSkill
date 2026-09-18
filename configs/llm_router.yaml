@@ -14,6 +14,16 @@ routing_strategy: llm
 
 max_skills_per_item: 3
 
+pricing:
+  provider: deepseek
+  table_path: pricing/deepseek-2026-09-18-peak.json
+  require_cost_for_promotion: true
+
+execution:
+  batch_size: 16
+  max_concurrent_samples: 4
+  progress: auto
+
 meta_evolution: false
 
 evolution:

@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+from evofact.core.label_models import DatasetLabelContract, LabelDefinition
 from evofact.core.models import Evidence, Sample
 from evofact.data.base import DatasetDiagnostic
 
@@ -11,6 +12,30 @@ PATTERN = re.compile(r"livefact_(?P<window>[+-]?\d+)_(?P<task>cls|inf)\.jsonl$")
 
 class LiveFactAdapter:
     name = "livefact"
+
+    def label_contracts(self) -> tuple[DatasetLabelContract, ...]:
+        labels = (
+            LabelDefinition(
+                "real",
+                "Available evidence supports the claim.",
+                "Preserve a claim supported by the supplied evidence.",
+            ),
+            LabelDefinition(
+                "fake",
+                "Available evidence contradicts the claim.",
+                "Alter the claim so supplied evidence clearly contradicts it.",
+            ),
+            LabelDefinition(
+                "ambiguous",
+                "Available evidence cannot resolve the claim.",
+                "Create a claim for which supplied evidence is genuinely insufficient or conflicting.",
+            ),
+        )
+        mapping = (("real", "real"), ("fake", "fake"), ("ambiguous", "ambiguous"))
+        return tuple(
+            DatasetLabelContract(self.name, f"livefact-{task}-v1", "1", labels, mapping)
+            for task in ("cls", "inf")
+        )
 
     def discover(self, root: Path) -> DatasetDiagnostic:
         """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。
@@ -47,7 +72,10 @@ class LiveFactAdapter:
                 evidence = row.get("evidence") or []
                 evidence = [evidence] if isinstance(evidence, str) else evidence
                 normalized_evidence = tuple(
-                    Evidence(str(item.get("text", "")), item.get("source"))
+                    Evidence(
+                        str(item.get("text") or item.get("title") or ""),
+                        item.get("source"),
+                    )
                     if isinstance(item, dict)
                     else Evidence(str(item))
                     for item in evidence
@@ -59,7 +87,11 @@ class LiveFactAdapter:
                 )
                 if text:
                     yield Sample(
-                        str(row.get("id") or f"livefact:{month}:{window}:{task}:{i}"),
+                        str(
+                            row.get("claim_id")
+                            or row.get("id")
+                            or f"livefact:{month}:{window}:{task}:{i}"
+                        ),
                         self.name,
                         text,
                         row.get("label"),
@@ -73,4 +105,5 @@ class LiveFactAdapter:
                             "source_file": path.name,
                             "split_role": role,
                         },
+                        label_schema_id=f"livefact-{task}-v1",
                     )

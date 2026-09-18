@@ -5,9 +5,11 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from evofact.core.budget_models import BudgetRequest, CostStatus, UsageDetails
+from evofact.core.budget_models import BudgetRequest, UsageDetails
 from evofact.core.models import SkillKind
 from evofact.core.package_models import SkillPackage
+from evofact.evolution.firewall import validate_generation_request
+from evofact.runtime.backend import call_json_with_usage
 from evofact.skills.package_adapter import package_to_skill_spec
 
 from .generator import ChallengeGenerator
@@ -20,6 +22,7 @@ class GenerationWorkflowResult:
     request_digest: str
     response_digest: str
     generator_package_digest: str
+    usage: UsageDetails
 
 
 class GenerationWorkflow:
@@ -29,6 +32,20 @@ class GenerationWorkflow:
         self.package = package
         self.runtime_skill = package_to_skill_spec(package)
         self.generator = ChallengeGenerator()
+        strategy_path = "references/strategies.json"
+        try:
+            raw_strategies = json.loads(package.file(strategy_path).content.decode("utf-8"))
+        except KeyError as exc:
+            raise ValueError("Generator Package must declare references/strategies.json") from exc
+        strategies = raw_strategies.get("strategies")
+        if (
+            not isinstance(strategies, list)
+            or not strategies
+            or not all(isinstance(item, str) and item.strip() for item in strategies)
+            or len(set(strategies)) != len(strategies)
+        ):
+            raise ValueError("Generator Package strategy registry is invalid")
+        self.strategies = frozenset(strategies)
 
     async def run(
         self,
@@ -40,6 +57,8 @@ class GenerationWorkflow:
         config,
         episode_id,
         budget_manager=None,
+        label_contract_registry=None,
+        forbidden=(),
     ):
         request = self.generator.build_request(
             samples,
@@ -47,8 +66,10 @@ class GenerationWorkflow:
             attributions,
             config=config,
             episode_id=episode_id,
+            label_contract_registry=label_contract_registry,
         )
         request["generator_package_digest"] = self.package.package_digest
+        validate_generation_request(request, forbidden)
         raw_instructions = self.package.file(
             self.package.manifest.entrypoints.instructions
         ).content.decode("utf-8")
@@ -72,23 +93,19 @@ class GenerationWorkflow:
         reservation = None
         try:
             if budget_manager is not None:
-                reservation = await budget_manager.reserve(
-                    episode_id,
-                    BudgetRequest(calls=1, tokens=4000, purpose="generator"),
-                )
                 async with budget_manager.concurrency(episode_id):
-                    response = await asyncio.wait_for(
-                        backend._call(system, payload),
+                    reservation = await budget_manager.reserve(
+                        episode_id,
+                        BudgetRequest(calls=1, tokens=4000, purpose="generator"),
+                    )
+                    response, usage = await asyncio.wait_for(
+                        call_json_with_usage(backend, system, payload),
                         budget_manager.limits.call_timeout_ms / 1000,
                     )
-                usage = getattr(backend, "_last_usage_details", None) or UsageDetails(
-                    calls=1,
-                    cost_status=CostStatus.UNAVAILABLE,
-                )
                 await budget_manager.reconcile(reservation, usage)
                 reservation = None
             else:
-                response = await backend._call(system, payload)
+                response, usage = await call_json_with_usage(backend, system, payload)
         finally:
             if reservation is not None:
                 await budget_manager.release(reservation)
@@ -107,4 +124,5 @@ class GenerationWorkflow:
             hashlib.sha256(encode(request)).hexdigest(),
             hashlib.sha256(encode(response)).hexdigest(),
             self.package.package_digest,
+            usage,
         )

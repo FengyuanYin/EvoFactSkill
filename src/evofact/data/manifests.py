@@ -26,6 +26,7 @@ def build_manifest(
     protected_ratio: float = 0.15,
     train_domains: Sequence[str] | None = None,
     final_test_domains: Sequence[str] | None = None,
+    label_contract_digest: str = "",
 ) -> DataManifest:
     """函数作用：构造 `build_manifest` 所表示的数据，供当前模块后续流程使用。
     输入要求：`samples`（Iterable[Sample]）需符合函数签名约定；`seed`（int，默认 `42`）需以关键字传入并符合签名约定；`evolution_ratio`（float，默认 `0.15`）需以关键字传入并符合签名约定；`protected_ratio`（float，默认 `0.15`）需以关键字传入并符合签名约定。
@@ -100,6 +101,7 @@ def build_manifest(
         "fingerprints": dict(sorted(fps.items())),
         "train_domains": list(source_domains),
         "final_test_domains": list(final_domains),
+        "label_contract_digest": label_contract_digest,
     }
     mid = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
     return DataManifest(
@@ -116,6 +118,7 @@ def build_manifest(
             "train_domains": list(source_domains),
             "final_test_domains": list(final_domains),
         },
+        label_contract_digest=label_contract_digest,
     )
 
 

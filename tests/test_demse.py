@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -298,6 +299,8 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
             self.assertTrue(outcome.episode_results)
             self.assertTrue(outcome.decisions)
             self.assertFalse(outcome.committed_snapshots)
+            checkpoint_payload = json.loads(meta.checkpoint_path.read_text(encoding="utf-8"))
+            self.assertIsNone(checkpoint_payload["identity"]["generator_package_digest"])
             resumed = asyncio.run(
                 runner.run(
                     fixture_meta_samples(),
@@ -320,7 +323,11 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
                 if (path / "SKILL.md").is_file():
                     repository.promote(load_skill_package(path))
             before = set(repository.active())
-            meta = replace(config.meta_learning, checkpoint_path=base / "checkpoint.json")
+            meta = replace(
+                config.meta_learning,
+                checkpoint_path=base / "checkpoint.json",
+                min_valid_episodes=1,
+            )
             outcome = asyncio.run(
                 MetaEvolutionRunner(replace(config, meta_learning=meta), ROOT, repository).run(
                     fixture_meta_samples(), final_test_domains=("outer_holdout",)
@@ -328,9 +335,8 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
             )
             self.assertTrue(outcome.committed_snapshots)
             self.assertEqual(set(repository.active()), before)
-            self.assertTrue(
-                any(event["action"] == "meta_promote" for event in repository.history())
-            )
+            self.assertIsNotNone(repository.package_transaction(outcome.run_id))
+            self.assertTrue(repository.active_packages())
 
 
 if __name__ == "__main__":

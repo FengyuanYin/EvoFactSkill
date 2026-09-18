@@ -14,13 +14,14 @@ def selection_to_plan(
     budget: RunBudget = RunBudget(),
     strict_serial: bool = False,
     fallback_used: bool = False,
+    timeout_ms: int | None = None,
 ) -> ExecutionPlan:
     nodes = []
     previous: str | None = None
     for index, skill_id in enumerate(selected_skill_ids):
         node_id = f"legacy-{index:03d}-{skill_id}"
         dependencies = (previous,) if strict_serial and previous else ()
-        nodes.append(PlanNode(node_id, skill_id, dependencies))
+        nodes.append(PlanNode(node_id, skill_id, dependencies, timeout_ms=timeout_ms))
         previous = node_id
     return normalize_plan(
         nodes,
@@ -32,7 +33,10 @@ def selection_to_plan(
 
 
 def routing_decision_to_plan(
-    decision: RoutingDecision, *, strict_serial: bool = False
+    decision: RoutingDecision,
+    *,
+    strict_serial: bool = False,
+    timeout_ms: int | None = None,
 ) -> ExecutionPlan:
     return selection_to_plan(
         decision.selected_skill_ids,
@@ -41,4 +45,5 @@ def routing_decision_to_plan(
         budget=decision.budget,
         strict_serial=strict_serial,
         fallback_used=decision.fallback_used,
+        timeout_ms=timeout_ms,
     )

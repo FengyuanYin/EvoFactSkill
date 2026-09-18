@@ -1,17 +1,31 @@
 import asyncio
+import hashlib
 
+from evofact.core.label_models import DatasetLabelContract, DecisionOrigin
 from evofact.core.models import (
     Prediction,
     RunBudget,
     SkillSpec,
     SkillUtility,
+    SpecialistFinding,
     SpecialistReport,
     UsageRecord,
 )
+from evofact.data.label_registry import fixture_binary_contract
 
 from .backend import BackendResult
 
 FAKE_CUES = ("谣言", "不实", "假消息", "fake", "hoax", "fabricated")
+
+_MOCK_FINDING_TYPES = {
+    "claim_decomposition": "atomic_claim",
+    "linguistic_manipulation": "neutral_style",
+    "numerical_consistency": "consistent_comparison",
+    "source_credibility": "source_missing",
+    "temporal_reasoning": "missing_time",
+    "evidence_assessment": "evidence_missing",
+    "cross_source_contradiction": "insufficient_sources",
+}
 
 
 class MockBackend:
@@ -155,6 +169,19 @@ class MockBackend:
         if "recurring reasoning_error" in skill.instructions and "未经证实" in text:
             fake = True
         assessment = "fake" if fake else "real"
+        input_claim_ids = tuple(
+            dict.fromkeys(
+                finding.claim_id
+                for report in upstream
+                for finding in report.findings
+                if finding.claim_id
+            )
+        )
+        claim_id = (
+            "claim-1"
+            if skill.name == "claim_decomposition"
+            else (input_claim_ids[0] if input_claim_ids else None)
+        )
         report = SpecialistReport(
             skill.skill_id,
             (
@@ -165,6 +192,19 @@ class MockBackend:
             assessment,
             0.75,
             () if fake else ("offline heuristic",),
+            report_type=skill.name,
+            input_claim_ids=input_claim_ids,
+            findings=(
+                SpecialistFinding(
+                    finding_type=_MOCK_FINDING_TYPES.get(skill.name, "domain_observation"),
+                    conclusion="mock heuristic observation",
+                    explanation="deterministic offline backend finding",
+                    confidence=0.75,
+                    claim_id=claim_id,
+                    text_span=str(sample.get("text", "")) or None,
+                    details={"mock": True, "supports_label_index": int(fake)},
+                ),
+            ),
         )
         return BackendResult(
             report,
@@ -179,22 +219,34 @@ class MockBackend:
         reports: tuple[SpecialistReport, ...],
         skill: SkillSpec,
         *,
+        label_contract: DatasetLabelContract | None = None,
         execution_summary=None,
     ) -> BackendResult:
         """函数作用：负责`MockBackend` 中的 `judge` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `MockBackend` 实例；`sample`（dict）需符合函数签名约定；`reports`（tuple[SpecialistReport, ...]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
         输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
-        del execution_summary
-        votes = [r.assessment for r in reports]
-        if not votes:
-            label = "ABSTAIN"
-        elif votes.count("fake") == votes.count("real"):
-            label = votes[0].upper()
+        del execution_summary, skill
+        label_contract = label_contract or fixture_binary_contract()
+        text = str(sample.get("text", ""))
+        if label_contract.dataset_id == "fixture" and len(label_contract.allowed_labels) == 2:
+            indices = [
+                int(finding.details.get("supports_label_index", 0))
+                for report in reports
+                for finding in report.findings
+                if finding.details.get("mock") is True
+            ]
+            index = max(indices, default=int(any(cue in text.casefold() for cue in FAKE_CUES)))
         else:
-            label = "FAKE" if votes.count("fake") > votes.count("real") else "REAL"
+            index = int(hashlib.sha256(text.encode("utf-8")).hexdigest(), 16) % len(
+                label_contract.allowed_labels
+            )
+        label = label_contract.allowed_labels[index]
         return BackendResult(
             Prediction(
-                label, 0.5 if label == "ABSTAIN" else 0.75, "deterministic offline consensus"
+                label,
+                0.75,
+                "deterministic contract-aware offline decision",
+                DecisionOrigin.JUDGE,
             ),
             UsageRecord(calls=1, prompt_tokens=10, completion_tokens=8, latency_ms=1),
         )

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
+from evofact.core.label_models import DatasetLabelContract, LabelDefinition
 from evofact.core.models import Sample
 from evofact.data.base import DatasetDiagnostic
 from evofact.data.deduplication import stable_sample_id
@@ -10,6 +11,35 @@ from evofact.data.deduplication import stable_sample_id
 
 class AMTCeleAdapter:
     name = "amtcele"
+
+    def label_contracts(self) -> tuple[DatasetLabelContract, ...]:
+        return (
+            DatasetLabelContract(
+                dataset_id=self.name,
+                schema_id="amtcele-binary-v1",
+                version="1",
+                labels=(
+                    LabelDefinition(
+                        "legit",
+                        "The celebrity claim is legitimate.",
+                        "Preserve a legitimate claim supported by its evidence.",
+                    ),
+                    LabelDefinition(
+                        "fake",
+                        "The celebrity claim is false or fabricated.",
+                        "Construct a false claim whose contradiction remains verifiable.",
+                    ),
+                ),
+                native_mapping=(
+                    ("legit", "legit"),
+                    ("real", "legit"),
+                    ("0", "legit"),
+                    ("fake", "fake"),
+                    ("1", "fake"),
+                ),
+                positive_label="fake",
+            ),
+        )
 
     def discover(self, root: Path) -> DatasetDiagnostic:
         """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。
@@ -53,6 +83,7 @@ class AMTCeleAdapter:
                         domain,
                         pair_id,
                         metadata={"source_file": path.name, "pair_id": pair_id},
+                        label_schema_id="amtcele-binary-v1",
                     )
                 )
         yield from samples

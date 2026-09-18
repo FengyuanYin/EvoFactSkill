@@ -387,11 +387,24 @@ class AdversarialRunnerTests(unittest.TestCase):
                 self.assertTrue(all(sid not in blob for sid in forbidden))
                 self.assertEqual(record["metrics"]["accepted"], 4)
                 self.assertEqual(record["generator_calls"], 1)
+                self.assertEqual(len(record["lineages"]), 4)
+                self.assertEqual(len(record["generation_audit_entries"]), 4)
+                self.assertIn("verifier_usage", record)
+                self.assertEqual(record["verifier_usage"]["calls"], 1)
+                self.assertTrue(
+                    all(
+                        entry["usage"]["calls"] == 0 for entry in record["generation_audit_entries"]
+                    )
+                )
+                self.assertEqual(len(record["generated_robustness"]["lineage_ids"]), 4)
+                self.assertIn("label_coverage_rate", record["metrics"])
+                self.assertIn("cost_status", record["metrics"])
             paths = write_adversarial_report(
                 config.output_dir, outcome, runner.audit, config.generation
             )
             for target in paths["sample_files"].values():
                 self.assertEqual(len(load_samples(target)), 4)
+            self.assertEqual(len(paths["lineage_files"]), 5)
             restored = AdversarialEvolutionRunner(
                 config, ROOT, facts, generation_backend=FakeJSONBackend()
             )

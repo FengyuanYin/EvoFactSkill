@@ -1,6 +1,7 @@
 import random
 from dataclasses import replace
 
+from evofact.core.budget_models import BudgetLimits
 from evofact.core.models import (
     RoutingDecision,
     RunBudget,
@@ -17,13 +18,20 @@ from evofact.runtime.backend import BackendResult, ModelBackend
 class SkillRouter:
     """根据样本特征、技能历史效用和运行预算选择要调用的专家技能。"""
 
-    def __init__(self, strategy: str = "utility-aware", seed: int = 42):
+    def __init__(
+        self,
+        strategy: str = "utility-aware",
+        seed: int = 42,
+        *,
+        plan_limits: BudgetLimits = BudgetLimits(),
+    ):
         """函数作用：创建并初始化 `SkillRouter` 对象，为后续方法调用准备依赖和初始状态。
         输入要求：`self` 应为已初始化的 `SkillRouter` 实例；`strategy`（str，默认 `'utility-aware'`）需符合函数签名约定；`seed`（int，默认 `42`）需符合函数签名约定。
         输出：返回 `None`；初始化 `SkillRouter` 的实例状态，构造参数非法时可能抛出异常。"""
         # strategy 决定选择规则；seed 仅供 random 策略生成可复现的结果。
         self.strategy = strategy
         self.seed = seed
+        self.plan_limits = plan_limits
 
     def select(
         self,
@@ -128,8 +136,10 @@ class SkillRouter:
         from evofact.routing.rule_planner import contract_plan_from_decision
 
         result = await self.route(sample, skills, utilities, budget)
-        plan = contract_plan_from_decision(result.value, skills)
-        require_valid_plan(plan, skills)
+        plan = contract_plan_from_decision(
+            result.value, skills, timeout_ms=self.plan_limits.call_timeout_ms
+        )
+        require_valid_plan(plan, skills, limits=self.plan_limits)
         return BackendResult(plan, result.usage)
 
 
@@ -138,9 +148,17 @@ class LLMSkillRouter:
         self,
         backend: ModelBackend,
         fallback: SkillRouter | None = None,
+        strict_serial: bool = False,
+        plan_limits: BudgetLimits = BudgetLimits(),
     ):
         self.backend = backend
-        self.fallback = fallback if fallback is not None else SkillRouter("utility-aware")
+        self.fallback = (
+            fallback
+            if fallback is not None
+            else SkillRouter("utility-aware", plan_limits=plan_limits)
+        )
+        self.strict_serial = strict_serial
+        self.plan_limits = plan_limits
 
     async def route(
         self,
@@ -244,7 +262,12 @@ class LLMSkillRouter:
 
         return await LLMPlanner(
             self.backend,
-            RulePlanner(self.fallback),
+            RulePlanner(
+                self.fallback,
+                strict_serial=self.strict_serial,
+                limits=self.plan_limits,
+            ),
+            limits=self.plan_limits,
         ).plan(sample, skills, utilities, budget)
 
     @staticmethod

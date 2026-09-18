@@ -5,11 +5,12 @@ from .objectives import regression_failures
 
 
 class ValidationGate:
-    def __init__(self, config: GateConfig):
+    def __init__(self, config: GateConfig, *, require_cost: bool = False):
         """函数作用：创建并初始化 `ValidationGate` 对象，为后续方法调用准备依赖和初始状态。
         输入要求：`self` 应为已初始化的 `ValidationGate` 实例；`config`（GateConfig）需符合函数签名约定。
         输出：返回 `None`；初始化 `ValidationGate` 的实例状态，构造参数非法时可能抛出异常。"""
         self.config = config
+        self.require_cost = require_cost
 
     def decide(
         self,
@@ -35,6 +36,10 @@ class ValidationGate:
             failures.append("coverage below minimum")
         if c.get("mean_cost", 0) > max(1e-12, b.get("mean_cost", 0)) * self.config.max_cost_ratio:
             failures.append("cost ratio exceeded")
+        if self.require_cost and (b.get("cost_available", 0) < 1 or c.get("cost_available", 0) < 1):
+            failures.append("cost unavailable")
+        if c.get("ece", 0) - b.get("ece", 0) > self.config.max_calibration_increase:
+            failures.append("calibration regression exceeded")
         gain = c.get("macro_f1_all", 0) - b.get("macro_f1_all", 0)
         if gain < self.config.min_macro_f1_gain:
             failures.append("macro-F1 gain below minimum")

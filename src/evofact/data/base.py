@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
 
+from evofact.core.label_models import DatasetLabelContract
 from evofact.core.models import Sample
 
 
@@ -15,6 +16,8 @@ class DatasetDiagnostic:
 
 class DatasetAdapter(Protocol):
     name: str
+
+    def label_contracts(self) -> tuple[DatasetLabelContract, ...]: ...
 
     def discover(self, root: Path) -> DatasetDiagnostic:
         """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。

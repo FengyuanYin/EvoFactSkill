@@ -29,8 +29,12 @@ Preserve these role boundaries:
   not determine whether a claim is true or false.
 - A Specialist analyzes one bounded aspect of a claim and reports evidence,
   conclusions, confidence, and limitations.
-- A Judge combines Specialist reports into a final REAL, FAKE, or ABSTAIN
-  decision. It must handle missing and conflicting evidence explicitly.
+- A Judge combines Specialist reports and the immutable Runtime label contract
+  into one allowed business label. It expresses uncertainty through confidence
+  and rationale; Runtime alone owns infrastructure abstention.
+
+Never add, edit, infer, or embed dataset label contracts, native label mappings,
+label definitions, or evaluation label sets. Those are immutable governance data.
 
 For an edit, produce complete replacement instructions rather than a patch.
 Preserve useful existing behavior and change only what is needed.

@@ -18,6 +18,7 @@ from evofact.data.deduplication import deduplicate_samples, normalize_text
 from evofact.data.domains import domain_index, split_source_and_final
 from evofact.data.manifests import build_manifest
 from evofact.data.registry import DataRegistry
+from evofact.governance.pricing_policy import load_pricing_table
 
 
 class DeduplicationTests(unittest.TestCase):
@@ -184,6 +185,10 @@ class AdapterTests(unittest.TestCase):
             weibo.meta_learning.checkpoint_path,
             amt.meta_learning.checkpoint_path,
         )
+        for config in (weibo, amt):
+            table = load_pricing_table(ROOT / config.pricing.table_path)
+            self.assertEqual(table.provider, config.pricing.provider)
+            self.assertIn(config.model, table.models)
 
     def test_cli_selects_dataset_and_domains_from_config(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -221,6 +226,21 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(len(manifest["test_ids"]), 1)
             self.assertEqual(manifest["split_policy"]["train_domains"], ["tech"])
             self.assertEqual(manifest["split_policy"]["final_test_domains"], ["health"])
+
+            override = parser.parse_args(
+                [
+                    "--config",
+                    str(config_path),
+                    "data",
+                    "manifest",
+                    "--final-test-domains",
+                    "tech",
+                ]
+            )
+            overridden = asyncio.run(_run(override))
+            self.assertEqual(overridden["split_policy"]["train_domains"], ["health"])
+            self.assertEqual(overridden["split_policy"]["final_test_domains"], ["tech"])
+            self.assertNotEqual(manifest["test_ids"], overridden["test_ids"])
 
             conflict = parser.parse_args(
                 ["--config", str(config_path), "--dataset", "amtcele", "data", "manifest"]

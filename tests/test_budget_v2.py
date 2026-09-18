@@ -11,7 +11,7 @@ from evofact.core.budget_models import (
     CostStatus,
     UsageDetails,
 )
-from evofact.governance.pricing_policy import ModelPrice, PricingTable
+from evofact.governance.pricing_policy import ModelPrice, PricingTable, load_pricing_table
 from evofact.runtime.budget import BudgetExceeded, BudgetManager
 from evofact.runtime.pricing import parse_openai_usage, price_usage
 
@@ -79,7 +79,8 @@ def test_openai_usage_and_pricing_include_cache_and_reasoning() -> None:
             },
         ),
     )
-    assert priced.cost == Decimal("0.000159")
+    # Provider totals include cached input and reasoning output; subsets must not be billed twice.
+    assert priced.cost == Decimal("0.000109")
     assert priced.cost_status == CostStatus.ACTUAL
 
 
@@ -87,3 +88,33 @@ def test_missing_usage_is_not_silently_actual_zero() -> None:
     usage = parse_openai_usage({}, provider="provider", model="model", latency_ms=1)
     assert usage.cost is None
     assert usage.cost_status == CostStatus.UNAVAILABLE
+
+
+def test_budget_checkpoint_restore_preserves_run_and_sample_usage() -> None:
+    async def scenario():
+        manager = BudgetManager(BudgetLimits(max_calls_per_run=2, max_calls_per_sample=2))
+        reservation = await manager.reserve("sample", BudgetRequest(calls=1, tokens=10))
+        await manager.reconcile(
+            reservation,
+            UsageDetails(calls=1, input_tokens=7, output_tokens=2),
+        )
+        restored = BudgetManager(manager.limits)
+        restored.restore(manager.export_state())
+        return restored.snapshot(), restored.snapshot("sample")
+
+    run, sample = asyncio.run(scenario())
+    assert run.calls_used == sample.calls_used == 1
+    assert run.tokens_used == sample.tokens_used == 9
+    assert run.unavailable_cost_calls == sample.unavailable_cost_calls == 1
+
+
+def test_pricing_loader_rejects_duplicate_model_keys(tmp_path) -> None:
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        '{"version":"pricing_v1","provider":"p","models":{'
+        '"m":{"input_per_million":1,"output_per_million":2},'
+        '"m":{"input_per_million":3,"output_per_million":4}}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate pricing key: m"):
+        load_pricing_table(path)

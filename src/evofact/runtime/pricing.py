@@ -20,9 +20,11 @@ def price_usage(usage: UsageDetails, table: PricingTable) -> UsageDetails:
             }
         )
     reasoning_price = price.reasoning_per_million or price.output_per_million
+    uncached_input_tokens = max(usage.input_tokens - usage.cached_tokens, 0)
+    visible_output_tokens = max(usage.output_tokens - usage.reasoning_tokens, 0)
     cost = (
-        Decimal(usage.input_tokens) * price.input_per_million
-        + Decimal(usage.output_tokens) * price.output_per_million
+        Decimal(uncached_input_tokens) * price.input_per_million
+        + Decimal(visible_output_tokens) * price.output_per_million
         + Decimal(usage.cached_tokens) * price.cache_per_million
         + Decimal(usage.reasoning_tokens) * reasoning_price
     ) / MILLION
@@ -42,7 +44,13 @@ def parse_openai_usage(
     data: dict, *, provider: str, model: str, latency_ms: float, retries: int = 0
 ) -> UsageDetails:
     usage = data.get("usage")
-    if not isinstance(usage, dict):
+    token_fields = {
+        "prompt_tokens",
+        "input_tokens",
+        "completion_tokens",
+        "output_tokens",
+    }
+    if not isinstance(usage, dict) or not token_fields.intersection(usage):
         return UsageDetails(
             calls=1,
             retries=retries,

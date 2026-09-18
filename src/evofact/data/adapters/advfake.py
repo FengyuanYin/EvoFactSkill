@@ -2,12 +2,36 @@ import csv
 from pathlib import Path
 from typing import Iterable
 
+from evofact.core.label_models import DatasetLabelContract, LabelDefinition
 from evofact.core.models import Sample
 from evofact.data.base import DatasetDiagnostic
 
 
 class AdvFakeAdapter:
     name = "advfake"
+
+    def label_contracts(self) -> tuple[DatasetLabelContract, ...]:
+        return (
+            DatasetLabelContract(
+                dataset_id=self.name,
+                schema_id="advfake-binary-v1",
+                version="1",
+                labels=(
+                    LabelDefinition(
+                        "REAL",
+                        "The claim remains factually supported.",
+                        "Preserve the supported meaning under surface-form changes.",
+                    ),
+                    LabelDefinition(
+                        "FAKE",
+                        "The claim is adversarially falsified or unsupported.",
+                        "Construct an auditable adversarial falsehood.",
+                    ),
+                ),
+                native_mapping=(("REAL", "REAL"), ("FAKE", "FAKE"), ("0", "REAL"), ("1", "FAKE")),
+                positive_label="FAKE",
+            ),
+        )
 
     def discover(self, root: Path) -> DatasetDiagnostic:
         """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。
@@ -29,21 +53,35 @@ class AdvFakeAdapter:
         with path.open("r", encoding="utf-8-sig", newline="") as stream:
             rows = list(csv.DictReader(stream))
         for i, row in enumerate(rows):
-            text = str(
+            pair = str(row.get("id") or f"advfake:{i}")
+            explicit = str(
                 row.get("adversarial") or row.get("adversarial_text") or row.get("text") or ""
             ).strip()
-            pair = str(row.get("id") or f"advfake:{i}")
-            if text:
+            source_text = str(row.get("title") or "").strip()
+            adversarial_text = str(row.get("f_title") or "").strip()
+            variants = (
+                [(explicit, row.get("label"), "adversarial")]
+                if explicit
+                else [(source_text, "REAL", "source"), (adversarial_text, "FAKE", "adversarial")]
+            )
+            for text, label, variant in variants:
+                if not text:
+                    continue
                 yield Sample(
-                    f"{pair}:adversarial",
+                    f"{pair}:{variant}",
                     self.name,
                     text,
-                    row.get("label"),
+                    label,
                     event_id=pair,
                     metadata={
-                        "original_text": row.get("original") or row.get("original_text"),
+                        "original_text": row.get("original")
+                        or row.get("original_text")
+                        or source_text,
                         "attack_type": row.get("attack_type"),
+                        "variant": variant,
+                        "source_file": path.name,
                         "split_role": "test",
                         "robustness_only": True,
                     },
+                    label_schema_id="advfake-binary-v1",
                 )
