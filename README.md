@@ -43,7 +43,7 @@ The underlying language model stays **frozen**. What evolves is an external, aud
 - Paired repeated candidate evaluation with bootstrap confidence intervals, McNemar tests, coverage and cost constraints, protected-domain regression checks and Pareto retention.
 - Metrics that keep `ABSTAIN` in the main denominator, plus coverage, selective risk, ECE, Brier, and per-domain / per-time-window breakdowns.
 - Adapters for **Weibo21**, **AMTCele**, **LiveFact** and **AdvFake** with reproducible manifests and leakage detection.
-- Eight ablation arms: `single-llm`, `static`, `all-experts`, `random`, `prompt-only-evolution`, `no-discovery`, `no-negative-transfer`, `full`.
+- Four implemented routing controls: `static`, `all-experts`, `random`, and `utility-aware`. They are not presented as ablation arms.
 - AST-based executable-skill screening. Script skills always require review unless a stricter external sandbox is supplied.
 
 ## Quick start — offline, no API key
@@ -84,7 +84,7 @@ evofact dry-run                 # offline inference over the training fixture
 evofact test                    # offline inference over the final-test split
 evofact evolve                  # closed loop with the fixed validation gate
 evofact validate                # gate decisions only
-evofact ablation                # run the eight ablation arms
+evofact ablation                # fail-closed until every named arm is distinct
 evofact report                  # multi-seed report (JSON + Markdown + CSV)
 
 evofact meta-evolve             # DEMSE cross-domain meta-evolution
@@ -96,6 +96,12 @@ evofact meta-evolve             # DEMSE cross-domain meta-evolution
 evofact adversarial-evolve      # trace → generation → verification → gate
   [--samples samples.jsonl] [--facts facts.jsonl]
   [--final-test-domains outer_holdout] [--resume] [--evaluation-only]
+
+evofact generator-evolve --propose-only --audit generation-audit.json
+  # Optimizer proposes a complete generation_agent Package; save stdout as candidate JSON.
+evofact generator-evolve --candidate candidate.json --evaluation paired-evaluation.json
+  [--evaluation-only] [--run-id ID]
+  # Gate/commit consumes an independently produced, provenance-bound paired evaluation.
 
 evofact skills list
 evofact skills show NAME [--snapshot HASH]
@@ -113,6 +119,16 @@ python -m evofact.cli --config configs/default.yaml <command>
 ```
 
 `meta-evolve` and `adversarial-evolve` accept `--evaluation-only`, which constructs the inference runtime but never commits a bank — use it for mechanism checks. `--resume` restores a run only when the config, data and SkillBank fingerprints all match.
+
+The generic `ablation` command intentionally fails closed. Historical alias arms were removed because they did not map to distinct behavior. The three implemented DEMSE switches remain available through `meta-evolve --ablation`; no paper-level comparison should be inferred until every named arm has an independent implementation.
+
+To evaluate a different held-out domain with the same dataset config, override it explicitly; the source domains and manifest are recomputed and leakage-checked:
+
+```bash
+python -m evofact.cli --config configs/weibo21_cross_domain.yaml test --final-test-domains 科技 --output outputs/weibo21-test-tech.json
+```
+
+Tracked DeepSeek configs use the dated peak-rate table in `pricing/deepseek-2026-09-18-peak.json`. Refresh it from the official pricing page before a publication run because provider prices and off-peak schedules can change.
 
 ## Configuration
 
@@ -215,7 +231,17 @@ The final-test command only constructs the inference runtime; it never instantia
 
 ## Metrics and interpretation
 
-`accuracy_all` and `macro_f1_all` use every labeled sample, so `ABSTAIN` is never silently removed. `covered_accuracy` is reported separately and must always be read together with `coverage` and `selective_risk`.
+Every dataset adapter declares a versioned label contract. A successful Judge call must choose from the active dataset/task `allowed_labels`; Weibo21 uses `REAL/FAKE`, while LiveFact has separate `cls` and `inf` schemas with `real/fake/ambiguous`. Label mappings are never inferred by scanning test labels, and per-sample gold is not sent to the model.
+
+`ABSTAIN` is not a business label. It is a Runtime outcome for budget exhaustion, timeout, incomplete required reports, or an invalid Judge response. `accuracy_all` and schema-aware `macro_f1_all` use every labeled sample, so Runtime abstentions stay in the denominator. Read `covered_accuracy` together with `coverage` and `selective_risk`; reports also include contract-ordered per-label recall/error and a dynamic confusion matrix. Brier is emitted only for a single binary schema that declares its positive label.
+
+`--limit` is a global option and must precede the subcommand:
+
+```powershell
+python -m evofact.cli --config configs/weibo21_cross_domain.yaml --limit 100 test
+```
+
+The limit is applied to the test partition after the leakage-safe manifest split. `0` means unlimited.
 
 Promotion requires more than a positive point estimate: the candidate must satisfy minimum gain and coverage, protected-domain regression, cost, safety and paired statistical-support rules. Useful but not promotable non-dominated candidates can be retained in the Pareto archive.
 
@@ -316,7 +342,7 @@ Do not delete or recreate an already published PyPI version. The one-time GitHub
 
 ## Research baselines
 
-The shared experiment protocol defines: single LLM, static multi-agent, all experts, random routing, prompt-only evolution, no skill discovery, no negative-transfer control, and the full system. All arms must use the same manifest, sample order and metric implementation.
+Generic paper-level ablation is disabled. An arm may re-enter the shared protocol only after it has an independent execution switch and uses the same manifest, sample order, and metric implementation as the other arms.
 
 ## Status and limitations
 
@@ -334,11 +360,58 @@ Implementation audit (last reviewed 2026-09-08, extended for the LLM router, the
 
 Known gaps — a past checklist is **not** evidence that every research requirement is complete:
 
-- Automatic proposal discovery currently emits `ADD`/`EDIT`; the slow Meta-Skill loop is still an event-recording scaffold.
-- Some named ablation arms share routing implementations.
-- Real-backend token pricing and full token/call/concurrency budget enforcement are not yet complete.
+- Meta Optimizer self-evolution remains disabled to avoid recursive optimizer nesting.
+- Generic paper-level ablations remain disabled until distinct experimental implementations exist.
+- Pricing tables are dated snapshots and must be refreshed when the provider changes rates.
 - The file-backed skill repository assumes a single writer.
 - Default results are offline mechanism tests, **not** empirical evidence of cross-domain model accuracy.
+
+## Batched concurrency and progress
+
+Dataset samples can run concurrently without changing the dependency semantics of each
+sample's Router DAG. Execution controls are independent from DAG call limits:
+
+```yaml
+execution:
+  batch_size: 16
+  max_concurrent_samples: 4
+  progress: auto  # auto | on | off
+```
+
+- `batch_size` is the frozen Skill Bank boundary, not an LLM weight-training batch.
+- `max_concurrent_samples` limits active samples inside one batch.
+- `budget.max_sample_concurrency` limits concurrent DAG calls for one sample.
+- `budget.max_global_concurrency` limits all backend calls in one inference run.
+
+`test` evaluates the active bank. `report` runs seeds sequentially while samples inside each
+seed run concurrently. `evolve` freezes one bank per training batch and atomically publishes
+an accepted bank before the next batch. `meta-evolve` and `adversarial-evolve` freeze one
+baseline across every episode and commit only after cross-episode gating.
+
+Progress is written to stderr, leaving stdout as one parseable JSON document. Interactive
+terminals enable it automatically; redirected output disables it automatically. Overrides
+must appear before the subcommand:
+
+```powershell
+python -m evofact.cli `
+  --config configs/weibo21_cross_domain.yaml `
+  --batch-size 16 `
+  --sample-concurrency 4 `
+  --progress `
+  test > outputs/weibo21-test.json
+```
+
+```bash
+python -m evofact.cli \
+  --config configs/weibo21_cross_domain.yaml \
+  --batch-size 16 \
+  --sample-concurrency 4 \
+  --progress \
+  test > outputs/weibo21-test.json
+```
+
+Replace `test` with `report`, `evolve`, `meta-evolve`, or `adversarial-evolve` as needed.
+Use `--no-progress` to suppress progress even on a terminal.
 
 ## License
 
