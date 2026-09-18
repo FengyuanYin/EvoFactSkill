@@ -77,6 +77,8 @@ def test_specialist_and_judge_prompts_include_explicit_json_contracts() -> None:
     assert '"label"' in backend.systems[1]
     assert '"rationale"' in backend.systems[1]
     assert "typed specialist findings" in backend.systems[1].lower()
+    assert "provides no external evidence" in backend.systems[1].lower()
+    assert backend.payloads[1]["evidence_mode"] == "unavailable"
     assert "valid json object" in backend.systems[1].lower()
 
 

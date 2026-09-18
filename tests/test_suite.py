@@ -429,14 +429,15 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["schema_version"], "evolution_ablation_v1")
+        self.assertEqual(payload["schema_version"], "unified_ablation_v2")
         self.assertEqual(payload["arms"], ["full", "no-evolution"])
         self.assertEqual(len(payload["runs"]), 2)
         self.assertEqual(
             payload["runs"][1]["paired_comparison"]["reference_arm"],
             "full",
         )
-        self.assertTrue(payload["protected_final_test"])
+        self.assertTrue(payload["families"]["evolution"]["protected_final_test"])
+        self.assertIn("typed_specialist_reports", payload["protected_invariants"])
 
     def test_checkpoint_meta_and_invalid_report(self):
         """函数作用：验证 `checkpoint_meta_and_invalid_report` 场景的正常行为、边界条件或错误处理。

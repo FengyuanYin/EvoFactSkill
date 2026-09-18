@@ -8,9 +8,19 @@ import pytest
 from evofact.cli import _run, build_parser
 from evofact.config import EvolutionConfig, MetaLearningConfig, load_config
 from evofact.core.frontmatter import parse_frontmatter
-from evofact.core.models import TransferUtility
-from evofact.evaluation.ablations import apply_evolution_ablation
-from evofact.experiments.runner import ExperimentRunner
+from evofact.core.models import Evidence, TransferUtility
+from evofact.evaluation.ablations import (
+    apply_evolution_ablation,
+    run_ablations,
+    run_unified_ablations,
+)
+from evofact.experiments.meta_runner import fixture_meta_samples
+from evofact.experiments.runner import (
+    ExperimentRunner,
+    fixture_samples,
+    fixture_test_samples,
+    fixture_validation_samples,
+)
 from evofact.governance.package_policy import validate_package
 from evofact.skills.package_adapter import package_to_skill_spec
 from evofact.skills.package_loader import load_package
@@ -109,3 +119,56 @@ def test_evolve_evaluation_only_does_not_create_package_store(tmp_path, monkeypa
     outcome = asyncio.run(_run(args))
     assert outcome["evaluation_only"] is True
     assert not config.skill_store.exists()
+
+
+def test_unified_ablation_runs_meta_controls():
+    config = load_config(ROOT / "configs/demse_dry_run.yaml")
+    result = asyncio.run(
+        run_unified_ablations(
+            config,
+            ROOT,
+            train_samples=[],
+            validation_samples=[],
+            test_samples=[],
+            all_samples=fixture_meta_samples(),
+            final_test_domains=("outer_holdout",),
+            manifest_id="fixture-meta-ablation-v1",
+            arms=("meta-full", "meta-no-negative-transfer-constraint"),
+            seeds=1,
+            bootstrap_iterations=20,
+        )
+    )
+    assert result["schema_version"] == "unified_ablation_v2"
+    runs = {row["arm"]: row for row in result["runs"]}
+    assert runs["meta-full"]["mechanism"]["meta_learning"]["enforce_negative_transfer"]
+    assert not runs["meta-no-negative-transfer-constraint"]["mechanism"]["meta_learning"][
+        "enforce_negative_transfer"
+    ]
+    assert (
+        runs["meta-no-negative-transfer-constraint"]["paired_comparison"]["reference_arm"]
+        == "meta-full"
+    )
+
+
+def test_evidence_ablation_removes_evidence_without_changing_sample_ids():
+    config = load_config(ROOT / "configs/dry_run.yaml")
+
+    def grounded(rows):
+        return [replace(row, evidence=(Evidence("verified record"),)) for row in rows]
+
+    result = asyncio.run(
+        run_ablations(
+            config,
+            ROOT,
+            grounded(fixture_samples()),
+            grounded(fixture_validation_samples()),
+            grounded(fixture_test_samples()),
+            manifest_id="fixture-evidence-ablation-v1",
+            arms=("full", "no-evidence"),
+            seeds=1,
+            bootstrap_iterations=20,
+        )
+    )
+    runs = {row["arm"]: row for row in result["runs"]}
+    assert runs["full"]["sample_ids"] == runs["no-evidence"]["sample_ids"]
+    assert runs["no-evidence"]["mechanism"]["input_control"]["evidence"] == "removed"

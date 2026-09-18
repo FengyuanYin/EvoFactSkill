@@ -183,7 +183,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
 
 这里的“训练”采用 batch 式 Skill 演化：同一个 batch 内的所有样本使用相同的 active package snapshot，只有到达批次/验证边界后才允许处理候选包，避免执行过程中发生中途漂移。它不是神经网络权重训练。
 
-### 配对演化消融
+### 统一配对消融
 
 ```bash
 evofact --config configs/weibo21_cross_domain.yaml \
@@ -194,7 +194,9 @@ evofact --config configs/weibo21_cross_domain.yaml \
   --output outputs/evolution-ablation.json
 ```
 
-每个实验臂从相同的种子包开始，使用相同 manifest 和受保护的 final-test 样本顺序，并且只写入隔离的临时 Package Bank。报告包含实际生效的机制配置、逐 seed 指标、McNemar 检验、配对 Bootstrap 置信区间、Package Bank digest 和预算快照。`no-evolution`、`no-discovery` 和 `rule-proposer` 与 `full` 配对；`instructions-only` 与 `no-discovery` 配对，从而只改变包优化范围。只有 Full 配置使用 LLM proposer 时，`rule-proposer` 才是合法对照。DEMSE 另外支持 `--ablation no-negative-transfer-constraint`。
+每个实验臂从相同的种子包开始，使用相同 manifest 和受保护的 final-test 样本顺序，并且只写入隔离的临时 Package Bank。报告包含实际生效的机制配置、逐 seed 指标、McNemar 检验、配对 Bootstrap 置信区间、Package Bank digest 和预算快照。`no-evolution`、`no-discovery`、`rule-proposer` 和 `no-evidence` 与 `full` 配对；`instructions-only` 与 `no-discovery` 配对，从而只改变包优化范围。`no-evidence` 仅允许用于包含证据的样本。只有 Full 配置使用 LLM proposer 时，`rule-proposer` 才是合法对照。DEMSE 另外支持 `--ablation no-negative-transfer-constraint`。
+
+同一命令还支持 `meta-full` 搭配 `meta-no-cross-episode-aggregation`、`meta-no-negative-transfer-constraint`、`meta-no-worst-domain-constraint`、`meta-no-specialization`，以及 `generation-full` 搭配 `generation-real-only`、`generation-rule-proposer`。生成消融通过 `--facts` 提供证据事实。`unified_ablation_v2` 报告统一包含各实验族、扁平 run 列表、汇总表，以及 meta/generation 的 episode 配对 Bootstrap 区间。
 
 ### 对抗演化与 Generator 演化
 
@@ -255,6 +257,8 @@ evofact --config configs/weibo21_cross_domain.yaml \
 报告 `accuracy_all` 和 `macro_f1_all` 时必须同时报告 `coverage`。如果 Runtime 拒绝了大量困难样本，单独的高 `covered_accuracy` 没有意义。`evidence_coverage = 0` 表示无外部证据设置，不能把该结果描述为 evidence-grounded verification。
 
 `ABSTAIN` 只表示预算耗尽、超时、必需报告缺失或 Judge 输出违反契约等 Runtime 结果。它不会作为合法标签交给 Judge。标签顺序、原生标签映射和可选正类由版本化数据集标签契约定义。
+
+对于 Weibo21 等不提供外部 `evidence` 字段的数据集，适配器会将证据规范化为空集合。Runtime 将证据评估节点标记为可选，向 Judge 传递 `evidence_mode: unavailable`，并要求 Judge 根据声明文本和成功的非证据专家报告选择数据集合法标签。缺少 evidence 本身不会触发 `ABSTAIN`；`evidence_coverage` 仍为 0，因此该结果不能描述为证据驱动核验。
 
 ## 配置与预算
 
@@ -361,7 +365,7 @@ python -m ruff check src tests
 - 本项目演化 Skill Package，不训练基础模型权重。
 - Package Optimizer 保持固定，目前未实现 Optimizer 自演化。
 - 仓库不内置检索系统；证据快照必须由数据集或外部 workflow 提供，无证据结果必须明确披露。
-- 统一消融运行器当前覆盖普通 Skill 演化；DEMSE 与对抗生成控制项通过各自命令运行，但继续共享 manifest 和指标契约。
+- 统一消融运行器已在同一报告契约下覆盖普通 Skill 演化、DEMSE 控制项和对抗生成控制项。
 - 数据集获取、许可证合规和处理版本哈希由实验者负责。
 - 真实后端结果依赖模型版本、限流策略和带日期的价格快照。
 

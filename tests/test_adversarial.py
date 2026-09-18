@@ -16,6 +16,7 @@ from evofact.attribution.rules import attribute_trace
 from evofact.cli import _run, build_parser
 from evofact.config import load_config
 from evofact.core.models import Prediction
+from evofact.evaluation.ablations import run_unified_ablations
 from evofact.experiments.adversarial_runner import AdversarialEvolutionRunner
 from evofact.experiments.runner import ExperimentRunner, _gold
 from evofact.generation.data import fixture_adversarial_data, load_samples, validate_fact_links
@@ -480,6 +481,39 @@ class AdversarialRunnerTests(unittest.TestCase):
                 self.assertGreater(record["metrics"]["accepted"], 0)
                 self.assertEqual(record["metrics"]["generated_used_in_training"], 0)
                 self.assertEqual(record["training_sample_ids"], record["construction_ids"])
+
+    def test_unified_ablation_runs_generation_full_and_real_only(self):
+        samples, facts = fixture_adversarial_data()
+        with tempfile.TemporaryDirectory() as temp:
+            config = config_for(Path(temp))
+            result = asyncio.run(
+                run_unified_ablations(
+                    config,
+                    ROOT,
+                    train_samples=[],
+                    validation_samples=[],
+                    test_samples=[],
+                    all_samples=samples,
+                    facts=facts,
+                    final_test_domains=("outer_holdout",),
+                    manifest_id="fixture-generation-ablation-v1",
+                    arms=("generation-full", "generation-real-only"),
+                    seeds=1,
+                    bootstrap_iterations=20,
+                    generation_backend=FakeJSONBackend(),
+                )
+            )
+        self.assertEqual(result["schema_version"], "unified_ablation_v2")
+        runs = {row["arm"]: row for row in result["runs"]}
+        self.assertGreater(runs["generation-full"]["metrics"]["generated_used_in_training"], 0)
+        self.assertEqual(
+            runs["generation-real-only"]["metrics"]["generated_used_in_training"],
+            0,
+        )
+        self.assertEqual(
+            runs["generation-real-only"]["paired_comparison"]["reference_arm"],
+            "generation-full",
+        )
 
     def test_commit_audit_idempotent_no_policy_weights(self):
         """函数作用：验证 `commit_audit_idempotent_no_policy_weights` 场景的正常行为、边界条件或错误处理。

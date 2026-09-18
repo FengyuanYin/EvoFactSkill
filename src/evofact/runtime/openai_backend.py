@@ -79,15 +79,33 @@ _GENERIC_SPECIALIST_ROLE = (
 )
 
 
-def build_judge_json_contract(contract: DatasetLabelContract) -> str:
+def build_judge_json_contract(
+    contract: DatasetLabelContract,
+    *,
+    evidence_available: bool,
+) -> str:
     definitions = "\n".join(f"- {item.name}: {item.description}" for item in contract.labels)
     allowed = " | ".join(contract.allowed_labels)
+    evidence_guidance = (
+        "Ground the choice in typed findings and cited evidence."
+        if evidence_available
+        else (
+            "This dataset sample provides no external evidence. Decide from the claim text and "
+            "the available non-evidence specialist reports. Do not treat missing evidence as "
+            "support, contradiction, or a reason to abstain, and do not invent citations."
+        )
+    )
+    rationale_description = (
+        "short evidence-grounded explanation"
+        if evidence_available
+        else "short report-grounded explanation"
+    )
     return f"""
 Typed specialist findings are local analyses, not votes. Treat every report's legacy
 `assessment` field as compatibility metadata and never majority-vote over it.
 Choose exactly one final business label from the active dataset contract below.
-Ground the choice in typed findings and cited evidence. Style, source reputation,
-or a missing source alone cannot establish any particular label.
+{evidence_guidance} Style, source reputation, or a missing source alone cannot
+establish any particular label.
 
 Dataset: {contract.dataset_id}
 Label schema: {contract.schema_id} version {contract.version}
@@ -98,7 +116,7 @@ Return exactly one valid json object with this structure:
 {{
   "label": "{allowed}",
   "confidence": 0.0,
-  "rationale": "short evidence-grounded explanation"
+  "rationale": "{rationale_description}"
 }}
 `confidence` must be a number between 0 and 1. Even when evidence is incomplete,
 conflicting, or uncertain, select the best-supported allowed business label and
@@ -752,12 +770,21 @@ Prefer no_change unless the supplied evidence justifies a concrete change.
         输入要求：`self` 应为已初始化的 `OpenAICompatibleBackend` 实例；`sample`（dict）需符合函数签名约定；`reports`（tuple[SpecialistReport, ...]）需符合函数签名约定；`skill`（SkillSpec）需符合函数签名约定。
         输出：异步返回 `BackendResult` 类型结果；校验或下游调用失败时异常向上传递。"""
         label_contract = label_contract or fixture_binary_contract()
-        system = skill.instructions + "\n\n" + build_judge_json_contract(label_contract)
+        evidence_available = bool(sample.get("evidence"))
+        system = (
+            skill.instructions
+            + "\n\n"
+            + build_judge_json_contract(
+                label_contract,
+                evidence_available=evidence_available,
+            )
+        )
         data, usage_details = await self._call_with_usage(
             system,
             {
                 "sample": sample,
                 "reports": [r.model_dump() for r in reports],
+                "evidence_mode": "available" if evidence_available else "unavailable",
                 "execution_summary": execution_summary.model_dump()
                 if hasattr(execution_summary, "model_dump")
                 else execution_summary,

@@ -12,8 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evofact.config import AppConfig
-from evofact.core.models import SpecialistFinding, SpecialistReport
+from evofact.core.models import Sample, SpecialistFinding, SpecialistReport
 from evofact.experiments.runner import ExperimentRunner, fixture_samples, load_seed_skills
+from evofact.runtime.mock_backend import MockBackend
 from evofact.runtime.openai_backend import OpenAICompatibleBackend, _specialist_json_contract
 
 
@@ -186,6 +187,39 @@ def test_mock_end_to_end_emits_serializable_v2_reports() -> None:
     assert all(report.schema_version == "specialist_report_v2" for report in reports)
     assert all(report.findings for report in reports)
     json.dumps(traces[0].model_dump(), ensure_ascii=False, default=str)
+
+
+def test_evidence_free_dataset_uses_reports_and_still_reaches_judge() -> None:
+    class EvidenceFailingBackend(MockBackend):
+        async def analyze(self, sample, skill, **kwargs):
+            if skill.name == "evidence_assessment":
+                raise RuntimeError("no evidence input")
+            return await super().analyze(sample, skill, **kwargs)
+
+    runner = ExperimentRunner(
+        AppConfig(routing_strategy="static", max_skills_per_item=3),
+        ROOT,
+    )
+    runner._backend = EvidenceFailingBackend
+    sample = Sample(
+        "weibo-no-evidence",
+        "weibo21",
+        "官方通报称该消息不实。",
+        "FAKE",
+        "social",
+        label_schema_id="weibo21-binary-v1",
+    )
+    traces, _ = asyncio.run(runner.run([sample]))
+    trace = traces[0]
+    assert trace.decision.label in {"REAL", "FAKE"}
+    assert trace.decision.origin.value == "judge"
+    assert trace.specialist_reports
+    evidence_skill = next(skill for skill in runner.skills if skill.name == "evidence_assessment")
+    evidence_nodes = [
+        node for node in trace.execution_plan.nodes if node.skill_id == evidence_skill.skill_id
+    ]
+    assert evidence_nodes and not evidence_nodes[0].required
+    assert trace.aggregated_evidence == ()
 
 
 def test_seed_specialists_declare_v2_output_schema() -> None:
