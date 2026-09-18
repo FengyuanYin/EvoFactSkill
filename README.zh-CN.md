@@ -1,7 +1,7 @@
 # EvoFactSkill
 
 <p align="center">
-  <b>面向多智能体事实核验的数据集自适应全包演化框架</b>
+  <b>面向虚假信息检测的自进化多智能体系统</b>
 </p>
 
 <p align="center">
