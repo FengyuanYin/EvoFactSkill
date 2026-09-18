@@ -5,6 +5,7 @@ import json
 import mimetypes
 from pathlib import Path
 
+from evofact.core.frontmatter import parse_frontmatter
 from evofact.core.models import SkillKind, SkillScope, SkillStatus, Trigger
 from evofact.core.package_models import (
     SkillContract,
@@ -20,17 +21,7 @@ SUPPORTED_DIRECTORIES = {"references", "templates", "assets", "schemas", "script
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], str]:
-    if not text.startswith("---\n"):
-        raise ValueError("SKILL.md must start with YAML frontmatter")
-    head, marker, body = text[4:].partition("\n---\n")
-    if not marker:
-        raise ValueError("unterminated frontmatter")
-    metadata: dict[str, str] = {}
-    for line in head.splitlines():
-        key, separator, value = line.partition(":")
-        if separator:
-            metadata[key.strip()] = value.strip().strip("\"'")
-    return metadata, body.strip()
+    return parse_frontmatter(text)
 
 
 def _media_type(path: str) -> str:

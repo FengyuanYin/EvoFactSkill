@@ -402,13 +402,24 @@ class IntegrationTests(unittest.TestCase):
         after = {str(p): p.read_bytes() for p in files if p.is_file()}
         self.assertEqual(before, after)
 
-    def test_unimplemented_ablation_arms_fail_closed(self):
-        """函数作用：验证 `eight_arms` 场景的正常行为、边界条件或错误处理。
-        输入要求：`self` 应为已初始化的 `IntegrationTests` 实例；无其他显式输入。
-        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+    def test_evolution_ablation_runner_uses_independent_arms(self):
+        """The offline runner compares independent arms on one sample order."""
         env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(
-            [sys.executable, "-m", "evofact.cli", "--config", "configs/dry_run.yaml", "ablation"],
+            [
+                sys.executable,
+                "-m",
+                "evofact.cli",
+                "--config",
+                "configs/dry_run.yaml",
+                "ablation",
+                "--arms",
+                "full,no-evolution",
+                "--seeds",
+                "1",
+                "--bootstrap-iterations",
+                "20",
+            ],
             cwd=ROOT,
             env=env,
             capture_output=True,
@@ -416,8 +427,16 @@ class IntegrationTests(unittest.TestCase):
             encoding="utf-8",
             check=False,
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("independent implementation", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["schema_version"], "evolution_ablation_v1")
+        self.assertEqual(payload["arms"], ["full", "no-evolution"])
+        self.assertEqual(len(payload["runs"]), 2)
+        self.assertEqual(
+            payload["runs"][1]["paired_comparison"]["reference_arm"],
+            "full",
+        )
+        self.assertTrue(payload["protected_final_test"])
 
     def test_checkpoint_meta_and_invalid_report(self):
         """函数作用：验证 `checkpoint_meta_and_invalid_report` 场景的正常行为、边界条件或错误处理。

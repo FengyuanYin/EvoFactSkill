@@ -38,7 +38,10 @@ class MetaValidationGate:
             failures.append("mean transfer gain below minimum")
         if utility.confidence_interval[0] <= 0:
             failures.append("transfer confidence interval does not exclude zero")
-        if utility.negative_transfer_rate > self.config.max_negative_transfer_rate:
+        if (
+            self.config.enforce_negative_transfer
+            and utility.negative_transfer_rate > self.config.max_negative_transfer_rate
+        ):
             failures.append("negative transfer rate exceeded")
         if (
             self.config.enforce_worst_domain
@@ -76,9 +79,8 @@ class MetaValidationGate:
             and utility.episode_count >= self.config.min_valid_episodes
         ):
             severe = (
-                utility.negative_transfer_rate > 0.5
-                or utility.worst_domain_drop < -2 * self.config.max_worst_domain_drop
-            )
+                self.config.enforce_negative_transfer and utility.negative_transfer_rate > 0.5
+            ) or utility.worst_domain_drop < -2 * self.config.max_worst_domain_drop
             if not severe:
                 return self._decision(utility, True, "specialized", positive, tuple(failures))
         if utility.mean_gain > 0 and utility.mean_coverage >= self.config.min_coverage:

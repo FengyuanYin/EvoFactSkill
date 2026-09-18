@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from evofact.core.frontmatter import parse_frontmatter
 from evofact.core.models import SkillKind
 from evofact.core.package_models import (
     PackageFinding,
@@ -47,17 +48,8 @@ def is_reserved_label_contract_path(path: str) -> bool:
 
 
 def _frontmatter(text: str) -> dict[str, str]:
-    if not text.startswith("---\n"):
-        return {}
-    head, marker, _ = text[4:].partition("\n---\n")
-    if not marker:
-        return {}
-    result: dict[str, str] = {}
-    for line in head.splitlines():
-        key, separator, value = line.partition(":")
-        if separator:
-            result[key.strip()] = value.strip().strip("\"'")
-    return result
+    metadata, _ = parse_frontmatter(text, required=False)
+    return metadata
 
 
 def validate_package(
@@ -170,8 +162,8 @@ def validate_package(
                             "frontmatter_mismatch", f"{key} conflicts with manifest", "SKILL.md"
                         )
                     )
-        except UnicodeDecodeError:
-            pass
+        except (UnicodeDecodeError, ValueError) as exc:
+            findings.append(PackageFinding("frontmatter_invalid", str(exc), "SKILL.md"))
 
     metadata = files.get("metadata.json")
     if metadata:

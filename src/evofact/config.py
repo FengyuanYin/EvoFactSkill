@@ -105,6 +105,7 @@ class MetaLearningConfig:  # 元学习配置
     confidence_level: float = 0.95
     allow_specialization: bool = True
     aggregate_across_episodes: bool = True
+    enforce_negative_transfer: bool = True
     enforce_worst_domain: bool = True
     checkpoint_path: Path = Path("outputs/demse/checkpoint.json")
 
@@ -128,7 +129,13 @@ class MetaLearningConfig:  # 元学习配置
 
 @dataclass
 class EvolutionConfig:
+    enabled: bool = True
+
     proposer: str = "rule"
+
+    scope: str = "package"
+
+    discovery: bool = True
 
     fallback_to_rule: bool = True
 
@@ -147,6 +154,9 @@ class EvolutionConfig:
     def __post_init__(self) -> None:
         if self.proposer not in {"rule", "llm"}:
             raise ValueError("evolution.proposer must be rule or llm")
+
+        if self.scope not in {"package", "instructions"}:
+            raise ValueError("evolution.scope must be package or instructions")
 
         if not self.optimizer_skill.strip():
             raise ValueError("evolution.optimizer_skill must not be empty")

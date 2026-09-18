@@ -5,6 +5,7 @@ import base64
 import hashlib
 
 from evofact.core.budget_models import BudgetRequest
+from evofact.core.frontmatter import normalize_newlines, parse_frontmatter, render_frontmatter
 from evofact.core.models import SkillKind, SkillScope, SkillStatus, Trigger
 from evofact.core.package_models import (
     FileOperation,
@@ -309,12 +310,10 @@ def legacy_instruction_edit_to_patch(
     ):
         raise ValueError("legacy edit target is frozen")
     current = target.file(target.manifest.entrypoints.instructions)
-    raw = current.content.decode("utf-8")
+    raw = normalize_newlines(current.content.decode("utf-8"))
     if raw.startswith("---\n"):
-        head, marker, _ = raw[4:].partition("\n---\n")
-        if not marker:
-            raise ValueError("target SKILL.md frontmatter is invalid")
-        replacement = f"---\n{head}\n---\n{instructions.strip()}\n".encode()
+        frontmatter, _ = parse_frontmatter(raw)
+        replacement = render_frontmatter(frontmatter, instructions).encode()
     else:
         replacement = (instructions.strip() + "\n").encode()
     operation = FileOperation(

@@ -17,11 +17,13 @@ execution:
   progress: auto
 meta_learning:
   enabled: true
+  enforce_negative_transfer: true
   episodes: 5
   checkpoint_path: outputs/adversarial-llm/checkpoint.json
 generation:
   enabled: true
   proposer: llm
+  use_generated_in_training: true
   batch_size: 8
   max_trace_examples: 32
   max_text_chars: 6000
