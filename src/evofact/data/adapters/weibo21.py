@@ -21,13 +21,13 @@ class Weibo21Adapter:
                 labels=(
                     LabelDefinition(
                         "REAL",
-                        "The claim is supported as factual.",
-                        "Preserve a supported factual claim.",
+                        "The claim is classified as factual under the Weibo21 annotation schema.",
+                        "Preserve a Weibo21 claim annotated as factual.",
                     ),
                     LabelDefinition(
                         "FAKE",
-                        "The claim is contradicted or fabricated.",
-                        "Create a contradicted or fabricated claim while keeping it auditable.",
+                        "The claim is classified as false or fabricated under the Weibo21 schema.",
+                        "Create a Weibo21-style false or fabricated claim.",
                     ),
                 ),
                 native_mapping=(("0", "REAL"), ("1", "FAKE"), ("REAL", "REAL"), ("FAKE", "FAKE")),

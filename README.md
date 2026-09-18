@@ -183,7 +183,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
 
 Evolution is batch-style: every sample in one batch uses the same active package snapshot; candidate packages are considered only after the batch/validation boundary. This prevents mid-batch parameter drift.
 
-### Paired evolution ablations
+### Unified paired ablations
 
 ```bash
 evofact --config configs/weibo21_cross_domain.yaml \
@@ -194,7 +194,9 @@ evofact --config configs/weibo21_cross_domain.yaml \
   --output outputs/evolution-ablation.json
 ```
 
-Every arm starts from the same seed packages, uses the same manifest and protected final-test sample order, and writes only to an isolated temporary package bank. The report contains effective mechanism settings, per-seed metrics, McNemar tests, paired bootstrap confidence intervals, package-bank digests, and budget snapshots. `no-evolution`, `no-discovery`, and `rule-proposer` are paired against `full`; `instructions-only` is paired against `no-discovery` so package scope is the only changed factor. `rule-proposer` is valid only when the full configuration uses the LLM proposer. DEMSE additionally supports `--ablation no-negative-transfer-constraint`.
+Every arm starts from the same seed packages, uses the same manifest and protected final-test sample order, and writes only to an isolated temporary package bank. The report contains effective mechanism settings, per-seed metrics, McNemar tests, paired bootstrap confidence intervals, package-bank digests, and budget snapshots. `no-evolution`, `no-discovery`, `rule-proposer`, and `no-evidence` are paired against `full`; `instructions-only` is paired against `no-discovery` so package scope is the only changed factor. `no-evidence` is accepted only for evidence-bearing data. `rule-proposer` is valid only when the full configuration uses the LLM proposer. DEMSE additionally supports `--ablation no-negative-transfer-constraint`.
+
+The same command also accepts `meta-full` with `meta-no-cross-episode-aggregation`, `meta-no-negative-transfer-constraint`, `meta-no-worst-domain-constraint`, or `meta-no-specialization`; and `generation-full` with `generation-real-only` or `generation-rule-proposer`. Generation arms require evidence facts through `--facts`. The `unified_ablation_v2` report contains all families, one flattened run list, one summary table, and episode-paired bootstrap intervals for meta/generation controls.
 
 ### Adversarial and generator evolution
 
@@ -255,6 +257,8 @@ The primary classification metrics are:
 Always report `accuracy_all` and `macro_f1_all` with `coverage`. A high `covered_accuracy` is not meaningful if the Runtime rejects many difficult cases. `evidence_coverage = 0` indicates a no-external-evidence setting and must not be described as evidence-grounded verification.
 
 `ABSTAIN` is a Runtime outcome for exhausted budgets, timeouts, missing required reports, or an invalid Judge response. It is not a legal label supplied to the Judge. Label order, native mappings, and optional positive labels come from versioned dataset contracts.
+
+For datasets such as Weibo21 that do not provide an external `evidence` field, the adapter normalizes evidence to an empty collection. The Runtime marks evidence-assessment nodes optional, passes `evidence_mode: unavailable` to the Judge, and requires the Judge to decide from the claim text plus successful non-evidence specialist reports. Missing evidence alone never triggers `ABSTAIN`; `evidence_coverage` remains zero, so the run cannot be described as evidence-grounded.
 
 ## Configuration and budgets
 
@@ -361,7 +365,7 @@ For a real backend, first validate orchestration with a small `--limit` and a st
 - The repository evolves Skill Packages, not foundation-model weights.
 - The Package Optimizer is fixed; self-evolution of the optimizer is not implemented.
 - Retrieval is not bundled. Evidence snapshots must be provided by the dataset/workflow, and evidence-free results must be reported as such.
-- The unified ablation runner currently covers ordinary Skill evolution. DEMSE and adversarial-generation controls use their dedicated commands but share the same manifest and metric contracts.
+- The unified ablation runner covers ordinary Skill evolution, DEMSE controls, and adversarial-generation controls under one report contract.
 - Dataset access, licenses, and processed-release hashes remain the experimenter's responsibility.
 - Real-provider results depend on model version, rate limits, and a dated pricing snapshot.
 

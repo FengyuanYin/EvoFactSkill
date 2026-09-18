@@ -125,10 +125,11 @@ def build_parser():
             command.add_argument(
                 "--arms",
                 default="full,no-evolution,no-discovery",
-                help="comma-separated independent evolution ablation arms",
+                help="comma-separated evolution, meta, or generation ablation arms",
             )
             command.add_argument("--seeds", type=int, default=3)
             command.add_argument("--bootstrap-iterations", type=int, default=1000)
+            command.add_argument("--facts", help="verified evidence facts for generation arms")
 
     # 跨领域元演化参数，以及可选的消融实验配置覆盖项。
     meta_parser = subparsers.add_parser("meta-evolve")
@@ -679,20 +680,40 @@ async def _run_impl(args, progress):
         result = await runner.closed_loop(train, validation)
         return {"gate_decisions": result["gate_decisions"]}
     if args.command == "ablation":
-        from evofact.evaluation.ablations import run_ablations
+        from evofact.evaluation.ablations import (
+            GENERATION_ABLATION_ARMS,
+            META_ABLATION_ARMS,
+            run_unified_ablations,
+        )
+        from evofact.generation.data import fixture_adversarial_data, load_facts
 
+        arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())
         train = select(manifest.train_ids) if manifest else fixture_samples()
         validation = (
             select(manifest.evolution_validation_ids) if manifest else fixture_validation_samples()
         )
         test = select(manifest.test_ids) if manifest else fixture_test_samples()
-        arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())
-        return await run_ablations(
+        needs_generation = any(arm in GENERATION_ABLATION_ARMS for arm in arms)
+        needs_meta = any(arm in META_ABLATION_ARMS for arm in arms)
+        facts = load_facts(args.facts) if args.facts else []
+        unified_samples = all_samples
+        if unified_samples is None and needs_generation:
+            unified_samples, fixture_facts = fixture_adversarial_data()
+            if not facts:
+                facts = fixture_facts
+        elif unified_samples is None and needs_meta:
+            unified_samples = fixture_meta_samples()
+        final_domains = final_test_domains or cli_final_domains or ("outer_holdout",)
+        return await run_unified_ablations(
             config,
             root,
-            train,
-            validation,
-            test,
+            train_samples=train,
+            validation_samples=validation,
+            test_samples=test,
+            all_samples=unified_samples or [],
+            facts=facts,
+            final_test_domains=final_domains,
+            train_domains=train_domains,
             manifest_id=manifest.manifest_id if manifest else "fixture-ablation-v1",
             arms=arms,
             seeds=args.seeds,
