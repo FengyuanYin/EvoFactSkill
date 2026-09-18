@@ -1,7 +1,7 @@
 # EvoFactSkill
 
 <p align="center">
-  <b>Dataset-Aware Full-Package Evolution for Multi-Agent Fact Verification</b>
+  <b>Self-Evolving Multi-Agent System for Misinformation Detection</b>
 </p>
 
 <p align="center">
