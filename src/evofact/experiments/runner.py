@@ -1,4 +1,5 @@
 import hashlib
+import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -20,11 +21,15 @@ from evofact.core.models import (
 from evofact.data.label_registry import fixture_binary_contract
 from evofact.data.registry import DataRegistry
 from evofact.evolution.distiller import distill
-from evofact.evolution.package_candidate import package_candidate_to_proposal
+from evofact.evolution.package_candidate import (
+    build_package_candidate,
+    package_candidate_to_proposal,
+)
 from evofact.evolution.package_optimizer import (
     ALLOWED_TARGET_KINDS,
     FROZEN_TARGET_NAMES,
     PackageOptimizerAgent,
+    legacy_instruction_edit_to_patch,
 )
 from evofact.evolution.proposer import propose_from_cluster
 from evofact.governance.pricing_policy import load_pricing_table
@@ -71,6 +76,16 @@ def fixture_validation_samples() -> list[Sample]:
         Sample("fv-2", "fixture", "这是已被辟谣的假消息。", "FAKE", "health"),
         Sample("fv-3", "fixture", "未经证实的另一项陈述。", "FAKE", "social"),
         Sample("fv-4", "fixture", "多个独立来源确认该报告。", "REAL", "science"),
+    ]
+
+
+def fixture_test_samples() -> list[Sample]:
+    """Disjoint offline final-test fixture used by the ablation runner."""
+    return [
+        Sample("ft-1", "fixture", "公开档案支持这项陈述。", "REAL", "social"),
+        Sample("ft-2", "fixture", "已核实这是虚假传言。", "FAKE", "health"),
+        Sample("ft-3", "fixture", "独立来源发布一致记录。", "REAL", "science"),
+        Sample("ft-4", "fixture", "未经证实的假消息再次传播。", "FAKE", "social"),
     ]
 
 
@@ -276,6 +291,18 @@ class ExperimentRunner:
         for trace, sample in zip(traces, rows):
             contract = self.label_contract_registry.resolve_sample(sample)
             reports.append(attribute_trace(trace, contract.normalize(sample.label), contract))
+        if not self.config.evolution.enabled:
+            if generation_guard is not None:
+                generation_guard(traces, reports)
+            return {
+                "traces": traces,
+                "evaluation": result,
+                "attributions": reports,
+                "utilities": {},
+                "distillation": distill(traces, reports),
+                "proposals": [],
+                "package_candidates": {},
+            }
         tracker = UtilityTracker()
         jobs = []
         for trace_index, (trace, sample) in enumerate(zip(traces, rows)):
@@ -386,6 +413,25 @@ class ExperimentRunner:
                 )
                 if candidate is None:
                     return None
+                if candidate.base is None and not self.config.evolution.discovery:
+                    return None
+                if candidate.base is not None and self.config.evolution.scope == "instructions":
+                    instructions = package_to_skill_spec(candidate.package).instructions
+                    candidate = build_package_candidate(
+                        target,
+                        legacy_instruction_edit_to_patch(
+                            target,
+                            instructions,
+                            rationale=(
+                                candidate.patch.rationale
+                                if candidate.patch is not None
+                                else "instruction-only ablation"
+                            ),
+                            source_trace_ids=tuple(
+                                report.trace_id for report in group
+                            ),
+                        ),
+                    )
                 proposal = package_candidate_to_proposal(
                     candidate,
                     cluster_id=cluster_id,
@@ -427,6 +473,12 @@ class ExperimentRunner:
                 )
                 for cluster_id, group in clusters.items()
             ]
+            if not self.config.evolution.discovery:
+                proposals = [
+                    proposal
+                    for proposal in proposals
+                    if proposal.operation.value != "add"
+                ]
 
         return {
             "traces": traces,
@@ -534,7 +586,8 @@ class ExperimentRunner:
         samples: list[Sample] | None,
         validation_samples: list[Sample] | None,
         *,
-        repository,
+        repository=None,
+        evaluation_only: bool = False,
         progress: ProgressSink | None = None,
     ):
         """Evolve sequential training batches with one atomic bank update per batch."""
@@ -546,8 +599,23 @@ class ExperimentRunner:
         )
         if not rows or not validation_rows:
             raise ValueError("evolution requires non-empty training and validation samples")
-        active_packages = repository.active_packages()
-        if not active_packages:
+        if evaluation_only:
+            from evofact.skills.repository import SkillRepository
+
+            with tempfile.TemporaryDirectory(prefix="evofact-evaluation-only-") as temp:
+                result = await self.closed_loop_batched(
+                    rows,
+                    validation_rows,
+                    repository=SkillRepository(Path(temp) / "skill-store"),
+                    evaluation_only=False,
+                    progress=progress,
+                )
+            result["evaluation_only"] = True
+            return result
+        if repository is None:
+            raise ValueError("repository is required unless evaluation_only is enabled")
+        active_packages = repository.active_packages() if repository is not None else {}
+        if repository is not None and not evaluation_only and not active_packages:
             if repository.active():
                 legacy_packages = project_skill_bank_to_packages(
                     self.packages, list(repository.active().values())
@@ -566,8 +634,9 @@ class ExperimentRunner:
                     audit={"source": "seed-packages"},
                 )
             active_packages = repository.active_packages()
-        self.packages = list(active_packages.values())
-        self.skills = [package_to_skill_spec(package) for package in self.packages]
+        if active_packages:
+            self.packages = list(active_packages.values())
+            self.skills = [package_to_skill_spec(package) for package in self.packages]
 
         all_traces = []
         all_rows = []
@@ -613,7 +682,7 @@ class ExperimentRunner:
                     accepted.append(proposal)
                     continue
                 package_candidate = outcome.get("package_candidates", {}).get(proposal.proposal_id)
-                if package_candidate is not None:
+                if package_candidate is not None and repository is not None and not evaluation_only:
                     repository.save_package(
                         replace(
                             package_candidate.package,
@@ -625,6 +694,8 @@ class ExperimentRunner:
                         )
                     )
                 for skill in proposal.candidate_skills:
+                    if repository is None or evaluation_only:
+                        continue
                     repository.save(
                         replace(
                             skill,
@@ -635,7 +706,7 @@ class ExperimentRunner:
                         decision.disposition,
                     )
             snapshots = ()
-            if accepted:
+            if accepted and repository is not None and not evaluation_only:
                 proposal_ids = tuple(item.proposal_id for item in accepted)
                 run_id = (
                     f"batch-{batch_index}-"
@@ -721,6 +792,7 @@ class ExperimentRunner:
             "gate_decisions": all_decisions,
             "budget_snapshot": self._budget_manager().snapshot(),
             "batches": batch_audit,
+            "evaluation_only": evaluation_only,
         }
 
 

@@ -15,7 +15,12 @@ from evofact.data.leakage import detect_leakage
 from evofact.data.manifests import build_manifest, manifest_json
 from evofact.data.registry import DataRegistry
 from evofact.experiments.meta_runner import MetaEvolutionRunner, fixture_meta_samples
-from evofact.experiments.runner import ExperimentRunner, fixture_samples
+from evofact.experiments.runner import (
+    ExperimentRunner,
+    fixture_samples,
+    fixture_test_samples,
+    fixture_validation_samples,
+)
 from evofact.reporting.meta_report import write_meta_report
 from evofact.reporting.report import skill_evolution_curve, summarize_runs, write_report
 from evofact.runtime.progress import NullProgressSink, ProgressEvent, make_progress_sink
@@ -113,8 +118,17 @@ def build_parser():
     for name in ("dry-run", "evolve", "validate", "test", "ablation", "report"):
         command = subparsers.add_parser(name)
         command.add_argument("--output", help=output_help)
-        if name != "ablation":
-            command.add_argument("--final-test-domains", default=None)
+        command.add_argument("--final-test-domains", default=None)
+        if name == "evolve":
+            command.add_argument("--evaluation-only", action="store_true")
+        if name == "ablation":
+            command.add_argument(
+                "--arms",
+                default="full,no-evolution,no-discovery",
+                help="comma-separated independent evolution ablation arms",
+            )
+            command.add_argument("--seeds", type=int, default=3)
+            command.add_argument("--bootstrap-iterations", type=int, default=1000)
 
     # 跨领域元演化参数，以及可选的消融实验配置覆盖项。
     meta_parser = subparsers.add_parser("meta-evolve")
@@ -133,6 +147,7 @@ def build_parser():
         "--ablation",
         choices=(
             "no-cross-episode-aggregation",
+            "no-negative-transfer-constraint",
             "no-worst-domain-constraint",
             "no-specialization",
         ),
@@ -225,10 +240,9 @@ async def _run_impl(args, progress):
         "test",
         "evolve",
         "validate",
-        "ablation",
         "report",
         "plan",
-    }:
+    } and not (args.command == "evolve" and args.evaluation_only):
         repository = SkillRepository(root / config.skill_store)
         active_packages = repository.active_packages()
         if active_packages:
@@ -564,11 +578,12 @@ async def _run_impl(args, progress):
         validation = select(manifest.evolution_validation_ids) if manifest else None
         if manifest and (not train or not validation):
             raise ValueError("evolution requires non-empty train and evolution-validation splits")
-        repo = SkillRepository(root / config.skill_store)
+        repo = None if args.evaluation_only else SkillRepository(root / config.skill_store)
         return await runner.closed_loop_batched(
             train,
             validation,
             repository=repo,
+            evaluation_only=args.evaluation_only,
             progress=progress,
         )
     if args.command == "meta-evolve":  # 使用元进化
@@ -583,6 +598,8 @@ async def _run_impl(args, progress):
             overrides["meta_test_domain_count"] = args.meta_test_domain_count
         if args.ablation == "no-cross-episode-aggregation":
             overrides.update(aggregate_across_episodes=False, min_valid_episodes=1)
+        if args.ablation == "no-negative-transfer-constraint":
+            overrides["enforce_negative_transfer"] = False
         if args.ablation == "no-worst-domain-constraint":
             overrides["enforce_worst_domain"] = False
         if args.ablation == "no-specialization":
@@ -662,8 +679,27 @@ async def _run_impl(args, progress):
         result = await runner.closed_loop(train, validation)
         return {"gate_decisions": result["gate_decisions"]}
     if args.command == "ablation":
-        raise ValueError(
-            "ablation is disabled until every named arm has an independent implementation"
+        from evofact.evaluation.ablations import run_ablations
+
+        train = select(manifest.train_ids) if manifest else fixture_samples()
+        validation = (
+            select(manifest.evolution_validation_ids)
+            if manifest
+            else fixture_validation_samples()
+        )
+        test = select(manifest.test_ids) if manifest else fixture_test_samples()
+        arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())
+        return await run_ablations(
+            config,
+            root,
+            train,
+            validation,
+            test,
+            manifest_id=manifest.manifest_id if manifest else "fixture-ablation-v1",
+            arms=arms,
+            seeds=args.seeds,
+            bootstrap_iterations=args.bootstrap_iterations,
+            progress=progress,
         )
     if args.command == "report":
         report_rows = select(manifest.test_ids) if manifest else None
@@ -734,7 +770,14 @@ async def _run(args):
         root / args.config if not Path(args.config).is_absolute() else args.config
     )
     mode = args.progress or configured.execution.progress
-    observed = {"test", "report", "evolve", "meta-evolve", "adversarial-evolve"}
+    observed = {
+        "test",
+        "report",
+        "evolve",
+        "meta-evolve",
+        "adversarial-evolve",
+        "ablation",
+    }
     progress = make_progress_sink(mode) if args.command in observed else NullProgressSink()
     success = False
     try:

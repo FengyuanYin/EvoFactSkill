@@ -95,7 +95,8 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             raise ValueError("adversarial evolution requires explicit final-test domains")
         if self.config.backend == "mock" and self.generation_backend is None:
             raise ValueError(
-                "LLM generation requires a real backend; mock is only allowed with an injected test backend"
+                "adversarial generation verification requires a real backend; mock is only "
+                "allowed with an injected test backend"
             )
         validate_fact_links(samples, self.facts)
         evidence_domains = {}
@@ -430,7 +431,11 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             )
         robustness = build_robustness_set(tuple(generated_samples))
         generation_attribution = attribute_generation(tuple(audit_entries))
-        rows = construction + synthetic
+        rows = (
+            construction + synthetic
+            if cfg.use_generated_in_training
+            else list(construction)
+        )
         inner_episode = DomainEpisode(
             episode.episode_id,
             episode.seed,
@@ -522,6 +527,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         self.audit[episode.episode_id] = json_value(
             {
                 "construction_ids": [s.sample_id for s in construction],
+                "training_sample_ids": [s.sample_id for s in rows],
                 "probe_ids": [s.sample_id for s in probe],
                 "fact_ids": [f.fact_id for f in facts],
                 "detector_baseline": frozen_id,
@@ -543,6 +549,9 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
                 "metrics": {
                     "generated": generated_count,
                     "accepted": len(synthetic),
+                    "generated_used_in_training": (
+                        len(synthetic) if cfg.use_generated_in_training else 0
+                    ),
                     "validity": len(synthetic) / max(1, generated_count),
                     "agreement": len(synthetic) / max(1, len(structured)),
                     "evidence_rate": sum(bool(sample.evidence) for sample in structured)

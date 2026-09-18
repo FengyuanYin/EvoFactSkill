@@ -166,6 +166,10 @@ evofact --config configs/weibo21_cross_domain.yaml \
 evofact --config configs/weibo21_cross_domain.yaml \
   evolve --output outputs/evolve.json
 
+# 只评估提案和门控，不更新 active package bank
+evofact --config configs/weibo21_cross_domain.yaml \
+  evolve --evaluation-only --output outputs/evolve-evaluation.json
+
 # 跨领域元学习 episode
 evofact --config configs/weibo21_cross_domain.yaml \
   meta-evolve --episodes 8 --strategy leave_one_domain_out \
@@ -178,6 +182,19 @@ evofact --config configs/weibo21_cross_domain.yaml \
 ```
 
 这里的“训练”采用 batch 式 Skill 演化：同一个 batch 内的所有样本使用相同的 active package snapshot，只有到达批次/验证边界后才允许处理候选包，避免执行过程中发生中途漂移。它不是神经网络权重训练。
+
+### 配对演化消融
+
+```bash
+evofact --config configs/weibo21_cross_domain.yaml \
+  ablation \
+  --arms "full,no-evolution,instructions-only,no-discovery,rule-proposer" \
+  --seeds 5 \
+  --bootstrap-iterations 2000 \
+  --output outputs/evolution-ablation.json
+```
+
+每个实验臂从相同的种子包开始，使用相同 manifest 和受保护的 final-test 样本顺序，并且只写入隔离的临时 Package Bank。报告包含实际生效的机制配置、逐 seed 指标、McNemar 检验、配对 Bootstrap 置信区间、Package Bank digest 和预算快照。`no-evolution`、`no-discovery` 和 `rule-proposer` 与 `full` 配对；`instructions-only` 与 `no-discovery` 配对，从而只改变包优化范围。只有 Full 配置使用 LLM proposer 时，`rule-proposer` 才是合法对照。DEMSE 另外支持 `--ablation no-negative-transfer-constraint`。
 
 ### 对抗演化与 Generator 演化
 
@@ -254,6 +271,12 @@ execution:
   max_concurrent_samples: 8
   progress: auto
 
+evolution:
+  enabled: true
+  proposer: llm
+  scope: package          # package | instructions
+  discovery: true
+
 budget:
   max_calls_per_run: 10000
   max_tokens_per_run: 30000000
@@ -263,6 +286,8 @@ pricing:
   table_path: pricing/provider-date.json
   require_cost_for_promotion: true
 ```
+
+生成数据对照实验可设置 `generation.use_generated_in_training: false`。此时生成与验证仍正常执行并保留审计记录，但 detector 演化只使用真实 construction 样本。`generation.proposer: rule` 可选择确定性的标签保持表述改写基线；其输出仍必须经过与 LLM 生成样本相同的 firewall 和盲审 verifier。
 
 密钥只应保存在 `api_key_env` 所指向的环境变量中：
 
@@ -336,7 +361,7 @@ python -m ruff check src tests
 - 本项目演化 Skill Package，不训练基础模型权重。
 - Package Optimizer 保持固定，目前未实现 Optimizer 自演化。
 - 仓库不内置检索系统；证据快照必须由数据集或外部 workflow 提供，无证据结果必须明确披露。
-- 通用论文级 `ablation` 默认 fail-closed。只有具备独立执行开关、共享 manifest、样本顺序和指标实现的消融项才有效。
+- 统一消融运行器当前覆盖普通 Skill 演化；DEMSE 与对抗生成控制项通过各自命令运行，但继续共享 manifest 和指标契约。
 - 数据集获取、许可证合规和处理版本哈希由实验者负责。
 - 真实后端结果依赖模型版本、限流策略和带日期的价格快照。
 

@@ -8,6 +8,7 @@ from pathlib import Path
 class GenerationConfig:
     enabled: bool = False
     proposer: str = "llm"
+    use_generated_in_training: bool = True
     batch_size: int = 8
     max_trace_examples: int = 32
     max_text_chars: int = 6000
@@ -18,8 +19,8 @@ class GenerationConfig:
         """函数作用：在 `GenerationConfig` 数据类初始化后检查字段之间的业务约束。
         输入要求：`self` 应为已初始化的 `GenerationConfig` 实例；无其他显式输入。
         输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
-        if self.proposer != "llm":
-            raise ValueError("generation.proposer only supports llm")
+        if self.proposer not in {"llm", "rule"}:
+            raise ValueError("generation.proposer must be llm or rule")
         for value, lower, upper in (
             (self.batch_size, 2, 100),
             (self.max_trace_examples, 2, 200),

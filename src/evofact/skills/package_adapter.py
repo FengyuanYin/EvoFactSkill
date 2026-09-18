@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from evofact.core.frontmatter import normalize_newlines, parse_frontmatter, render_frontmatter
 from evofact.core.models import SkillSpec, SkillStatus
 from evofact.core.package_models import (
     SkillContract,
@@ -27,10 +28,7 @@ def legacy_directory_to_package(
 
 def package_to_skill_spec(package: SkillPackage) -> SkillSpec:
     instructions = package.file(package.manifest.entrypoints.instructions).content.decode("utf-8")
-    if instructions.startswith("---\n"):
-        _, marker, body = instructions[4:].partition("\n---\n")
-        if marker:
-            instructions = body.strip()
+    _, instructions = parse_frontmatter(instructions, required=False)
     resources = {
         item.path: item.content.decode("utf-8")
         for item in package.files
@@ -129,25 +127,21 @@ def update_package_from_skill(base: SkillPackage, skill: SkillSpec) -> SkillPack
     )
     files = {item.path: item for item in base.files}
     instruction_file = files[entrypoints.instructions]
-    raw_instructions = instruction_file.content.decode("utf-8")
+    raw_instructions = normalize_newlines(instruction_file.content.decode("utf-8"))
     if raw_instructions.startswith("---\n"):
-        head, marker, _ = raw_instructions[4:].partition("\n---\n")
-        if not marker:
-            raise ValueError("base Package instructions have invalid frontmatter")
+        frontmatter, _ = parse_frontmatter(raw_instructions)
         retained = [
-            line
-            for line in head.splitlines()
-            if line.partition(":")[0].strip() not in {"name", "kind", "version"}
+            (key, value)
+            for key, value in frontmatter.items()
+            if key not in {"name", "kind", "version"}
         ]
-        header = [
-            f"name: {skill.name}",
-            f"kind: {skill.kind.value}",
-            f"version: {skill.version}",
-            *retained,
-        ]
-        instruction_content = (
-            "---\n" + "\n".join(header) + "\n---\n" + skill.instructions.strip() + "\n"
-        ).encode("utf-8")
+        header = {
+            "name": skill.name,
+            "kind": skill.kind.value,
+            "version": skill.version,
+            **dict(retained),
+        }
+        instruction_content = render_frontmatter(header, skill.instructions).encode("utf-8")
     else:
         instruction_content = (skill.instructions.strip() + "\n").encode("utf-8")
     files[entrypoints.instructions] = SkillFile(

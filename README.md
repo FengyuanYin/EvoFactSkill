@@ -166,6 +166,10 @@ The override recomputes the source domains and manifest, then reruns leakage che
 evofact --config configs/weibo21_cross_domain.yaml \
   evolve --output outputs/evolve.json
 
+# Evaluate proposals and gates without updating the active package bank
+evofact --config configs/weibo21_cross_domain.yaml \
+  evolve --evaluation-only --output outputs/evolve-evaluation.json
+
 # Cross-domain meta-learning episodes
 evofact --config configs/weibo21_cross_domain.yaml \
   meta-evolve --episodes 8 --strategy leave_one_domain_out \
@@ -178,6 +182,19 @@ evofact --config configs/weibo21_cross_domain.yaml \
 ```
 
 Evolution is batch-style: every sample in one batch uses the same active package snapshot; candidate packages are considered only after the batch/validation boundary. This prevents mid-batch parameter drift.
+
+### Paired evolution ablations
+
+```bash
+evofact --config configs/weibo21_cross_domain.yaml \
+  ablation \
+  --arms "full,no-evolution,instructions-only,no-discovery,rule-proposer" \
+  --seeds 5 \
+  --bootstrap-iterations 2000 \
+  --output outputs/evolution-ablation.json
+```
+
+Every arm starts from the same seed packages, uses the same manifest and protected final-test sample order, and writes only to an isolated temporary package bank. The report contains effective mechanism settings, per-seed metrics, McNemar tests, paired bootstrap confidence intervals, package-bank digests, and budget snapshots. `no-evolution`, `no-discovery`, and `rule-proposer` are paired against `full`; `instructions-only` is paired against `no-discovery` so package scope is the only changed factor. `rule-proposer` is valid only when the full configuration uses the LLM proposer. DEMSE additionally supports `--ablation no-negative-transfer-constraint`.
 
 ### Adversarial and generator evolution
 
@@ -254,6 +271,12 @@ execution:
   max_concurrent_samples: 8
   progress: auto
 
+evolution:
+  enabled: true
+  proposer: llm
+  scope: package          # package | instructions
+  discovery: true
+
 budget:
   max_calls_per_run: 10000
   max_tokens_per_run: 30000000
@@ -263,6 +286,8 @@ pricing:
   table_path: pricing/provider-date.json
   require_cost_for_promotion: true
 ```
+
+For the generation-data control arm, set `generation.use_generated_in_training: false`. Generation and verification still run and remain audited, but only real construction samples enter detector evolution. `generation.proposer: rule` selects a deterministic, label-preserving surface-form baseline; its outputs still pass through the same firewall and blind verifier as LLM-generated samples.
 
 Store credentials only in the environment variable named by `api_key_env`:
 
@@ -336,7 +361,7 @@ For a real backend, first validate orchestration with a small `--limit` and a st
 - The repository evolves Skill Packages, not foundation-model weights.
 - The Package Optimizer is fixed; self-evolution of the optimizer is not implemented.
 - Retrieval is not bundled. Evidence snapshots must be provided by the dataset/workflow, and evidence-free results must be reported as such.
-- Generic paper-level ablation is fail-closed. Only ablations with independent execution switches and a shared manifest/metric implementation are valid.
+- The unified ablation runner currently covers ordinary Skill evolution. DEMSE and adversarial-generation controls use their dedicated commands but share the same manifest and metric contracts.
 - Dataset access, licenses, and processed-release hashes remain the experimenter's responsibility.
 - Real-provider results depend on model version, rate limits, and a dated pricing snapshot.
 

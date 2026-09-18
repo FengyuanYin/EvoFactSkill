@@ -24,8 +24,10 @@ from evofact.generation.models import GenerationConfig
 from evofact.generation.prompts import GENERATOR_SYSTEM, VERIFIER_SYSTEM
 from evofact.generation.split import split_construction_probe
 from evofact.generation.verifier import ChallengeVerifier
+from evofact.generation.workflow import GenerationWorkflow
 from evofact.reporting.adversarial_report import write_adversarial_report
 from evofact.runtime.openai_backend import OpenAICompatibleBackend
+from evofact.skills.package_loader import load_package
 from evofact.skills.repository import SkillRepository
 
 
@@ -116,16 +118,18 @@ class GenerationTests(unittest.TestCase):
         traces[0] = replace(traces[0], decision=Prediction(_gold(self.samples[0].label), 0.9))
         traces[1] = replace(traces[1], decision=Prediction("REAL", 0.9))
         reports = [attribute_trace(t, _gold(s.label)) for t, s in zip(traces, self.samples[:4])]
+        self.traces = traces
+        self.reports = reports
         self.request = ChallengeGenerator().build_request(
             self.samples[:4], traces, reports, config=self.config, episode_id="test"
         )
         self.response = asyncio.run(ChallengeGenerator().generate(self.backend, self.request))
 
-    def test_only_llm_config_and_success_failure_context(self):
+    def test_generator_config_and_success_failure_context(self):
         """函数作用：验证 `only_llm_config_and_success_failure_context` 场景的正常行为、边界条件或错误处理。
         输入要求：`self` 应为已初始化的 `GenerationTests` 实例；无其他显式输入。
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
-        with self.assertRaisesRegex(ValueError, "only supports llm"):
+        with self.assertRaisesRegex(ValueError, "must be llm or rule"):
             GenerationConfig(proposer="deterministic")
         with self.assertRaises(TypeError):
             GenerationConfig(mode="weights")
@@ -134,6 +138,37 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("更难", GENERATOR_SYSTEM)
         self.assertEqual(len(self.backend.calls), 1)
         self.assertEqual(set(self.response), {"samples", "decisions"})
+
+    def test_rule_proposer_is_deterministic_and_does_not_call_generation_backend(self):
+        workflow = GenerationWorkflow(load_package(ROOT / "skills/seeds/generation_agent"))
+        config = replace(self.config, proposer="rule")
+        calls_before = len(self.backend.calls)
+        result = asyncio.run(
+            workflow.run(
+                self.backend,
+                self.samples[:4],
+                self.traces,
+                self.reports,
+                config=config,
+                episode_id="rule-control",
+            )
+        )
+        self.assertEqual(len(self.backend.calls), calls_before)
+        checked, rejected = ChallengeVerifier().validate(
+            result.response,
+            result.request,
+            config=config,
+            existing=self.samples[:4],
+            allowed_strategies=workflow.strategies,
+        )
+        self.assertFalse(rejected)
+        self.assertEqual(len(checked), config.batch_size)
+        self.assertTrue(
+            all(
+                decision["strategy"] == "label_preserving_rewrite"
+                for decision in result.response["decisions"]
+            )
+        )
 
     def test_free_text_survives_and_reviewer_is_blind(self):
         """函数作用：验证 `free_text_survives_and_reviewer_is_blind` 场景的正常行为、边界条件或错误处理。
@@ -423,6 +458,28 @@ class AdversarialRunnerTests(unittest.TestCase):
                 )
             self.assertEqual(outcome.episode_results, resumed.episode_results)
             self.assertEqual(runner.audit, restored.audit)
+
+    def test_generated_training_has_a_real_only_control_arm(self):
+        samples, facts = fixture_adversarial_data()
+        with tempfile.TemporaryDirectory() as temp:
+            config = config_for(Path(temp))
+            config = replace(
+                config,
+                generation=replace(config.generation, use_generated_in_training=False),
+            )
+            runner = AdversarialEvolutionRunner(
+                config,
+                ROOT,
+                facts,
+                generation_backend=FakeJSONBackend(),
+            )
+            asyncio.run(
+                runner.run(samples, final_test_domains=("outer_holdout",), evaluation_only=True)
+            )
+            for record in runner.audit.values():
+                self.assertGreater(record["metrics"]["accepted"], 0)
+                self.assertEqual(record["metrics"]["generated_used_in_training"], 0)
+                self.assertEqual(record["training_sample_ids"], record["construction_ids"])
 
     def test_commit_audit_idempotent_no_policy_weights(self):
         """函数作用：验证 `commit_audit_idempotent_no_policy_weights` 场景的正常行为、边界条件或错误处理。
