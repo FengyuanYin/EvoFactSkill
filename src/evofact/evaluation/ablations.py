@@ -100,8 +100,7 @@ async def run_ablations(
     }
     if missing_references:
         requirements = ", ".join(
-            f"{arm} requires {reference}"
-            for arm, reference in sorted(missing_references.items())
+            f"{arm} requires {reference}" for arm, reference in sorted(missing_references.items())
         )
         raise ValueError(f"ablation is missing paired reference arms: {requirements}")
 

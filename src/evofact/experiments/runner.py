@@ -427,9 +427,7 @@ class ExperimentRunner:
                                 if candidate.patch is not None
                                 else "instruction-only ablation"
                             ),
-                            source_trace_ids=tuple(
-                                report.trace_id for report in group
-                            ),
+                            source_trace_ids=tuple(report.trace_id for report in group),
                         ),
                     )
                 proposal = package_candidate_to_proposal(
@@ -475,9 +473,7 @@ class ExperimentRunner:
             ]
             if not self.config.evolution.discovery:
                 proposals = [
-                    proposal
-                    for proposal in proposals
-                    if proposal.operation.value != "add"
+                    proposal for proposal in proposals if proposal.operation.value != "add"
                 ]
 
         return {

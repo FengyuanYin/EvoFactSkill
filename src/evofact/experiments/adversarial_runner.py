@@ -431,11 +431,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             )
         robustness = build_robustness_set(tuple(generated_samples))
         generation_attribution = attribute_generation(tuple(audit_entries))
-        rows = (
-            construction + synthetic
-            if cfg.use_generated_in_training
-            else list(construction)
-        )
+        rows = construction + synthetic if cfg.use_generated_in_training else list(construction)
         inner_episode = DomainEpisode(
             episode.episode_id,
             episode.seed,

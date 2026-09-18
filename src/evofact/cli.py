@@ -683,9 +683,7 @@ async def _run_impl(args, progress):
 
         train = select(manifest.train_ids) if manifest else fixture_samples()
         validation = (
-            select(manifest.evolution_validation_ids)
-            if manifest
-            else fixture_validation_samples()
+            select(manifest.evolution_validation_ids) if manifest else fixture_validation_samples()
         )
         test = select(manifest.test_ids) if manifest else fixture_test_samples()
         arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())

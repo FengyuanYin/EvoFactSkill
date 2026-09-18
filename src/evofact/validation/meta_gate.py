@@ -79,12 +79,8 @@ class MetaValidationGate:
             and utility.episode_count >= self.config.min_valid_episodes
         ):
             severe = (
-                (
-                    self.config.enforce_negative_transfer
-                    and utility.negative_transfer_rate > 0.5
-                )
-                or utility.worst_domain_drop < -2 * self.config.max_worst_domain_drop
-            )
+                self.config.enforce_negative_transfer and utility.negative_transfer_rate > 0.5
+            ) or utility.worst_domain_drop < -2 * self.config.max_worst_domain_drop
             if not severe:
                 return self._decision(utility, True, "specialized", positive, tuple(failures))
         if utility.mean_gain > 0 and utility.mean_coverage >= self.config.min_coverage:
