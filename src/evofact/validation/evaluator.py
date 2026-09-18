@@ -1,6 +1,6 @@
 from evofact.core.models import EvaluationResult, SampleEvaluation, UsageRecord
 from evofact.evaluation.calibration import brier_score, expected_calibration_error
-from evofact.evaluation.metrics import compute_metrics, grouped_metrics
+from evofact.evaluation.metrics import compute_metrics, grouped_metrics, schema_metrics
 
 
 def evaluate(rows: list[SampleEvaluation], confidence_intervals=None) -> EvaluationResult:
@@ -9,7 +9,10 @@ def evaluate(rows: list[SampleEvaluation], confidence_intervals=None) -> Evaluat
     输出：返回 `EvaluationResult` 类型结果；校验或下游调用失败时异常向上传递。"""
     metrics = compute_metrics(rows)
     metrics["ece"] = expected_calibration_error(rows)
-    metrics["brier"] = brier_score(rows)
+    try:
+        metrics["brier"] = brier_score(rows)
+    except ValueError:
+        pass
     return EvaluationResult(
         tuple(rows),
         metrics,
@@ -17,4 +20,5 @@ def evaluate(rows: list[SampleEvaluation], confidence_intervals=None) -> Evaluat
         grouped_metrics(rows, "temporal_window"),
         confidence_intervals or {},
         UsageRecord(estimated_cost=sum(r.cost for r in rows)),
+        schema_metrics(rows),
     )

@@ -1,6 +1,6 @@
 ---
 name: judge_decision
 kind: judge
-version: 0.1.0
+version: 0.2.0
 ---
-Decide REAL, FAKE or ABSTAIN from the structured specialist reports and execution summary. Account for conflicting evidence, failed nodes, and missing required reports. Return ABSTAIN when required evidence is incomplete or confidence is insufficient. Provide calibrated confidence and never use dataset metadata as a label cue.
+Choose exactly one final business label from the Runtime-provided dataset label contract using the structured specialist reports and execution summary. Treat specialist findings as analyses, not votes. When evidence is incomplete or conflicting, select the best-supported allowed label and express uncertainty with calibrated confidence and rationale. Never emit the Runtime-reserved ABSTAIN outcome and never use sample metadata or label frequencies as an answer cue.

@@ -17,6 +17,9 @@ class GeneratorGateConfig:
     max_leakage_rate: float = 0.0
     max_safety_rejection_rate: float = 0.0
     max_cost_ratio: float = 1.5
+    min_label_coverage: float = 0.0
+    min_worst_label_agreement: float = 0.0
+    max_worst_label_probe_drop: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,20 @@ class GeneratorGate:
     ) -> GeneratorGateDecision:
         champion, challenger = evaluation.champion, evaluation.challenger
         failures = []
+        if (
+            evaluation.label_contract_digest
+            and evaluation.metadata.get("champion_label_contract_digest")
+            and evaluation.metadata.get("champion_label_contract_digest")
+            != evaluation.label_contract_digest
+        ):
+            failures.append("champion label contract mismatch")
+        if (
+            evaluation.label_contract_digest
+            and evaluation.metadata.get("challenger_label_contract_digest")
+            and evaluation.metadata.get("challenger_label_contract_digest")
+            != evaluation.label_contract_digest
+        ):
+            failures.append("challenger label contract mismatch")
         comparisons = (
             (
                 challenger.validity_rate - champion.validity_rate,
@@ -77,6 +94,12 @@ class GeneratorGate:
             failures.append("leakage threshold exceeded")
         if challenger.safety_rejection_rate > self.config.max_safety_rejection_rate:
             failures.append("safety rejection threshold exceeded")
+        if challenger.label_coverage_rate < self.config.min_label_coverage:
+            failures.append("label coverage below threshold")
+        if challenger.worst_label_agreement < self.config.min_worst_label_agreement:
+            failures.append("worst-label agreement below threshold")
+        if challenger.worst_label_probe_drop > self.config.max_worst_label_probe_drop:
+            failures.append("worst-label probe drop exceeded")
         if champion.cost is None or challenger.cost is None:
             failures.append("cost unavailable")
         elif challenger.cost > max(champion.cost, type(champion.cost)("0.000000001")) * type(

@@ -43,7 +43,7 @@ EvoFactSkill 是一个面向**跨域与时间漂移假新闻检测**的研究框
 - 成对重复评估：bootstrap 置信区间、McNemar 检验、覆盖率与成本约束、受保护域回归检查以及 Pareto 保留。
 - 指标把 `ABSTAIN` 计入主分母，并单独报告覆盖率、选择性风险、ECE、Brier，以及按域/按时间窗口的细分结果。
 - 数据适配器：**Weibo21**、**AMTCele**、**LiveFact**、**AdvFake**，配套可复现清单与泄漏检测。
-- 八条消融臂：`single-llm`、`static`、`all-experts`、`random`、`prompt-only-evolution`、`no-discovery`、`no-negative-transfer`、`full`。
+- 四种已实现的路由控制：`static`、`all-experts`、`random`、`utility-aware`；它们不冒充消融实验臂。
 - 基于 AST 的可执行技能筛查。脚本类技能一律需要人工复核，除非额外提供更严格的外部沙箱。
 
 ## 快速开始——离线、无需 API Key
@@ -84,7 +84,7 @@ evofact dry-run                 # 在训练夹具上离线推理
 evofact test                    # 在最终测试划分上离线推理
 evofact evolve                  # 固定验证门控的闭环进化
 evofact validate                # 仅输出门控决策
-evofact ablation                # 运行八条消融臂
+evofact ablation                # 在每条消融臂独立实现前保持 fail-closed
 evofact report                  # 多种子报告（JSON + Markdown + CSV）
 
 evofact meta-evolve             # DEMSE 跨域元演化
@@ -96,6 +96,12 @@ evofact meta-evolve             # DEMSE 跨域元演化
 evofact adversarial-evolve      # trace → 生成 → 审核 → 门控
   [--samples samples.jsonl] [--facts facts.jsonl]
   [--final-test-domains outer_holdout] [--resume] [--evaluation-only]
+
+evofact generator-evolve --propose-only --audit generation-audit.json
+  # Optimizer 基于审计生成完整 generation_agent Package；将 stdout 保存为候选 JSON。
+evofact generator-evolve --candidate candidate.json --evaluation paired-evaluation.json
+  [--evaluation-only] [--run-id ID]
+  # 使用独立生成且绑定来源身份的 paired evaluation 执行门控/提交。
 
 evofact skills list
 evofact skills show NAME [--snapshot HASH]
@@ -113,6 +119,16 @@ python -m evofact.cli --config configs/default.yaml <command>
 ```
 
 `meta-evolve` 与 `adversarial-evolve` 支持 `--evaluation-only`：只构建推理运行时，绝不提交技能库，适合机制验证。`--resume` 仅在配置、数据与 SkillBank 指纹全部一致时才会恢复。
+
+通用 `ablation` 命令目前有意 fail-closed；没有独立行为的历史别名 arm 已删除。三个已经实现的 DEMSE 开关仍可通过 `meta-evolve --ablation` 使用；在所有命名 arm 都有独立实现前，不应据此形成论文级对比结论。
+
+同一数据集配置可显式覆盖最终测试域；程序会重新计算训练域、生成新 manifest 并执行泄漏检查：
+
+```bash
+python -m evofact.cli --config configs/weibo21_cross_domain.yaml test --final-test-domains 科技 --output outputs/weibo21-test-tech.json
+```
+
+已跟踪的 DeepSeek 配置使用 `pricing/deepseek-2026-09-18-peak.json` 中的日期化峰值价格。正式实验前必须按官方价格页刷新，因为价格和低峰时段可能变化。
 
 ## 配置
 
@@ -215,7 +231,17 @@ sample ──▶ Coordinator ──▶ Router ──▶ Specialists（并行）�
 
 ## 指标与解读
 
-`accuracy_all` 与 `macro_f1_all` 使用全部有标签样本，因此 `ABSTAIN` 不会被悄悄剔除。`covered_accuracy` 单独报告，必须始终与 `coverage`、`selective_risk` 一起解读。
+每个 Dataset Adapter 都声明版本化标签契约。Judge 成功调用后只能从当前数据集/任务的 `allowed_labels` 中选择；例如 Weibo21 使用 `REAL/FAKE`，LiveFact 的 `cls` 与 `inf` 分别使用独立的 `real/fake/ambiguous` schema。标签映射不会通过扫描测试集推断，也不会把单样本 gold 传给模型。
+
+`ABSTAIN` 不是业务标签，只表示预算不足、超时、必需专家报告不完整或 Judge 输出违反契约等 Runtime 故障。`accuracy_all` 与按 schema 计算的 `macro_f1_all` 使用全部有标签样本，因此 Runtime `ABSTAIN` 不会被悄悄剔除。`covered_accuracy` 必须始终与 `coverage`、`selective_risk` 一起解读；报告还按契约顺序给出逐标签召回率、错误率和动态混淆矩阵。Brier 仅对声明正类的单一二分类 schema 计算。
+
+限制测试样本数时，`--limit` 是全局参数，必须放在子命令之前：
+
+```powershell
+python -m evofact.cli --config configs/weibo21_cross_domain.yaml --limit 100 test
+```
+
+该限制在 manifest 完成防泄漏切分之后截取测试分区；`0` 表示不限制。
 
 晋级不能只靠点估计为正：候选技能必须同时满足最小增益与覆盖率、受保护域回归、成本、安全以及成对统计支撑等条件。有实际价值但尚不可晋级的非支配候选，可以保留在 Pareto 归档中。
 
@@ -316,7 +342,7 @@ git push origin v0.2.0
 
 ## 研究基线
 
-共享实验协议定义了：单 LLM、静态多智能体、全部专家、随机路由、仅提示词进化、无技能发现、无负迁移控制，以及完整系统。所有臂必须使用同一份清单、同一样本顺序与同一套指标实现。
+通用论文级消融目前禁用。只有具备独立执行开关、使用同一清单、样本顺序与指标实现的实验臂，才允许重新加入共享实验协议。
 
 ## 现状与局限
 
@@ -334,11 +360,57 @@ git push origin v0.2.0
 
 已知缺口——过往的 checklist **并不**代表所有研究要求已全部完成：
 
-- 自动提案发现目前只产出 `ADD`/`EDIT`；较慢的 Meta-Skill 循环仍是事件记录脚手架。
-- 部分具名消融臂共用同一套路由实现。
-- 真实后端的 token 计价，以及完整的 token/调用/并发预算约束尚未完成。
+- Meta Optimizer 自进化未启用，避免递归优化套娃。
+- 通用论文级消融保持禁用，直到每个实验臂都有独立实现。
+- 价格表是日期化快照；供应商价格变化后必须刷新。
 - 基于文件的技能仓库假设只有一个写入方。
 - 默认结果是离线机制验证，**不是**跨域模型准确率的实证结论。
+
+## 批次并发与进度条
+
+数据集中的不同样本可以并发执行，同时每个样本内部仍严格遵循 Router DAG 的依赖关系。
+执行配置与 DAG 调用限制彼此独立：
+
+```yaml
+execution:
+  batch_size: 16
+  max_concurrent_samples: 4
+  progress: auto  # auto | on | off
+```
+
+- `batch_size` 是冻结 Skill Bank 的批次边界，不代表训练底层 LLM 权重。
+- `max_concurrent_samples` 限制一个 batch 内同时执行的样本数。
+- `budget.max_sample_concurrency` 继续限制单个样本 DAG 内的并发调用。
+- `budget.max_global_concurrency` 继续限制一次推理运行中的全部后端调用。
+
+`test` 只评估当前 Skill Bank。`report` 串行运行不同 seed，但每个 seed 内的样本并发。
+`evolve` 为每个训练 batch 冻结一个 Skill Bank，整批完成并通过 Gate 后原子更新，下一批
+才使用新版本。`meta-evolve` 和 `adversarial-evolve` 的全部 episode 使用同一个基线，只有
+跨 episode 汇总门禁完成后才统一提交。
+
+进度写入 stderr，因此 stdout 始终是一个可解析的 JSON 文档。交互终端默认显示进度，
+重定向或 CI 环境默认关闭动态进度。全局覆盖参数必须写在子命令之前：
+
+```powershell
+python -m evofact.cli `
+  --config configs/weibo21_cross_domain.yaml `
+  --batch-size 16 `
+  --sample-concurrency 4 `
+  --progress `
+  test > outputs/weibo21-test.json
+```
+
+```bash
+python -m evofact.cli \
+  --config configs/weibo21_cross_domain.yaml \
+  --batch-size 16 \
+  --sample-concurrency 4 \
+  --progress \
+  test > outputs/weibo21-test.json
+```
+
+可将 `test` 换为 `report`、`evolve`、`meta-evolve` 或 `adversarial-evolve`。
+使用 `--no-progress` 可在交互终端中显式关闭进度。
 
 ## 许可证
 

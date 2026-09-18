@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
+from evofact.core.budget_models import BudgetLimits
 from evofact.core.dag_models import (
     DAGExecutionResult,
     ExecutionPlan,
@@ -12,7 +14,7 @@ from evofact.core.dag_models import (
 from evofact.core.models import UsageRecord
 from evofact.governance.dag_policy import require_valid_plan
 
-from .node_runner import NodeRunner
+from .node_runner import NodeRunner, merge_usage_details
 
 
 def _merge_usage(items: list[UsageRecord]) -> UsageRecord:
@@ -34,6 +36,8 @@ class DAGExecutor:
         resource_runtime=None,
         sample_timeout_ms: int | None = None,
         budget_manager=None,
+        plan_limits: BudgetLimits = BudgetLimits(),
+        available_capabilities: tuple[str, ...] = ("llm", "references", "template"),
     ):
         self.skills = {item.skill_id: item for item in skills}
         self.runner = NodeRunner(
@@ -43,15 +47,45 @@ class DAGExecutor:
             budget_manager=budget_manager,
         )
         self.sample_timeout_ms = sample_timeout_ms
+        self.plan_limits = plan_limits
+        self.available_capabilities = available_capabilities
 
     async def execute(
         self, plan: ExecutionPlan, sample: dict, *, sample_id: str = "sample"
     ) -> DAGExecutionResult:
-        validation = require_valid_plan(plan, self.skills)
+        validation = require_valid_plan(
+            plan,
+            self.skills,
+            limits=self.plan_limits,
+            available_capabilities=self.available_capabilities,
+        )
 
         async def run_all() -> tuple[NodeExecution, ...]:
             completed: dict[str, NodeExecution] = {}
             by_node = {item.node_id: item for item in plan.nodes}
+            sequence = 0
+            sequence_lock = asyncio.Lock()
+
+            async def run_observed(node):
+                nonlocal sequence
+                async with sequence_lock:
+                    sequence += 1
+                    started_sequence = sequence
+                result = await self.runner.run(
+                    node,
+                    sample,
+                    completed,
+                    sample_id=sample_id,
+                )
+                async with sequence_lock:
+                    sequence += 1
+                    completed_sequence = sequence
+                return replace(
+                    result,
+                    started_sequence=started_sequence,
+                    completed_sequence=completed_sequence,
+                )
+
             for level in validation.levels:
                 runnable = []
                 for node_id in level:
@@ -66,17 +100,7 @@ class DAGExecutor:
                         )
                     else:
                         runnable.append(node)
-                results = await asyncio.gather(
-                    *(
-                        self.runner.run(
-                            node,
-                            sample,
-                            completed,
-                            sample_id=sample_id,
-                        )
-                        for node in runnable
-                    )
-                )
+                results = await asyncio.gather(*(run_observed(node) for node in runnable))
                 completed.update((item.node_id, item) for item in results)
             return tuple(completed[node_id] for node_id in validation.topological_order)
 
@@ -107,5 +131,9 @@ class DAGExecutor:
             errors=tuple(item.error for item in nodes if item.error),
         )
         return DAGExecutionResult(
-            plan, nodes, summary, _merge_usage([item.usage for item in nodes])
+            plan,
+            nodes,
+            summary,
+            _merge_usage([item.usage for item in nodes]),
+            usage_details=merge_usage_details(item.usage_details for item in nodes),
         )

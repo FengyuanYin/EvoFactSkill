@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from evofact.core.label_models import DatasetLabelContract, LabelDefinition
 from evofact.core.models import Sample
 from evofact.data.base import DatasetDiagnostic
 from evofact.data.deduplication import stable_sample_id
@@ -10,6 +11,29 @@ from evofact.data.deduplication import stable_sample_id
 class Weibo21Adapter:
     name = "weibo21"
     filename = "weibo21_all.jsonl"
+
+    def label_contracts(self) -> tuple[DatasetLabelContract, ...]:
+        return (
+            DatasetLabelContract(
+                dataset_id=self.name,
+                schema_id="weibo21-binary-v1",
+                version="1",
+                labels=(
+                    LabelDefinition(
+                        "REAL",
+                        "The claim is supported as factual.",
+                        "Preserve a supported factual claim.",
+                    ),
+                    LabelDefinition(
+                        "FAKE",
+                        "The claim is contradicted or fabricated.",
+                        "Create a contradicted or fabricated claim while keeping it auditable.",
+                    ),
+                ),
+                native_mapping=(("0", "REAL"), ("1", "FAKE"), ("REAL", "REAL"), ("FAKE", "FAKE")),
+                positive_label="FAKE",
+            ),
+        )
 
     def discover(self, root: Path) -> DatasetDiagnostic:
         """函数作用：检查指定目录中是否存在当前适配器支持的数据文件。
@@ -62,6 +86,7 @@ class Weibo21Adapter:
                             "source_split": row.get("split"),
                             "source_file": path.name,
                         },
+                        label_schema_id="weibo21-binary-v1",
                     )
                 )
         yield from samples

@@ -12,9 +12,11 @@ def validate_plan(
     skills: list[SkillSpec] | tuple[SkillSpec, ...] | dict[str, SkillSpec],
     *,
     limits: BudgetLimits = BudgetLimits(),
+    available_capabilities: tuple[str, ...] = ("llm", "references", "template"),
 ) -> PlanValidationReport:
     by_skill = skills if isinstance(skills, dict) else {item.skill_id: item for item in skills}
     findings: list[PlanFinding] = []
+    warnings: list[PlanFinding] = []
     nodes = {item.node_id: item for item in plan.nodes}
     if len(nodes) != len(plan.nodes):
         findings.append(PlanFinding("duplicate_node", "node IDs must be unique"))
@@ -73,11 +75,29 @@ def validate_plan(
         contract = getattr(skill, "contract", None) if skill else None
         if contract is None:
             continue
+        missing_capabilities = set(contract.requires_capabilities) - set(available_capabilities)
+        if missing_capabilities:
+            findings.append(
+                PlanFinding(
+                    "capability_mismatch",
+                    f"missing runtime capabilities: {sorted(missing_capabilities)}",
+                    node.node_id,
+                )
+            )
+        missing_optional = set(contract.optional_capabilities) - set(available_capabilities)
+        if missing_optional:
+            warnings.append(
+                PlanFinding(
+                    "optional_capability_unavailable",
+                    f"optional runtime capabilities unavailable: {sorted(missing_optional)}",
+                    node.node_id,
+                )
+            )
         if not node.depends_on and not contract.allow_root:
             findings.append(
                 PlanFinding("root_forbidden", "skill cannot be a root node", node.node_id)
             )
-        if node.depends_on and contract.consumes:
+        if contract.consumes:
             produced = set()
             for dependency in node.depends_on:
                 upstream = by_skill.get(nodes[dependency].skill_id) if dependency in nodes else None
@@ -105,13 +125,23 @@ def validate_plan(
         levels=tuple(levels),
         depth=len(levels),
         findings=tuple(findings),
+        warnings=tuple(warnings),
     )
 
 
 def require_valid_plan(
-    plan: ExecutionPlan, skills, *, limits: BudgetLimits = BudgetLimits()
+    plan: ExecutionPlan,
+    skills,
+    *,
+    limits: BudgetLimits = BudgetLimits(),
+    available_capabilities: tuple[str, ...] = ("llm", "references", "template"),
 ) -> PlanValidationReport:
-    report = validate_plan(plan, skills, limits=limits)
+    report = validate_plan(
+        plan,
+        skills,
+        limits=limits,
+        available_capabilities=available_capabilities,
+    )
     if not report.valid:
         detail = "; ".join(f"{item.code}: {item.message}" for item in report.findings)
         raise ValueError(f"invalid execution plan: {detail}")

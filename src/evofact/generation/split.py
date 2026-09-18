@@ -52,7 +52,14 @@ def split_real_only(samples, *, seed: str, policy: DataIsolationPolicy = DataIso
     )
 
 
-def split_construction_probe(samples, facts, *, fraction: float, seed: str):
+def split_construction_probe(
+    samples,
+    facts,
+    *,
+    fraction: float,
+    seed: str,
+    label_contract_registry=None,
+):
     """函数作用：按事件、证据正文和来源分组，将 meta-train 隔离为 construction 与 probe。
     输入要求：`samples`（未显式标注）需符合函数签名约定；`facts`（未显式标注）需符合函数签名约定；`fraction`（float）需以关键字传入并符合签名约定；`seed`（str）需以关键字传入并符合签名约定。
     输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
@@ -93,7 +100,7 @@ def split_construction_probe(samples, facts, *, fraction: float, seed: str):
         if len(names) != 1:
             raise ValueError("evidence/event group crosses domains")
         domains[next(iter(names))].append(group)
-    construction, probe = [], []
+    construction_groups, probe_groups = [], []
     for domain, grouped in sorted(domains.items()):
         if len(grouped) < 2:
             raise ValueError(
@@ -105,8 +112,52 @@ def split_construction_probe(samples, facts, *, fraction: float, seed: str):
             ).hexdigest()
         )
         count = min(len(grouped) - 1, max(1, round(len(grouped) * fraction)))
-        probe.extend(s for group in grouped[:count] for s in group)
-        construction.extend(s for group in grouped[count:] for s in group)
+        probe_groups.extend(grouped[:count])
+        construction_groups.extend(grouped[count:])
+
+    if label_contract_registry is not None:
+
+        def labels(group):
+            return {
+                (
+                    sample.dataset,
+                    sample.label_schema_id,
+                    label_contract_registry.resolve_sample(sample).normalize(sample.label),
+                )
+                for sample in group
+            }
+
+        all_labels = set().union(*(labels(group) for group in construction_groups + probe_groups))
+        probe_labels = set().union(*(labels(group) for group in probe_groups))
+        for missing in sorted(all_labels - probe_labels):
+            source = next(
+                (group for group in construction_groups if missing in labels(group)),
+                None,
+            )
+            if source is None:
+                continue
+            domain = source[0].domain or source[0].dataset
+            replacement = next(
+                (
+                    group
+                    for group in probe_groups
+                    if (group[0].domain or group[0].dataset) == domain
+                    and all(
+                        any(label in labels(other) for other in probe_groups if other is not group)
+                        for label in labels(group)
+                    )
+                ),
+                None,
+            )
+            if replacement is None:
+                continue
+            construction_groups.remove(source)
+            probe_groups.remove(replacement)
+            construction_groups.append(replacement)
+            probe_groups.append(source)
+
+    construction = [sample for group in construction_groups for sample in group]
+    probe = [sample for group in probe_groups for sample in group]
     allowed = {s.sample_id for s in construction}
     selected = [f for f in facts if f.sample_id in allowed and f.verified is True]
     return (

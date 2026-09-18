@@ -15,6 +15,8 @@ def normalize_plan(
     confidence: float = 1.0,
     budget: RunBudget = RunBudget(),
     fallback_used: bool = False,
+    default_timeout_ms: int | None = None,
+    max_timeout_ms: int | None = None,
 ) -> ExecutionPlan:
     prepared: list[PlanNode] = []
     for raw in nodes:
@@ -57,7 +59,12 @@ def normalize_plan(
             required=item.required,
             upstream_outputs=tuple(sorted(item.upstream_outputs)),
             priority=item.priority,
-            timeout_ms=item.timeout_ms,
+            timeout_ms=(
+                min(item.timeout_ms or default_timeout_ms, max_timeout_ms)
+                if max_timeout_ms is not None
+                and (item.timeout_ms is not None or default_timeout_ms is not None)
+                else (item.timeout_ms or default_timeout_ms)
+            ),
         )
         for item in prepared
     )

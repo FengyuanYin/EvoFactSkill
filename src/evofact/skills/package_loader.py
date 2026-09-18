@@ -16,7 +16,7 @@ from evofact.core.package_models import (
 from evofact.governance.package_policy import require_valid_package
 
 SUPPORTED_ROOT_FILES = {"SKILL.md", "metadata.json"}
-SUPPORTED_DIRECTORIES = {"references", "templates", "assets", "scripts", "tests"}
+SUPPORTED_DIRECTORIES = {"references", "templates", "assets", "schemas", "scripts", "tests"}
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], str]:

@@ -177,6 +177,11 @@ class MetricTests(unittest.TestCase):
         m = compute_metrics(rows)
         self.assertEqual(m["accuracy_all"], 0.02)
         self.assertEqual(m["coverage"], 0.02)
+        self.assertEqual(m["evidence_coverage"], 0.0)
+        self.assertEqual(
+            compute_metrics([replace(rows[0], evidence_available=True)])["evidence_coverage"],
+            1.0,
+        )
 
     def test_statistics_and_pareto(self):
         """函数作用：验证 `statistics_and_pareto` 场景的正常行为、边界条件或错误处理。
@@ -397,7 +402,7 @@ class IntegrationTests(unittest.TestCase):
         after = {str(p): p.read_bytes() for p in files if p.is_file()}
         self.assertEqual(before, after)
 
-    def test_eight_arms(self):
+    def test_unimplemented_ablation_arms_fail_closed(self):
         """函数作用：验证 `eight_arms` 场景的正常行为、边界条件或错误处理。
         输入要求：`self` 应为已初始化的 `IntegrationTests` 实例；无其他显式输入。
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
@@ -409,9 +414,10 @@ class IntegrationTests(unittest.TestCase):
             capture_output=True,
             text=True,
             encoding="utf-8",
-            check=True,
+            check=False,
         )
-        self.assertEqual(len(json.loads(result.stdout)), 8)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("independent implementation", result.stderr)
 
     def test_checkpoint_meta_and_invalid_report(self):
         """函数作用：验证 `checkpoint_meta_and_invalid_report` 场景的正常行为、边界条件或错误处理。
@@ -434,6 +440,7 @@ class IntegrationTests(unittest.TestCase):
             )
             payload = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
             self.assertFalse(payload["run_status"]["valid"])
+            self.assertFalse(payload["evidence_context"]["evidence_grounded"])
 
 
 if __name__ == "__main__":

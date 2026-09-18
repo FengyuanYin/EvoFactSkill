@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from evofact.core.models import SkillKind, SkillScope, SkillSpec, SkillStatus, Trigger
-from evofact.core.package_models import SkillContract, SkillEntrypoints, SkillPackage
+from evofact.core.package_models import (
+    SkillContract,
+    SkillEntrypoints,
+    SkillPackage,
+    SpecialistReportContract,
+)
 from evofact.governance import ACTIVE_BANK_SCHEMA_VERSION
 from evofact.governance.package_policy import require_valid_package
 from evofact.skills.package_serializer import dumps_package, loads_package
@@ -53,6 +58,11 @@ def _skill_from(data: dict) -> SkillSpec:
     if isinstance(data.get("entrypoints"), dict):
         raw = data["entrypoints"]
         data["entrypoints"] = SkillEntrypoints(**{**raw, "tests": tuple(raw.get("tests", ()))})
+    if isinstance(data.get("report_contract"), dict):
+        raw = data["report_contract"]
+        data["report_contract"] = SpecialistReportContract(
+            **{**raw, "finding_types": tuple(raw.get("finding_types", ()))}
+        )
     return SkillSpec(**data)
 
 
@@ -110,6 +120,8 @@ class SkillRepository:
             if self.active_file.exists()
             else {}
         )
+        if payload.get("schema_version") == "package_mirror_v1":
+            return {}
         return (
             payload.get("skills", payload)
             if payload.get("schema_version") == "active_v2"
@@ -444,6 +456,29 @@ class SkillRepository:
                 "schema_version": ACTIVE_BANK_SCHEMA_VERSION,
                 "packages": target,
                 "transactions": transactions,
+            },
+        )
+        # Read-only compatibility projection for legacy tooling. Package blobs
+        # and active-packages.json remain the authoritative state.
+        from evofact.skills.package_adapter import package_to_skill_spec
+
+        legacy_active = {}
+        for package in packages:
+            skill = package_to_skill_spec(package)
+            data = _jsonable(asdict(skill))
+            digest = hashlib.sha256(
+                json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            snapshot = self.snapshots / f"{digest}.json"
+            if not snapshot.exists():
+                self._atomic_json(snapshot, data)
+            legacy_active[skill.name] = digest
+        self._atomic_json(
+            self.active_file,
+            {
+                "schema_version": "active_v2",
+                "skills": legacy_active,
+                "transactions": {},
             },
         )
         return tuple(target.values())

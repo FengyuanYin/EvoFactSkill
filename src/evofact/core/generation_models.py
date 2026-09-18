@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
 from evofact.governance import GENERATION_AUDIT_SCHEMA_VERSION
 
@@ -23,6 +24,8 @@ class GenerationLineage(ModelMixin):
     model: str
     config_digest: str
     created_at: str
+    label_schema_id: str = "legacy-binary"
+    label_contract_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -32,13 +35,20 @@ class GeneratedSample(ModelMixin):
     synthetic: bool = True
 
 
+class VerificationStatus(StrEnum):
+    CLASSIFIED = "classified"
+    INDETERMINATE = "indeterminate"
+
+
 @dataclass(frozen=True)
 class VerificationDecision(ModelMixin):
     sample_id: str
-    label: Literal["REAL", "FAKE", "UNKNOWN"]
+    status: VerificationStatus
+    predicted_label: str | None
     accepted: bool
     reason: str
     verifier_version: str
+    label_contract_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,6 +73,7 @@ class GenerationBatch(ModelMixin):
     request_digest: str
     response_digest: str
     usage: UsageDetails = field(default_factory=UsageDetails)
+    label_contract_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,7 @@ class VerificationBatch(ModelMixin):
     decisions: tuple[VerificationDecision, ...]
     verifier_version: str
     usage: UsageDetails = field(default_factory=UsageDetails)
+    label_contract_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,12 @@ class GenerationMetrics(ModelMixin):
     leakage_rate: float
     safety_rejection_rate: float
     cost: Decimal | None = None
+    label_coverage_rate: float = 0.0
+    worst_label_agreement: float = 0.0
+    per_label_acceptance: dict[str, float] = field(default_factory=dict)
+    authentic_macro_f1: float = 0.0
+    worst_label_probe_drop: float = 0.0
+    label_schema_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -96,3 +114,4 @@ class PairedGeneratorEvaluation(ModelMixin):
     champion: GenerationMetrics
     challenger: GenerationMetrics
     metadata: dict[str, Any] = field(default_factory=dict)
+    label_contract_digest: str = ""

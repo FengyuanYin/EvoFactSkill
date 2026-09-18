@@ -7,14 +7,19 @@ def brier_score(rows: list[SampleEvaluation]) -> float:
     输出：返回 `float` 类型结果；校验或下游调用失败时异常向上传递。"""
     if not rows:
         return 0
+    signatures = {(row.label_schema_id, row.allowed_labels, row.positive_label) for row in rows}
+    if len(signatures) != 1:
+        raise ValueError("Brier score requires one label schema")
+    _, allowed_labels, positive_label = next(iter(signatures))
+    if len(allowed_labels) != 2 or positive_label is None:
+        raise ValueError("Brier score requires a binary contract with positive_label")
     values = []
     for r in rows:
-        p = (
-            0.5
-            if r.predicted == "ABSTAIN"
-            else (r.confidence if r.predicted == "FAKE" else 1 - r.confidence)
-        )
-        values.append((p - (1 if r.gold == "FAKE" else 0)) ** 2)
+        if r.predicted not in allowed_labels or r.decision_origin == "runtime":
+            p = 0.5
+        else:
+            p = r.confidence if r.predicted == positive_label else 1 - r.confidence
+        values.append((p - (1 if r.gold == positive_label else 0)) ** 2)
     return sum(values) / len(values)
 
 

@@ -20,6 +20,11 @@ from evofact.core.models import (
     SkillSpec,
     SkillStatus,
 )
+from evofact.core.package_models import (
+    SkillContract,
+    SkillEntrypoints,
+    SpecialistReportContract,
+)
 from evofact.runtime.backend import ModelBackend
 from evofact.runtime.node_runner import _usage_details
 
@@ -359,6 +364,37 @@ def decision_to_proposal(
         if decision.skill_name is None or decision.instructions is None:
             raise ValueError("add decision is incomplete")
 
+        report_contract = SpecialistReportContract(
+            report_type=decision.skill_name,
+            finding_types=("domain_observation", "insufficient_analysis"),
+            guidance=(
+                "Produce role-local, auditable findings for this specialist. "
+                "Do not issue any final dataset business label or Runtime abstention outcome."
+            ),
+        )
+        schema_path = "schemas/specialist_report.json"
+        metadata = {
+            "name": decision.skill_name,
+            "kind": "specialist",
+            "version": "0.1.0",
+            "safety_level": "text_only",
+            "contract": {
+                "consumes": ["atomic_claims"],
+                "produces": ["specialist_report"],
+                "requires_capabilities": ["llm"],
+                "optional_capabilities": [],
+                "allow_root": False,
+                "allow_parallel": True,
+                "output_schema": "specialist_report_v2",
+            },
+            "entrypoints": {
+                "instructions": "SKILL.md",
+                "template": None,
+                "script": None,
+                "output_schema": schema_path,
+                "tests": [],
+            },
+        }
         candidate = SkillSpec(
             skill_id=_stable_hash(
                 "skill",
@@ -372,6 +408,21 @@ def decision_to_proposal(
             version="0.1.0",
             status=SkillStatus.CANDIDATE,
             instructions=decision.instructions,
+            resources={
+                "metadata.json": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                schema_path: json.dumps(
+                    report_contract.model_dump(), ensure_ascii=False, sort_keys=True
+                ),
+            },
+            contract=SkillContract(
+                consumes=("atomic_claims",),
+                produces=("specialist_report",),
+                requires_capabilities=("llm",),
+                allow_root=False,
+                output_schema="specialist_report_v2",
+            ),
+            entrypoints=SkillEntrypoints(output_schema=schema_path),
+            report_contract=report_contract,
         )
 
         operation = EvolutionOperation.ADD
@@ -506,12 +557,11 @@ class SkillOptimizerAgent:
             reservation = None
             try:
                 if self.budget_manager is not None:
-                    reservation = await self.budget_manager.reserve(
-                        f"optimizer:{cluster_id}",
-                        BudgetRequest(calls=1, tokens=4000, purpose="optimizer"),
-                    )
-                if self.budget_manager is not None:
                     async with self.budget_manager.concurrency(f"optimizer:{cluster_id}"):
+                        reservation = await self.budget_manager.reserve(
+                            f"optimizer:{cluster_id}",
+                            BudgetRequest(calls=1, tokens=4000, purpose="optimizer"),
+                        )
                         backend_result = await asyncio.wait_for(
                             self.backend.optimize(context, optimizer_skill),
                             self.budget_manager.limits.call_timeout_ms / 1000,

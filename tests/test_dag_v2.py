@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from evofact.core.budget_models import BudgetLimits
 from evofact.core.dag_models import NodeStatus, PlanNode
 from evofact.core.models import RunBudget, SkillKind, SkillScope, SkillSpec, SkillStatus
 from evofact.core.package_models import SkillContract
 from evofact.governance.dag_policy import validate_plan
 from evofact.routing.plan_normalizer import normalize_plan
+from evofact.routing.router import SkillRouter
+from evofact.routing.rule_planner import RulePlanner
 from evofact.runtime.dag_executor import DAGExecutor
 from evofact.runtime.mock_backend import MockBackend
 
@@ -85,3 +90,17 @@ def test_cycle_is_rejected_before_execution() -> None:
     report = validate_plan(plan, _skills())
     assert not report.valid
     assert "cycle" in {item.code for item in report.findings}
+
+
+def test_rule_planner_uses_configured_limits_and_timeout() -> None:
+    limits = BudgetLimits(max_nodes=2, call_timeout_ms=1234)
+    planner = RulePlanner(SkillRouter("all-experts"), limits=limits)
+    with pytest.raises(ValueError, match="max_nodes"):
+        asyncio.run(planner.plan({"text": "claim"}, _skills(), {}, RunBudget(max_skills=4)))
+
+    allowed = RulePlanner(
+        SkillRouter("all-experts"),
+        limits=BudgetLimits(max_nodes=4, call_timeout_ms=1234),
+    )
+    result = asyncio.run(allowed.plan({"text": "claim"}, _skills(), {}, RunBudget(max_skills=4)))
+    assert all(node.timeout_ms == 1234 for node in result.value.nodes)

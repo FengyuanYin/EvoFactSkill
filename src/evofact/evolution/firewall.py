@@ -77,3 +77,25 @@ class CandidateFirewall:
                 tokens.append(normalized_text)
             if any(token and token in blob for token in tokens):
                 raise ValueError(f"candidate leaks held-out sample {sample.sample_id}")
+
+
+def validate_generation_request(request: dict, forbidden: Sequence[Sample]) -> None:
+    """Reject held-out identifiers or text before a generation provider is called."""
+    blob = json.dumps(request, ensure_ascii=False, sort_keys=True).casefold()
+    for sample in forbidden:
+        tokens = [sample.sample_id.casefold()]
+        normalized_text = " ".join(sample.text.casefold().split())
+        if len(normalized_text) >= 12:
+            tokens.append(normalized_text)
+        if sample.event_id:
+            tokens.append(sample.event_id.casefold())
+        for key in ("lineage_id", "parent_sample_id"):
+            value = sample.metadata.get(key)
+            if value:
+                tokens.append(str(value).casefold())
+        for evidence in sample.evidence:
+            normalized_evidence = " ".join(evidence.text.casefold().split())
+            if len(normalized_evidence) >= 12:
+                tokens.append(normalized_evidence)
+        if any(token and token in blob for token in tokens):
+            raise ValueError(f"generation request leaks held-out sample {sample.sample_id}")

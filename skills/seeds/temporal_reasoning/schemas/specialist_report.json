@@ -1,0 +1,1 @@
+{"schema_version":"specialist_report_contract_v1","report_type":"temporal_reasoning","finding_types":["timeline_consistent","timeline_conflict","post_cutoff_evidence","missing_time"],"guidance":"Build a claim-event-evidence timeline. Put claim_time, event_time, evidence_time, cutoff, and the temporal relation in details."}

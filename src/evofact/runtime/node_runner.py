@@ -26,6 +26,39 @@ def _usage_details(result) -> UsageDetails:
     )
 
 
+def merge_usage_details(items) -> UsageDetails:
+    rows = [item for item in items if item is not None]
+    if not rows:
+        return UsageDetails()
+    costs_available = all(item.cost is not None for item in rows)
+    statuses = {item.cost_status for item in rows}
+    providers = {item.provider for item in rows if item.provider}
+    models = {item.model for item in rows if item.model}
+    versions = {item.pricing_version for item in rows if item.pricing_version}
+    return UsageDetails(
+        calls=sum(item.calls for item in rows),
+        retries=sum(item.retries for item in rows),
+        input_tokens=sum(item.input_tokens for item in rows),
+        output_tokens=sum(item.output_tokens for item in rows),
+        cached_tokens=sum(item.cached_tokens for item in rows),
+        reasoning_tokens=sum(item.reasoning_tokens for item in rows),
+        latency_ms=sum(item.latency_ms for item in rows),
+        cost=sum((item.cost for item in rows if item.cost is not None), Decimal("0"))
+        if costs_available
+        else None,
+        cost_status=(
+            CostStatus.UNAVAILABLE
+            if not costs_available
+            else (CostStatus.ACTUAL if statuses == {CostStatus.ACTUAL} else CostStatus.ESTIMATED)
+        ),
+        provider=next(iter(providers)) if len(providers) == 1 else ("mixed" if providers else None),
+        model=next(iter(models)) if len(models) == 1 else ("mixed" if models else None),
+        pricing_version=(
+            next(iter(versions)) if len(versions) == 1 else ("mixed" if versions else None)
+        ),
+    )
+
+
 class NodeRunner:
     def __init__(self, backend, skills: dict, *, resource_runtime=None, budget_manager=None):
         self.backend = backend
@@ -51,24 +84,14 @@ class NodeRunner:
         )
         resources = ResourceSelection()
         payload = sample
-        if self.resource_runtime is not None:
-            prepared = await self.resource_runtime.prepare(
-                self.skills[node.skill_id], sample, upstream
-            )
-            payload = prepared.payload
-            resources = prepared.selection
         reservation = None
         try:
-            if self.budget_manager is not None:
-                reservation = await self.budget_manager.reserve(
-                    sample_id,
-                    BudgetRequest(
-                        calls=1,
-                        tokens=1000,
-                        required=node.required,
-                        purpose=f"specialist:{node.skill_id}",
-                    ),
+            if self.resource_runtime is not None:
+                prepared = await self.resource_runtime.prepare(
+                    self.skills[node.skill_id], sample, upstream
                 )
+                payload = prepared.payload
+                resources = prepared.selection
 
             async def invoke():
                 try:
@@ -82,11 +105,24 @@ class NodeRunner:
                     call = self.backend.analyze(payload, self.skills[node.skill_id])
                 return await asyncio.wait_for(
                     call,
-                    timeout=node.timeout_ms / 1000 if node.timeout_ms else None,
+                    timeout=(
+                        (node.timeout_ms or self.budget_manager.limits.call_timeout_ms) / 1000
+                        if node.timeout_ms or self.budget_manager is not None
+                        else None
+                    ),
                 )
 
             if self.budget_manager is not None:
                 async with self.budget_manager.concurrency(sample_id):
+                    reservation = await self.budget_manager.reserve(
+                        sample_id,
+                        BudgetRequest(
+                            calls=1,
+                            tokens=1000,
+                            required=node.required,
+                            purpose=f"specialist:{node.skill_id}",
+                        ),
+                    )
                     result = await invoke()
                 await self.budget_manager.reconcile(reservation, _usage_details(result))
                 reservation = None
@@ -105,6 +141,7 @@ class NodeRunner:
                 started,
                 datetime.now(timezone.utc).isoformat(),
                 (time.perf_counter() - clock) * 1000,
+                usage_details=_usage_details(result),
             )
         except BudgetExceeded:
             return NodeExecution(

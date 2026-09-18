@@ -1,0 +1,1 @@
+{"schema_version":"specialist_report_contract_v1","report_type":"cross_source_contradiction","finding_types":["genuine_contradiction","compatible_scope","unresolved_difference","insufficient_sources"],"guidance":"Align claims by entity, predicate, time, and scope. Put the aligned claim IDs and scope comparison in details before declaring a contradiction."}

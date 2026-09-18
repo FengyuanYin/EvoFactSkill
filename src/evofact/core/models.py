@@ -21,6 +21,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from evofact.core.label_models import DecisionOrigin
 from evofact.governance import INFERENCE_TRACE_SCHEMA_VERSION
 
 
@@ -54,6 +55,11 @@ class Sample(ModelMixin):
     published_at: datetime | None = None  # 发布时间
     evidence: tuple[Evidence, ...] = ()  # 该样本关联的证据元组
     metadata: dict[str, Any] = field(default_factory=dict)  # 其他元数据
+    label_schema_id: str = "default"
+
+    def __post_init__(self) -> None:
+        if not self.label_schema_id.strip():
+            raise ValueError("label_schema_id must not be empty")
 
     def public_view(
         self,
@@ -89,6 +95,7 @@ class DataManifest(
     test_ids: tuple[str, ...] = ()
     split_policy: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "data_manifest_v1"
+    label_contract_digest: str = ""
 
     def __post_init__(self) -> None:
         """函数作用：在 `DataManifest` 数据类初始化后检查字段之间的业务约束。
@@ -154,6 +161,7 @@ class SkillSpec(ModelMixin):
     package_digest: str = ""
     contract: Any | None = None
     entrypoints: Any | None = None
+    report_contract: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +203,32 @@ class RoutingDecision(
 
 
 @dataclass(frozen=True)
+class SpecialistFinding(ModelMixin):
+    """One auditable, role-local conclusion produced by a specialist."""
+
+    finding_type: str
+    conclusion: str
+    explanation: str
+    confidence: float
+    claim_id: str | None = None
+    text_span: str | None = None
+    evidence_indices: tuple[int, ...] = ()
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.finding_type.strip():
+            raise ValueError("finding_type must not be empty")
+        if not self.conclusion.strip():
+            raise ValueError("finding conclusion must not be empty")
+        if not self.explanation.strip():
+            raise ValueError("finding explanation must not be empty")
+        if not 0 <= self.confidence <= 1:
+            raise ValueError("finding confidence must be in [0, 1]")
+        if any(index < 0 for index in self.evidence_indices):
+            raise ValueError("finding evidence indices must be non-negative")
+
+
+@dataclass(frozen=True)
 class SpecialistReport(
     ModelMixin
 ):  # 专家技能的产出报告，包含其提出的声明、使用的证据、评估结论和局限性
@@ -204,13 +238,38 @@ class SpecialistReport(
     assessment: str = "unknown"
     confidence: float = 0.0
     limitations: tuple[str, ...] = ()
+    report_type: str = "generic"
+    input_claim_ids: tuple[str, ...] = ()
+    findings: tuple[SpecialistFinding, ...] = ()
+    schema_version: str = "specialist_report_v2"
+
+    def __post_init__(self) -> None:
+        if not self.report_type.strip():
+            raise ValueError("report_type must not be empty")
+        if not 0 <= self.confidence <= 1:
+            raise ValueError("report confidence must be in [0, 1]")
+        if len(set(self.input_claim_ids)) != len(self.input_claim_ids):
+            raise ValueError("input claim IDs must be unique")
+        if any(
+            index >= len(self.evidence)
+            for finding in self.findings
+            for index in finding.evidence_indices
+        ):
+            raise ValueError("finding references evidence outside the report")
 
 
 @dataclass(frozen=True)
-class Prediction(ModelMixin):  # 最终预测结果，标签为 REAL / FAKE / ABSTAIN（弃权），附置信度和理由
-    label: Literal["REAL", "FAKE", "ABSTAIN"]
+class Prediction(ModelMixin):
+    label: str
     confidence: float
     rationale: str = ""
+    origin: DecisionOrigin = DecisionOrigin.LEGACY
+
+    def __post_init__(self) -> None:
+        if not self.label.strip():
+            raise ValueError("prediction label must not be empty")
+        if not 0 <= self.confidence <= 1:
+            raise ValueError("prediction confidence must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -220,6 +279,13 @@ class UsageRecord(ModelMixin):  # 资源使用记录，统计调用次数、toke
     completion_tokens: int = 0
     latency_ms: float = 0.0
     estimated_cost: float = 0.0
+
+
+def _empty_usage_details():
+    # Local import avoids the budget-model -> ModelMixin import cycle.
+    from evofact.core.budget_models import UsageDetails
+
+    return UsageDetails()
 
 
 @dataclass(frozen=True)
@@ -234,13 +300,14 @@ class InferenceTrace(
     decision: Prediction
     skill_versions: dict[str, str]
     aggregated_evidence: tuple[Evidence, ...] = ()
-    usage: UsageRecord = field(default_factory=UsageRecord)
+    usage: Any = field(default_factory=_empty_usage_details)
     errors: tuple[str, ...] = ()
     schema_version: str = INFERENCE_TRACE_SCHEMA_VERSION
     execution_plan: Any | None = None
     node_executions: tuple[Any, ...] = ()
     execution_summary: Any | None = None
-    resource_versions: dict[str, str] = field(default_factory=dict)
+    label_schema_id: str | None = None
+    label_contract_digest: str | None = None
 
 
 class ErrorType(
@@ -375,12 +442,18 @@ class SampleEvaluation(
     ModelMixin
 ):  # 单个样本的评估结果，包含真实标签、预测标签、置信度、领域和时间窗口等信息
     sample_id: str
-    gold: Literal["REAL", "FAKE"]
-    predicted: Literal["REAL", "FAKE", "ABSTAIN"]
+    gold: str
+    predicted: str
     confidence: float
     domain: str | None = None
     temporal_window: str | None = None
     cost: float = 0.0
+    label_schema_id: str = "legacy-binary"
+    allowed_labels: tuple[str, ...] = ("REAL", "FAKE")
+    positive_label: str | None = "FAKE"
+    decision_origin: str = DecisionOrigin.LEGACY.value
+    cost_status: str = "legacy"
+    evidence_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -393,6 +466,7 @@ class EvaluationResult(
     temporal_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
     confidence_intervals: dict[str, tuple[float, float]] = field(default_factory=dict)
     usage: UsageRecord = field(default_factory=UsageRecord)
+    label_schema_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

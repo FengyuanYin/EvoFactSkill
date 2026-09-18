@@ -2,17 +2,41 @@
 
 import asyncio
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 
-from evofact.core.budget_models import BudgetRequest, CostStatus, UsageDetails
+from evofact.core.budget_models import BudgetRequest, UsageDetails
+from evofact.core.generation_models import VerificationDecision, VerificationStatus
 from evofact.core.models import Evidence, Sample
+from evofact.data.label_registry import LabelContractRegistry, fixture_binary_contract
+from evofact.runtime.backend import call_json_with_usage
 
 from .generator import json_value
 from .prompts import STRATEGIES, VERIFIER_SYSTEM
 
 SAMPLE_FIELDS = set(Sample.__dataclass_fields__)
-DECISION_FIELDS = {"sample_id", "source_sample_id", "strategy", "reason", "source_trace_ids"}
+DECISION_REQUIRED_FIELDS = {
+    "sample_id",
+    "source_sample_id",
+    "strategy",
+    "reason",
+    "source_trace_ids",
+}
+DECISION_OPTIONAL_FIELDS = {"source_label", "target_label"}
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    accepted: list
+    rejected: list
+    reviews: list
+    usage: UsageDetails
+
+    def __iter__(self):
+        """Keep compatibility with historical three-value unpacking."""
+        yield self.accepted
+        yield self.rejected
+        yield self.reviews
 
 
 def normalized(text):
@@ -23,7 +47,17 @@ def normalized(text):
 
 
 class ChallengeVerifier:
-    def validate(self, response, request, *, config, forbidden=(), existing=()):
+    def validate(
+        self,
+        response,
+        request,
+        *,
+        config,
+        forbidden=(),
+        existing=(),
+        label_contract_registry: LabelContractRegistry | None = None,
+        allowed_strategies=None,
+    ):
         """函数作用：校验生成响应的结构、来源、策略、重复内容和留出数据隔离。
         输入要求：`self` 应为已初始化的 `ChallengeVerifier` 实例；`response`（未显式标注）需符合函数签名约定；`request`（未显式标注）需符合函数签名约定；`config`（未显式标注）需以关键字传入并符合签名约定；`forbidden`（未显式标注，默认 `()`）需以关键字传入并符合签名约定；`existing`（未显式标注，默认 `()`）需以关键字传入并符合签名约定。
         输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
@@ -34,7 +68,14 @@ class ChallengeVerifier:
             raise ValueError("generator samples/decisions must be lists")
         if len(rows) > config.batch_size or len(rows) != len(decisions):
             raise ValueError("generator batch budget or decision count mismatch")
-        if any(not isinstance(d, dict) or set(d) != DECISION_FIELDS for d in decisions):
+        registry = label_contract_registry or LabelContractRegistry((fixture_binary_contract(),))
+        allowed_strategies = set(allowed_strategies or STRATEGIES)
+        if any(
+            not isinstance(d, dict)
+            or not DECISION_REQUIRED_FIELDS <= set(d)
+            or not set(d) <= DECISION_REQUIRED_FIELDS | DECISION_OPTIONAL_FIELDS
+            for d in decisions
+        ):
             raise ValueError("invalid strategy decision schema")
         if any(not isinstance(d["sample_id"], str) for d in decisions):
             raise ValueError("invalid decision sample ID")
@@ -75,16 +116,37 @@ class ChallengeVerifier:
                 ):
                     raise ValueError("invalid source trace provenance")
                 if (
-                    decision["strategy"] not in STRATEGIES
+                    decision["strategy"] not in allowed_strategies
                     or not isinstance(decision["reason"], str)
                     or not decision["reason"].strip()
                 ):
                     raise ValueError("invalid strategy or missing rationale")
                 source = example["source_sample"]
-                for field in ("dataset", "domain", "event_id", "published_at", "evidence"):
+                for field in (
+                    "dataset",
+                    "domain",
+                    "event_id",
+                    "published_at",
+                    "evidence",
+                    "label_schema_id",
+                ):
                     if row[field] != source[field]:
                         raise ValueError(f"source {field} was changed or fabricated")
-                if row["metadata"] != {} or row["label"] not in ("REAL", "FAKE"):
+                probe = Sample(
+                    sample_id=str(row["sample_id"]),
+                    dataset=str(row["dataset"]),
+                    text=str(row["text"]),
+                    label=row["label"],
+                    label_schema_id=str(row["label_schema_id"]),
+                )
+                contract = registry.resolve_sample(probe)
+                source_label = contract.normalize(source["label"])
+                target_label = contract.require_label(row["label"])
+                if decision.get("source_label", source_label) != source_label:
+                    raise ValueError("decision source_label does not match source gold")
+                if decision.get("target_label", target_label) != target_label:
+                    raise ValueError("decision target_label does not match generated label")
+                if row["metadata"] != {}:
                     raise ValueError("invalid label or audit metadata leak")
                 if not row["evidence"] or any(not e["text"].strip() for e in row["evidence"]):
                     raise ValueError("no source evidence for independent verification")
@@ -125,43 +187,52 @@ class ChallengeVerifier:
                 rejected.append({"index": index, "reason": str(exc)})
         return accepted, rejected
 
-    async def verify(self, samples, backend, *, budget_manager=None, budget_sample_id="verifier"):
+    async def verify(
+        self,
+        samples,
+        backend,
+        *,
+        budget_manager=None,
+        budget_sample_id="verifier",
+        label_contract_registry: LabelContractRegistry | None = None,
+    ):
         """函数作用：使用看不到生成标签的独立审核模型核对样本正文与证据是否一致。
         输入要求：`self` 应为已初始化的 `ChallengeVerifier` 实例；`samples`（未显式标注）需符合函数签名约定；`backend`（未显式标注）需符合函数签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         if not samples:
-            return [], [], []
+            return VerificationResult([], [], [], UsageDetails())
+        registry = label_contract_registry or LabelContractRegistry((fixture_binary_contract(),))
         # Blind review excludes generated labels, decisions and trace outcomes.
-        payload = {
-            "samples": [
-                {
-                    "sample_id": s.sample_id,
-                    "text": s.text,
-                    "evidence": [asdict(e) for e in s.evidence],
-                }
-                for s in samples
-            ]
-        }
+        payload_rows = []
+        for sample in samples:
+            row = {
+                "sample_id": sample.sample_id,
+                "text": sample.text,
+                "evidence": [asdict(e) for e in sample.evidence],
+            }
+            contract = registry.resolve_sample(sample)
+            if contract.dataset_id != "fixture":
+                row["label_contract"] = contract.prompt_view()
+            payload_rows.append(row)
+        payload = {"samples": payload_rows}
         reservation = None
         try:
             if budget_manager is not None:
-                reservation = await budget_manager.reserve(
-                    budget_sample_id,
-                    BudgetRequest(calls=1, tokens=3000, purpose="frozen_verifier"),
-                )
                 async with budget_manager.concurrency(budget_sample_id):
-                    response = await asyncio.wait_for(
-                        backend._call(VERIFIER_SYSTEM, json_value(payload)),
+                    reservation = await budget_manager.reserve(
+                        budget_sample_id,
+                        BudgetRequest(calls=1, tokens=3000, purpose="frozen_verifier"),
+                    )
+                    response, usage = await asyncio.wait_for(
+                        call_json_with_usage(backend, VERIFIER_SYSTEM, json_value(payload)),
                         budget_manager.limits.call_timeout_ms / 1000,
                     )
-                usage = getattr(backend, "_last_usage_details", None) or UsageDetails(
-                    calls=1,
-                    cost_status=CostStatus.UNAVAILABLE,
-                )
                 await budget_manager.reconcile(reservation, usage)
                 reservation = None
             else:
-                response = await backend._call(VERIFIER_SYSTEM, json_value(payload))
+                response, usage = await call_json_with_usage(
+                    backend, VERIFIER_SYSTEM, json_value(payload)
+                )
         finally:
             if reservation is not None:
                 await budget_manager.release(reservation)
@@ -172,32 +243,70 @@ class ChallengeVerifier:
         ):
             raise ValueError("invalid verifier response")
         reviews = response["reviews"]
-        by_id = {}
+        by_id: dict[str, VerificationDecision] = {}
         for row in reviews:
+            if not isinstance(row, dict):
+                raise ValueError("invalid or duplicate verifier review")
+            sample_id = row.get("sample_id")
+            reason = row.get("reason")
             if (
-                not isinstance(row, dict)
-                or set(row) != {"sample_id", "label", "reason"}
-                or not isinstance(row["sample_id"], str)
-                or row["sample_id"] in by_id
-                or row["label"] not in ("REAL", "FAKE", "UNKNOWN")
-                or not isinstance(row["reason"], str)
-                or not row["reason"].strip()
+                not isinstance(sample_id, str)
+                or sample_id in by_id
+                or not isinstance(reason, str)
+                or not reason.strip()
             ):
                 raise ValueError("invalid or duplicate verifier review")
-            by_id[row["sample_id"]] = row
+            sample = next((item for item in samples if item.sample_id == sample_id), None)
+            if sample is None:
+                raise ValueError("verifier reviewed an unknown sample")
+            contract = registry.resolve_sample(sample)
+            if set(row) == {"sample_id", "label", "reason"}:
+                raw_label = row["label"]
+                status = (
+                    VerificationStatus.INDETERMINATE
+                    if raw_label == "UNKNOWN"
+                    else VerificationStatus.CLASSIFIED
+                )
+                predicted = None if status == VerificationStatus.INDETERMINATE else raw_label
+            elif set(row) == {"sample_id", "status", "predicted_label", "reason"}:
+                try:
+                    status = VerificationStatus(str(row["status"]).casefold())
+                except ValueError as exc:
+                    raise ValueError("invalid verifier status") from exc
+                predicted = row["predicted_label"]
+            else:
+                raise ValueError("invalid verifier review schema")
+            if status == VerificationStatus.CLASSIFIED:
+                predicted = contract.require_label(predicted)
+            elif predicted is not None:
+                raise ValueError("indeterminate review must not include a predicted label")
+            by_id[sample_id] = VerificationDecision(
+                sample_id,
+                status,
+                predicted,
+                status == VerificationStatus.CLASSIFIED and predicted == sample.label,
+                reason,
+                "frozen-verifier-v2",
+                contract.digest,
+            )
         if set(by_id) != {s.sample_id for s in samples}:
             raise ValueError("verifier must review every sample exactly once")
         accepted, rejected = [], []
         for sample in samples:
             review = by_id[sample.sample_id]
-            if review["label"] == sample.label:
+            if review.accepted:
                 accepted.append(sample)
             else:
                 rejected.append(
                     {
                         "sample_id": sample.sample_id,
                         "reason": "independent evidence verdict disagrees or is UNKNOWN",
-                        "review": review,
+                        "review": review.model_dump(),
                     }
                 )
-        return accepted, rejected, reviews
+        return VerificationResult(
+            accepted,
+            rejected,
+            [review.model_dump() for review in by_id.values()],
+            usage,
+        )

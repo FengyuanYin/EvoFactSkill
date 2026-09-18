@@ -6,7 +6,16 @@ import ast
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-BLOCKED_IMPORTS = {"subprocess", "socket", "requests", "urllib", "shutil", "ctypes", "winreg"}
+BLOCKED_IMPORTS = {
+    "subprocess",
+    "socket",
+    "requests",
+    "urllib",
+    "shutil",
+    "ctypes",
+    "winreg",
+    "pathlib",
+}
 BLOCKED_CALLS = {
     "eval",
     "exec",
@@ -18,6 +27,13 @@ BLOCKED_CALLS = {
     "remove",
     "unlink",
     "rmtree",
+    "getenv",
+    "write_text",
+    "write_bytes",
+    "mkdir",
+    "touch",
+    "rename",
+    "replace",
 }
 
 
@@ -64,6 +80,21 @@ def scan_resources(resources: dict[str, str]) -> SafetyReport:
                 )
                 if name in BLOCKED_CALLS:
                     findings.append(f"blocked call {name} in {rel}")
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and str(node.args[1].value) in BLOCKED_CALLS
+                ):
+                    findings.append(f"blocked reflective call {node.args[1].value} in {rel}")
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+                if (
+                    isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "os"
+                    and node.value.attr == "environ"
+                ):
+                    findings.append(f"blocked environment access in {rel}")
     return SafetyReport(
         "blocked" if findings else ("review_required" if has_scripts else "safe"), tuple(findings)
     )

@@ -1,18 +1,18 @@
 {
   "name": "generation_agent",
   "kind": "workflow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "safety_level": "text_only",
   "scope": {"domains": [], "datasets": [], "temporal_windows": [], "tags": ["generation"]},
   "triggers": [],
   "contract": {
     "consumes": ["meta_train_construction", "inference_trace", "attribution"],
-    "produces": ["generated_sample_batch"],
+    "produces": ["contract_bound_generated_sample_batch"],
     "requires_capabilities": ["llm"],
     "optional_capabilities": [],
     "allow_root": true,
     "allow_parallel": false,
-    "output_schema": "generation_batch_v1"
+    "output_schema": "generation_batch_v2"
   },
   "entrypoints": {
     "instructions": "SKILL.md",

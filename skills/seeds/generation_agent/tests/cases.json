@@ -1,1 +1,1 @@
-{"cases": [{"name": "preserve-provenance", "required": ["source_sample_id", "strategy"]}]}
+{"cases": [{"name": "preserve-provenance-and-label-contract", "required": ["source_sample_id", "strategy", "source_label", "target_label", "label_schema_id"]}]}

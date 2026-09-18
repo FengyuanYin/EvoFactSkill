@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from evofact.core.budget_models import UsageDetails
+from evofact.core.budget_models import CostStatus, UsageDetails
+from evofact.core.label_models import DatasetLabelContract
 from evofact.core.models import (
     RunBudget,
     SkillSpec,
@@ -16,6 +17,19 @@ class BackendResult:
     value: Any
     usage: UsageRecord = UsageRecord()
     usage_details: UsageDetails | None = None
+
+
+class JudgeContractError(ValueError):
+    """A Judge response violates the active dataset label contract."""
+
+
+async def call_json_with_usage(backend, system: str, payload: dict) -> tuple[dict, UsageDetails]:
+    """Call a JSON backend while preserving legacy test/provider compatibility."""
+    method = getattr(backend, "_call_with_usage", None)
+    if method is not None:
+        return await method(system, payload)
+    response = await backend._call(system, payload)
+    return response, UsageDetails(calls=1, cost_status=CostStatus.UNAVAILABLE)
 
 
 class ModelBackend(Protocol):
@@ -65,6 +79,7 @@ class ModelBackend(Protocol):
         reports: tuple[SpecialistReport, ...],
         skill: SkillSpec,
         *,
+        label_contract: DatasetLabelContract | None = None,
         execution_summary: Any = None,
     ) -> BackendResult:
         """函数作用：负责`ModelBackend` 中的 `judge` 处理，封装调用方需要复用的业务步骤。

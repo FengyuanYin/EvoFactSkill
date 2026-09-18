@@ -6,6 +6,10 @@ model: mock-v1
 base_url: https://api.deepseek.com/v1
 meta_evolution: true
 max_skills_per_item: 2
+execution:
+  batch_size: 16
+  max_concurrent_samples: 4
+  progress: auto
 gate:
   repeats: 2
   min_macro_f1_gain: 0.0

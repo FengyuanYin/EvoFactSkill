@@ -20,6 +20,9 @@ from .models import ModelMixin, SkillKind, SkillScope, SkillStatus, Trigger
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
+_REPORT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_FINDING_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_FINAL_VERDICT_TYPES = {"real", "fake", "abstain", "verdict", "final_verdict"}
 
 
 def _validate_safe_relative_path(path: str) -> None:
@@ -113,6 +116,35 @@ class SkillContract(ModelMixin):
 
         if self.output_schema is not None and not self.output_schema.strip():
             raise ValueError("output_schema must not be empty when provided")
+
+
+@dataclass(frozen=True)
+class SpecialistReportContract(ModelMixin):
+    """Package-owned prompt and validation contract for one specialist role."""
+
+    report_type: str
+    finding_types: tuple[str, ...]
+    guidance: str
+    schema_version: str = "specialist_report_contract_v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "specialist_report_contract_v1":
+            raise ValueError(f"unsupported specialist report contract: {self.schema_version}")
+        if not _REPORT_TYPE_PATTERN.fullmatch(self.report_type):
+            raise ValueError("invalid specialist report_type")
+        if not isinstance(self.finding_types, tuple) or not self.finding_types:
+            raise ValueError("specialist finding_types must be a non-empty tuple")
+        if len(self.finding_types) > 64 or len(set(self.finding_types)) != len(self.finding_types):
+            raise ValueError("specialist finding_types must be unique and bounded")
+        for finding_type in self.finding_types:
+            if not _FINDING_TYPE_PATTERN.fullmatch(finding_type):
+                raise ValueError(f"invalid specialist finding_type: {finding_type}")
+            if finding_type in _FINAL_VERDICT_TYPES:
+                raise ValueError("specialist finding_type cannot be a final verdict")
+        if not isinstance(self.guidance, str) or not self.guidance.strip():
+            raise ValueError("specialist guidance must not be empty")
+        if len(self.guidance) > 8000:
+            raise ValueError("specialist guidance is too large")
 
 
 @dataclass(frozen=True)
@@ -298,6 +330,25 @@ class SkillPackagePatch(ModelMixin):
 
 
 @dataclass(frozen=True)
+class SkillPackageAddition(ModelMixin):
+    """A complete new package proposed without pretending an existing base exists."""
+
+    package: SkillPackage
+    rationale: str
+    source_trace_ids: tuple[str, ...] = ()
+    source_audit_ids: tuple[str, ...] = ()
+    risk_flags: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.package.manifest.kind != SkillKind.SPECIALIST:
+            raise ValueError("optimizer may only add specialist Packages")
+        if self.package.status != SkillStatus.CANDIDATE:
+            raise ValueError("new Package must have candidate status")
+        if not self.rationale.strip():
+            raise ValueError("addition rationale must not be empty")
+
+
+@dataclass(frozen=True)
 class PackageFinding(ModelMixin):
     code: str
     message: str
@@ -345,6 +396,8 @@ __all__ = [
     "SkillFile",
     "SkillManifest",
     "SkillPackage",
+    "SkillPackageAddition",
     "SkillPackagePatch",
+    "SpecialistReportContract",
     "compute_package_digest",
 ]

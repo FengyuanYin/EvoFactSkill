@@ -32,7 +32,12 @@ class TraceStore:
             version = row.get("schema_version", "inference_trace_v1")
             if version == "inference_trace_v1" and not allow_v1:
                 raise ValueError("trace v1 requires explicit compatibility adapter")
-            if version not in {"inference_trace_v1", "inference_trace_v2"}:
+            if version not in {
+                "inference_trace_v1",
+                "inference_trace_v2",
+                "inference_trace_v3",
+                "inference_trace_v4",
+            }:
                 raise ValueError(f"unsupported trace schema: {version}")
         return rows
 

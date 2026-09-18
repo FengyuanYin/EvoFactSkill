@@ -28,6 +28,7 @@ class _Ledger:
     calls_reserved: int = 0
     tokens_reserved: int = 0
     cost_reserved: Decimal = Decimal("0")
+    unavailable_cost_calls: int = 0
 
     def snapshot(self, active: int) -> BudgetSnapshot:
         return BudgetSnapshot(
@@ -38,6 +39,7 @@ class _Ledger:
             self.tokens_reserved,
             self.cost_reserved,
             active,
+            self.unavailable_cost_calls,
         )
 
 
@@ -91,6 +93,8 @@ class BudgetManager:
                 ledger.calls_used += usage.calls
                 ledger.tokens_used += usage.total_tokens
                 ledger.cost_used += actual_cost
+                if usage.calls and usage.cost is None:
+                    ledger.unavailable_cost_calls += usage.calls
 
     async def release(self, reservation: BudgetReservation) -> None:
         async with self._lock:
@@ -106,6 +110,94 @@ class BudgetManager:
     def snapshot(self, sample_id: str | None = None) -> BudgetSnapshot:
         ledger = self._run if sample_id is None else self._sample(sample_id)
         return ledger.snapshot(len(self._reservations))
+
+    def export_state(self) -> dict:
+        """Return a checkpoint-safe ledger without transient reservations."""
+        if self._reservations:
+            raise ValueError("cannot checkpoint a budget with active reservations")
+        return {
+            "run": self._run.snapshot(0).model_dump(),
+            "samples": {
+                sample_id: ledger.snapshot(0).model_dump()
+                for sample_id, ledger in sorted(self._samples.items())
+            },
+        }
+
+    def restore(self, state: dict, *, allow_forward: bool = False) -> None:
+        """Restore reconciled usage before resumed work is dispatched."""
+        if self._reservations:
+            raise ValueError("cannot restore over active budget reservations")
+
+        def ledger(raw: dict) -> _Ledger:
+            snapshot = BudgetSnapshot(
+                calls_used=int(raw.get("calls_used", 0)),
+                tokens_used=int(raw.get("tokens_used", 0)),
+                cost_used=Decimal(str(raw.get("cost_used", "0"))),
+                calls_reserved=int(raw.get("calls_reserved", 0)),
+                tokens_reserved=int(raw.get("tokens_reserved", 0)),
+                cost_reserved=Decimal(str(raw.get("cost_reserved", "0"))),
+                active_reservations=int(raw.get("active_reservations", 0)),
+                unavailable_cost_calls=int(raw.get("unavailable_cost_calls", 0)),
+            )
+            numeric = (
+                snapshot.calls_used,
+                snapshot.tokens_used,
+                snapshot.cost_used,
+                snapshot.calls_reserved,
+                snapshot.tokens_reserved,
+                snapshot.cost_reserved,
+                snapshot.active_reservations,
+                snapshot.unavailable_cost_calls,
+            )
+            if any(value < 0 for value in numeric):
+                raise ValueError("budget checkpoint contains negative values")
+            if (
+                snapshot.active_reservations
+                or snapshot.calls_reserved
+                or snapshot.tokens_reserved
+                or snapshot.cost_reserved
+            ):
+                raise ValueError("budget checkpoint contains transient reservations")
+            return _Ledger(
+                calls_used=snapshot.calls_used,
+                tokens_used=snapshot.tokens_used,
+                cost_used=snapshot.cost_used,
+                unavailable_cost_calls=snapshot.unavailable_cost_calls,
+            )
+
+        restored_run = ledger(dict(state.get("run", {})))
+        restored_samples = {
+            str(sample_id): ledger(dict(raw))
+            for sample_id, raw in dict(state.get("samples", {})).items()
+        }
+        current = self.snapshot()
+        if current.calls_used or current.tokens_used or current.cost_used:
+            if self._run != restored_run or self._samples != restored_samples:
+
+                def precedes(before: _Ledger, after: _Ledger) -> bool:
+                    return (
+                        before.calls_used <= after.calls_used
+                        and before.tokens_used <= after.tokens_used
+                        and before.cost_used <= after.cost_used
+                        and before.unavailable_cost_calls <= after.unavailable_cost_calls
+                    )
+
+                forward = (
+                    allow_forward
+                    and precedes(self._run, restored_run)
+                    and all(
+                        sample_id in restored_samples
+                        and precedes(ledger, restored_samples[sample_id])
+                        for sample_id, ledger in self._samples.items()
+                    )
+                )
+                if not forward:
+                    raise ValueError("cannot replace a non-empty budget ledger")
+                self._run = restored_run
+                self._samples = restored_samples
+            return
+        self._run = restored_run
+        self._samples = restored_samples
 
     @asynccontextmanager
     async def concurrency(self, sample_id: str):

@@ -1,0 +1,11 @@
+{
+  "strategies": [
+    "label_preserving_rewrite",
+    "style_decoupling",
+    "target_label_transition",
+    "quantity_time_change",
+    "attribution_scope_change",
+    "minimal_contrast",
+    "success_boundary_extension"
+  ]
+}

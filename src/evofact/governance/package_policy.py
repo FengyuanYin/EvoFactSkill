@@ -4,12 +4,14 @@ import json
 import re
 from dataclasses import dataclass
 
+from evofact.core.models import SkillKind
 from evofact.core.package_models import (
     PackageFinding,
     PackageValidationReport,
     SkillPackage,
     _validate_safe_relative_path,
 )
+from evofact.core.report_contract import parse_specialist_report_contract
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,22 @@ class PackageLimits:
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".jinja", ".j2"}
+_RESERVED_LABEL_CONTRACT_SEGMENTS = {
+    "dataset_label_contract",
+    "dataset_label_contracts",
+    "label_contract",
+    "label_contracts",
+    "native_label_mapping",
+    "native_label_mappings",
+}
+
+
+def is_reserved_label_contract_path(path: str) -> bool:
+    """Return whether a Skill file impersonates Runtime-owned label governance."""
+    normalized = path.casefold().replace("-", "_")
+    segments = normalized.split("/")
+    stems = [segment.rsplit(".", 1)[0] for segment in segments]
+    return any(stem in _RESERVED_LABEL_CONTRACT_SEGMENTS for stem in stems)
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -59,6 +77,14 @@ def validate_package(
             _validate_safe_relative_path(item.path)
         except ValueError as exc:
             findings.append(PackageFinding("unsafe_path", str(exc), item.path))
+        if is_reserved_label_contract_path(item.path):
+            findings.append(
+                PackageFinding(
+                    "immutable_label_contract",
+                    "dataset label contracts are Runtime-owned and cannot be embedded in Skills",
+                    item.path,
+                )
+            )
         if len(item.content) > limits.max_file_bytes:
             findings.append(PackageFinding("file_too_large", "file exceeds size limit", item.path))
         if not any(
@@ -93,6 +119,30 @@ def validate_package(
             findings.append(
                 PackageFinding("dangling_entrypoint", "entrypoint target is missing", path)
             )
+    for path in entrypoints.tests:
+        test_file = files.get(path)
+        if test_file is None:
+            continue
+        try:
+            text = test_file.content.decode("utf-8", errors="strict")
+            if not text.strip():
+                raise ValueError("declared test file must not be empty")
+            if path.casefold().endswith(".json"):
+                parsed = json.loads(text)
+                cases = parsed.get("cases") if isinstance(parsed, dict) else parsed
+                if (
+                    not isinstance(cases, list)
+                    or not cases
+                    or any(
+                        not isinstance(case, dict)
+                        or not isinstance(case.get("name"), str)
+                        or not case["name"].strip()
+                        for case in cases
+                    )
+                ):
+                    raise ValueError("JSON test file must contain named test cases")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            findings.append(PackageFinding("test_invalid", str(exc), path))
     declared_scripts = {entrypoints.script} if entrypoints.script else set()
     for item in package.files:
         if (
@@ -144,6 +194,28 @@ def validate_package(
                     "metadata_invalid", "metadata.json must be valid UTF-8 JSON", "metadata.json"
                 )
             )
+
+    if package.manifest.kind == SkillKind.SPECIALIST and entrypoints.output_schema is not None:
+        output_file = files.get(entrypoints.output_schema)
+        if output_file is not None:
+            try:
+                contract = parse_specialist_report_contract(output_file.content)
+                if contract.report_type != package.manifest.name:
+                    findings.append(
+                        PackageFinding(
+                            "report_type_mismatch",
+                            "specialist report_type must match manifest name",
+                            entrypoints.output_schema,
+                        )
+                    )
+            except ValueError as exc:
+                findings.append(
+                    PackageFinding(
+                        "report_contract_invalid",
+                        str(exc),
+                        entrypoints.output_schema,
+                    )
+                )
 
     for collection_name, values in (
         ("consumes", package.manifest.contract.consumes),

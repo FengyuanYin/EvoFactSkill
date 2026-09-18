@@ -14,12 +14,13 @@ class CheckpointIdentity:
     split_digest: str
     lineage_digest: str
     package_bank_digest: str
-    generator_package_digest: str
+    generator_package_digest: str | None
     governance_digest: str
     dag_policy_digest: str
     budget_policy_digest: str
     pricing_version: str
     episode_plan_digest: str
+    label_contract_digest: str = "legacy"
 
 
 class CheckpointV2Store:

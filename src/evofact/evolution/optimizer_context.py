@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,11 @@ def _sanitize(value: Any, *, max_text_chars: int) -> Any:
         return result
     if isinstance(value, (list, tuple)):
         return [_sanitize(item, max_text_chars=max_text_chars) for item in value]
+    if isinstance(value, bytes):
+        return {
+            "encoding": "base64",
+            "content": base64.b64encode(value).decode("ascii"),
+        }
     if isinstance(value, str):
         if Path(value).is_absolute():
             return "<redacted-path>"

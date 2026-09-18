@@ -6,6 +6,7 @@ from .adapters.livefact import LiveFactAdapter
 from .adapters.weibo21 import Weibo21Adapter
 from .base import DatasetAdapter, DatasetDiagnostic
 from .deduplication import deduplicate_samples
+from .label_registry import LabelContractRegistry
 
 
 class DataRegistry:
@@ -14,6 +15,7 @@ class DataRegistry:
         输入要求：`self` 应为已初始化的 `DataRegistry` 实例；无其他显式输入。
         输出：返回 `None`；初始化 `DataRegistry` 的实例状态，构造参数非法时可能抛出异常。"""
         self._adapters: dict[str, DatasetAdapter] = {}
+        self.label_contracts = LabelContractRegistry()
         for adapter in (Weibo21Adapter(), AMTCeleAdapter(), LiveFactAdapter(), AdvFakeAdapter()):
             self.register(adapter)
 
@@ -23,6 +25,13 @@ class DataRegistry:
         输出：返回 `None`；可能按函数职责修改对象状态或持久化文件。"""
         if adapter.name in self._adapters:
             raise ValueError(f"duplicate dataset adapter: {adapter.name}")
+        contracts = adapter.label_contracts()
+        if not contracts:
+            raise ValueError(f"dataset adapter {adapter.name} has no label contracts")
+        if any(contract.dataset_id != adapter.name for contract in contracts):
+            raise ValueError(f"label contract dataset does not match adapter {adapter.name}")
+        for contract in contracts:
+            self.label_contracts.register(contract)
         self._adapters[adapter.name] = adapter
 
     def names(self) -> tuple[str, ...]:
@@ -53,4 +62,8 @@ class DataRegistry:
         ]
         if name in {"weibo21", "amtcele"}:
             rows = list(deduplicate_samples(rows))
+        for sample in rows:
+            contract = self.label_contracts.resolve_sample(sample)
+            if sample.label is not None:
+                contract.normalize(sample.label)
         return rows

@@ -109,3 +109,4 @@ class BudgetSnapshot(ModelMixin):
     tokens_reserved: int
     cost_reserved: Decimal
     active_reservations: int
+    unavailable_cost_calls: int = 0

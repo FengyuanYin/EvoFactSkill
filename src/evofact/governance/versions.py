@@ -6,9 +6,9 @@ SKILL_PACKAGE_SCHEMA_VERSION = "skill_package_v2"
 SKILL_PACKAGE_PATCH_SCHEMA_VERSION = "skill_package_patch_v1"
 
 EXECUTION_PLAN_SCHEMA_VERSION = "execution_plan_v1"
-INFERENCE_TRACE_SCHEMA_VERSION = "inference_trace_v2"
-GENERATION_AUDIT_SCHEMA_VERSION = "generation_audit_v3"
-META_CHECKPOINT_SCHEMA_VERSION = "meta_checkpoint_v2"
+INFERENCE_TRACE_SCHEMA_VERSION = "inference_trace_v4"
+GENERATION_AUDIT_SCHEMA_VERSION = "generation_audit_v4"
+META_CHECKPOINT_SCHEMA_VERSION = "meta_checkpoint_v3"
 ACTIVE_BANK_SCHEMA_VERSION = "active_bank_v3"
 PRICING_SCHEMA_VERSION = "pricing_v1"
 

@@ -11,11 +11,30 @@ data:
   excluded_domains: ["无法确定"]
 
 backend: openai-compatible
-model: deepseek-chat
+model: deepseek-flash
 base_url: https://api.deepseek.com/v1
 api_key_env: DEEPSEEK_API_KEY
 routing_strategy: llm
 max_skills_per_item: 3
+
+# DeepSeek official peak rates captured on 2026-09-18. Refresh this dated table
+# before a publication run; off-peak billing can be lower.
+pricing:
+  provider: deepseek
+  table_path: pricing/deepseek-2026-09-18-peak.json
+  require_cost_for_promotion: true
+
+# run 级预算按整次 run() 调用累加，test 会把全部 955 条测试样本放进一次 run()。
+# 每条样本最坏 5 次调用（1 router + ≤3 specialist + 1 judge）、≤12000 token：
+# 955 × 5 ≈ 4775 calls、955 × 12000 ≈ 11.5M tokens，这里各留约 2 倍余量。
+budget:
+  max_calls_per_run: 10000
+  max_tokens_per_run: 30000000
+
+execution:
+  batch_size: 16
+  max_concurrent_samples: 32
+  progress: auto
 
 evolution:
   proposer: llm
