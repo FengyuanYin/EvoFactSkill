@@ -182,6 +182,10 @@ class DataConfig:
     train_domains: tuple[str, ...] = ()
     final_test_domains: tuple[str, ...] = ()
     excluded_domains: tuple[str, ...] = ()
+    train_sampling: str = "balanced_by_domain"
+    final_test_samples_per_domain: int = 0
+    static_test_pattern: str | None = None
+    require_static_test: bool = False
 
     def __post_init__(self) -> None:
         configured = bool(
@@ -190,6 +194,8 @@ class DataConfig:
             or self.train_domains
             or self.final_test_domains
             or self.excluded_domains
+            or self.static_test_pattern
+            or self.require_static_test
         )
         if not configured:
             return
@@ -209,6 +215,12 @@ class DataConfig:
             raise ValueError("data.excluded_domains must not contain duplicates")
         if train & final or train & excluded or final & excluded:
             raise ValueError("train, final-test and excluded domains must be disjoint")
+        if self.train_sampling not in {"balanced_by_domain", "ordered"}:
+            raise ValueError("data.train_sampling must be balanced_by_domain or ordered")
+        if self.final_test_samples_per_domain < 0:
+            raise ValueError("data.final_test_samples_per_domain must be non-negative")
+        if self.require_static_test and not self.static_test_pattern:
+            raise ValueError("data.require_static_test requires data.static_test_pattern")
 
 
 @dataclass(frozen=True)

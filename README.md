@@ -164,7 +164,21 @@ The override recomputes the source domains and manifest, then reruns leakage che
 ```bash
 # One ordinary evolution run
 evofact --config configs/weibo21_cross_domain.yaml \
-  evolve --output outputs/evolve.json
+  --limit 400 \
+  --batch-size 8 \
+  --sample-concurrency 4 \
+  evolve \
+  --checkpoint outputs/weibo21-evolve-checkpoint.json \
+  --output outputs/evolve.json
+
+# Resume after the last atomically completed batch
+evofact --config configs/weibo21_cross_domain.yaml \
+  --limit 400 \
+  --batch-size 8 \
+  --sample-concurrency 4 \
+  evolve --resume \
+  --checkpoint outputs/weibo21-evolve-checkpoint.json \
+  --output outputs/evolve-resumed.json
 
 # Evaluate proposals and gates without updating the active package bank
 evofact --config configs/weibo21_cross_domain.yaml \
@@ -182,6 +196,75 @@ evofact --config configs/weibo21_cross_domain.yaml \
 ```
 
 Evolution is batch-style: every sample in one batch uses the same active package snapshot; candidate packages are considered only after the batch/validation boundary. This prevents mid-batch parameter drift.
+
+For a configured cross-domain dataset, `--limit` is the **total source-training budget**, not a per-domain limit and not a final-test limit. The sampler allocates it as evenly as possible across `data.train_domains` using the experiment seed. With the eight Weibo21 source domains, `--limit 400` selects 50 training samples from each domain. If a domain lacks its nominal quota, the deficit is deterministically reassigned to domains with remaining samples and disclosed in `data_sampling.selected_by_domain`.
+
+The protected final-test set is configured independently:
+
+```yaml
+data:
+  train_sampling: balanced_by_domain
+  final_test_samples_per_domain: 100
+  static_test_pattern: outputs/static/{dataset}-test-{domain}.json
+  require_static_test: true
+```
+
+For Weibo21, the runtime reads the ordered `sample_id` values from the matching result under `outputs/static/`. Each final-test domain must provide at least 100 valid static samples: exactly 100 are retained when the file contains 100, and only the first 100 are retained when it contains more. Fewer than 100 is an error. Therefore, five final-test domains produce 500 test samples rather than sharing one 100-sample budget. The runtime also fails before inference if a required file is missing, an ID is absent from the currently loaded dataset, or an ID belongs to another domain. This prevents an evolved system from being evaluated on a different final-test set than the static baseline. The sampler itself is dataset-independent: AMTCele, MCFEND, and LiveFact can use the same policy after their adapters and configuration provide stable dataset IDs, domains, and a matching static-test pattern.
+
+#### Resumable evolution protocol
+
+Ordinary evolution writes an atomic checkpoint only after a batch has completed and its accepted Package Bank update has been committed. A checkpoint contains the number and audit records of completed batches, the exact active package mapping, accumulated traces and sample evaluations, optimizer and gate outputs, and the consumed budget state. Consequently, a resumed run preserves both the final evaluation denominator and the resource ledger of the interrupted run.
+
+Resume is deliberately fail-closed. Before skipping any batch, the runtime verifies the complete effective configuration, configuration-file digest, data manifest, ordered train/validation sample identifiers, active Package Bank, and checkpoint schema. The resumed command must therefore use the same YAML file contents, `--limit`, `--batch-size`, sample selection, split, and Skill Bank as the original command. `--sample-concurrency` is part of the effective configuration and must also remain unchanged. A batch interrupted before its checkpoint is written is executed again; already committed batches are not repeated. A checkpoint marked `complete` is terminal, and `--evaluation-only` runs are not resumable because they use an isolated temporary bank.
+
+This protocol provides batch-boundary recovery rather than instruction-level replay. Calls issued inside an interrupted, uncommitted batch may be repeated after recovery and should be considered when reporting API usage.
+
+#### Training provenance and Skill Bank identity
+
+Each committed Package Bank carries machine-readable provenance. The following identifiers have distinct experimental meanings:
+
+| Identifier | Scope | Intended use |
+| --- | --- | --- |
+| `training_run_id` | One concrete evolution invocation; restored unchanged by resume | Distinguish repeated runs of the same experimental configuration |
+| `identity_digest` | Effective configuration, configuration file, manifest, train/validation sample sets, and limit | Detect whether two runs implement the same experimental design |
+| `bank_digest` | The complete coherent Package Bank | Select and cite the exact Router/Specialist/Judge system used for inference |
+| `package_digest` | One content-addressed Skill Package | Audit the exact files of an individual agent package |
+| semantic version | Human-readable package release label | Describe changes; not sufficient by itself for exact reproduction |
+
+The provenance record also contains the effective configuration, configuration-file digest, manifest ID, split fingerprints and sample counts, random seed through the effective configuration, starting bank digest, exact starting package digests and versions, and per-batch proposal/gate audit. Thus, scientific results should be reported with at least the source commit, dataset manifest ID, `training_run_id`, `identity_digest`, and final `bank_digest`.
+
+Inspect the active bank and immutable transaction history with:
+
+```bash
+evofact --config configs/weibo21_cross_domain.yaml skills banks
+evofact --config configs/weibo21_cross_domain.yaml skills bank-show active
+evofact --config configs/weibo21_cross_domain.yaml \
+  skills bank-export active --output outputs/weibo21-skill-bank-lock.json
+```
+
+`skills bank-show` reports package versions, exact digests, the originating run when available, and recorded provenance. `skills bank-export` writes a `skill_bank_lock_v1` lock file. The lock records identities rather than copying package contents, so the referenced content-addressed blobs must remain available in the configured `skill_store`.
+
+#### Version-controlled inference
+
+Inference uses the active bank by default. For a publishable or repeated experiment, export a lock file and retain it with the experiment artifacts. Place `--skill-bank` before the subcommand and select a training run ID, bank digest, or lock file to reconstruct one coherent Router/Specialist/Judge bank:
+
+```bash
+# Recommended: exported immutable lock
+evofact --config configs/weibo21_cross_domain.yaml \
+  --skill-bank outputs/weibo21-skill-bank-lock.json \
+  test --output outputs/weibo21-locked-bank-test.json
+
+# Equivalent selectors when the repository history is available
+evofact --config configs/weibo21_cross_domain.yaml \
+  --skill-bank evolve-<identity>-<run> \
+  test --output outputs/weibo21-run-id-test.json
+
+evofact --config configs/weibo21_cross_domain.yaml \
+  --skill-bank <bank-digest> \
+  test --output outputs/weibo21-bank-digest-test.json
+```
+
+The test report embeds the resolved bank digest, semantic versions, package digests, and available training provenance. Individual package overrides are intentionally unsupported because mixing agents from different training snapshots would invalidate the system-level experimental identity. Banks created before provenance tracking was introduced remain loadable, but their missing provenance cannot be reconstructed retrospectively and must be disclosed when reporting results.
 
 ### Unified paired ablations
 

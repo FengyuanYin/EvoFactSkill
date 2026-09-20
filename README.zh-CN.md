@@ -164,7 +164,21 @@ evofact --config configs/weibo21_cross_domain.yaml \
 ```bash
 # 单轮普通演化
 evofact --config configs/weibo21_cross_domain.yaml \
-  evolve --output outputs/evolve.json
+  --limit 400 \
+  --batch-size 8 \
+  --sample-concurrency 4 \
+  evolve \
+  --checkpoint outputs/weibo21-evolve-checkpoint.json \
+  --output outputs/evolve.json
+
+# 从最后一个原子完成的 batch 恢复
+evofact --config configs/weibo21_cross_domain.yaml \
+  --limit 400 \
+  --batch-size 8 \
+  --sample-concurrency 4 \
+  evolve --resume \
+  --checkpoint outputs/weibo21-evolve-checkpoint.json \
+  --output outputs/evolve-resumed.json
 
 # 只评估提案和门控，不更新 active package bank
 evofact --config configs/weibo21_cross_domain.yaml \
@@ -182,6 +196,76 @@ evofact --config configs/weibo21_cross_domain.yaml \
 ```
 
 这里的“训练”采用 batch 式 Skill 演化：同一个 batch 内的所有样本使用相同的 active package snapshot，只有到达批次/验证边界后才允许处理候选包，避免执行过程中发生中途漂移。它不是神经网络权重训练。
+
+对于已经配置领域边界的数据集，`--limit` 表示**源领域训练样本的总预算**，既不是每个领域的限额，也不控制 final-test 数量。采样器使用实验 seed，将总预算尽可能平均地分配给 `data.train_domains`。Weibo21 有 8 个源领域，因此 `--limit 400` 会从每个源领域选择 50 条训练样本。如果某个领域不足其应有配额，缺额会以确定性方式分配给仍有可用样本的领域，并在输出的 `data_sampling.selected_by_domain` 中披露。
+
+受保护的 final-test 集通过独立配置控制：
+
+```yaml
+data:
+  train_sampling: balanced_by_domain
+  final_test_samples_per_domain: 100
+  static_test_pattern: outputs/static/{dataset}-test-{domain}.json
+  require_static_test: true
+```
+
+对于 Weibo21，Runtime 会读取 `outputs/static/` 下对应历史结果中按顺序保存的 `sample_id`。每个 final-test 领域必须提供至少 100 条有效静态样本：文件恰好包含 100 条时全部保留，超过 100 条时只保留前 100 条，少于 100 条时直接报错。因此，5 个 final-test 领域会产生 500 条测试样本，而不是共同分配 100 条。如果必需的静态结果不存在、某个 ID 不属于当前加载的数据版本，或者样本不属于配置的 final-test 领域，系统同样会在推理前直接失败。这样可以保证演化系统与静态基线使用完全相同的最终测试集合。采样器本身不包含 Weibo21 专属分支；AMTCele、MCFEND 和 LiveFact 在适配器与配置提供稳定 dataset ID、domain 和对应 static-test pattern 后，可以复用同一策略。
+
+#### 可恢复演化协议
+
+普通演化只会在一个 batch 完整结束且已接受的 Package Bank 更新成功提交后，原子写入 checkpoint。checkpoint 保存已完成 batch 的数量与审计记录、精确的 active package 映射、累计 trace 与逐样本评估、Optimizer 和 Gate 输出，以及已经消耗的预算状态。因此，恢复后的最终评估仍覆盖中断前的样本，资源账本也不会从零开始。
+
+恢复过程采用 fail-closed 策略。在跳过任何 batch 前，Runtime 会校验完整有效配置、配置文件摘要、数据 manifest、有序的训练/验证样本 ID、active Package Bank 和 checkpoint schema。因此，恢复命令必须与初始命令保持相同的 YAML 内容、`--limit`、`--batch-size`、`--sample-concurrency`、样本选择、数据划分和 Skill Bank。checkpoint 写入前发生中断的 batch 会重新执行，已经原子提交的 batch 不会重复执行。状态为 `complete` 的 checkpoint 是终态；`--evaluation-only` 使用隔离的临时 Bank，因而不支持恢复。
+
+该机制提供的是 batch 边界恢复，而不是单条指令级重放。中断 batch 内已经发出但尚未形成 checkpoint 的模型调用可能在恢复后再次执行，论文报告 API 调用量和成本时应计入这一点。
+
+#### 训练溯源与 Skill Bank 身份
+
+每次提交的 Package Bank 都包含机器可读的训练溯源。下列标识符承担不同的科研用途：
+
+| 标识符 | 标识范围 | 科研用途 |
+| --- | --- | --- |
+| `training_run_id` | 一次具体的演化运行；恢复时保持不变 | 区分使用相同实验配置重复执行的多次训练 |
+| `identity_digest` | 有效配置、配置文件、manifest、训练/验证样本集合和 limit | 判断两个 run 是否属于同一实验设计 |
+| `bank_digest` | 一组完整且内部一致的 Package Bank | 精确选择和引用推理所用的 Router/Specialist/Judge 系统 |
+| `package_digest` | 单个内容寻址的 Skill Package | 审计某个 Agent Package 的全部文件内容 |
+| 语义版本号 | 便于人工阅读的 Package 发布版本 | 描述版本变化，但不能单独用于精确复现 |
+
+训练溯源还包含完整有效配置、配置文件摘要、manifest ID、split 指纹和样本数、有效配置中的随机种子、起始 Bank digest、起始 package 的精确 digest 与版本，以及逐 batch 的 Proposal/Gate 审计。因此，正式实验至少应同时报告源码 commit、数据 manifest ID、`training_run_id`、`identity_digest` 和最终 `bank_digest`。
+
+使用以下命令检查 active bank 和不可变事务历史：
+
+```bash
+evofact --config configs/weibo21_cross_domain.yaml skills banks
+evofact --config configs/weibo21_cross_domain.yaml skills bank-show active
+evofact --config configs/weibo21_cross_domain.yaml \
+  skills bank-export active --output outputs/weibo21-skill-bank-lock.json
+```
+
+`skills bank-show` 会输出 package 版本、精确 digest、可用的来源 run 和训练溯源。`skills bank-export` 会生成 `skill_bank_lock_v1` 锁文件。锁文件记录的是身份映射，不会复制 Package 内容，因此对应的内容寻址 blob 必须继续保存在当前配置的 `skill_store` 中。
+
+#### 版本锁定推理
+
+推理默认使用 active bank。对于论文实验或重复实验，建议导出锁文件并与实验产物一起保存。将 `--skill-bank` 放在子命令之前，可以使用训练 run ID、bank digest 或锁文件恢复一组内部一致的 Router/Specialist/Judge：
+
+```bash
+# 推荐：使用导出的不可变锁文件
+evofact --config configs/weibo21_cross_domain.yaml \
+  --skill-bank outputs/weibo21-skill-bank-lock.json \
+  test --output outputs/weibo21-locked-bank-test.json
+
+# 仓库仍保留历史记录时，也可以直接使用 run ID
+evofact --config configs/weibo21_cross_domain.yaml \
+  --skill-bank evolve-<identity>-<run> \
+  test --output outputs/weibo21-run-id-test.json
+
+# 或使用完整 Bank digest
+evofact --config configs/weibo21_cross_domain.yaml \
+  --skill-bank <bank-digest> \
+  test --output outputs/weibo21-bank-digest-test.json
+```
+
+测试报告会嵌入最终解析得到的 bank digest、语义版本、package digest 和可用训练 provenance。项目刻意不支持单独覆盖某一个 Agent Package，因为混用不同训练快照会破坏系统级实验身份。引入溯源机制之前创建的历史 Bank 仍然可以加载，但其缺失的 provenance 无法事后重建，报告相关结果时必须明确披露这一限制。
 
 ### 统一配对消融
 

@@ -4,9 +4,13 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import sys
+import tempfile
+import uuid
 from dataclasses import asdict, replace
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 
 from evofact.config import load_config
@@ -14,6 +18,7 @@ from evofact.core.models import RunBudget
 from evofact.data.leakage import detect_leakage
 from evofact.data.manifests import build_manifest, manifest_json
 from evofact.data.registry import DataRegistry
+from evofact.data.sampling import balanced_domain_sample, select_final_test_samples
 from evofact.experiments.meta_runner import MetaEvolutionRunner, fixture_meta_samples
 from evofact.experiments.runner import (
     ExperimentRunner,
@@ -39,6 +44,43 @@ def _json(value, *, ensure_ascii: bool = False):
     输入要求：`value`（未显式标注）需符合函数签名约定；`ensure_ascii`（bool，默认 `False`）控制是否转义非 ASCII 字符。
     输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     return json.dumps(value, ensure_ascii=ensure_ascii, indent=2, default=_json_default)
+
+
+def _stable_value(value):
+    """Convert configuration and identity values into deterministic JSON data."""
+    if hasattr(value, "__dataclass_fields__"):
+        return _stable_value(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _stable_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_stable_value(item) for item in value]
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _stable_digest(value) -> str:
+    encoded = json.dumps(
+        _stable_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _atomic_json_file(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(_stable_value(value), stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _is_utf8_stream(stream) -> bool:
@@ -92,10 +134,19 @@ def build_parser():
         "--limit",
         type=int,
         default=0,
-        help="global sample limit applied after splitting; place before the subcommand (0=all)",
+        help=(
+            "total source-training limit applied after splitting and balanced across configured "
+            "domains; final-test size is controlled per domain by "
+            "data.final_test_samples_per_domain (--limit 0 uses all training data)"
+        ),
     )
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--sample-concurrency", type=int)
+    parser.add_argument(
+        "--skill-bank",
+        default="active",
+        help="active, a historical training run ID, a bank digest, or a Skill bank lock JSON",
+    )
     progress_group = parser.add_mutually_exclusive_group()
     progress_group.add_argument("--progress", dest="progress", action="store_const", const="on")
     progress_group.add_argument("--no-progress", dest="progress", action="store_const", const="off")
@@ -121,6 +172,8 @@ def build_parser():
         command.add_argument("--final-test-domains", default=None)
         if name == "evolve":
             command.add_argument("--evaluation-only", action="store_true")
+            command.add_argument("--resume", action="store_true")
+            command.add_argument("--checkpoint")
         if name == "ablation":
             command.add_argument(
                 "--arms",
@@ -213,6 +266,12 @@ def build_parser():
             skill_parser.add_argument("name")
         if name in {"show", "diff", "rollback"}:
             skill_parser.add_argument("--snapshot", required=name == "rollback")
+    skills_subparsers.add_parser("banks")
+    bank_show = skills_subparsers.add_parser("bank-show")
+    bank_show.add_argument("selector", nargs="?", default="active")
+    bank_export = skills_subparsers.add_parser("bank-export")
+    bank_export.add_argument("selector", nargs="?", default="active")
+    bank_export.add_argument("--output", required=True)
 
     return parser
 
@@ -236,6 +295,7 @@ async def _run_impl(args, progress):
             execution=replace(config.execution, **execution_overrides),
         )
     runner = ExperimentRunner(config, root)
+    selected_skill_bank = None
     if args.command in {
         "dry-run",
         "test",
@@ -245,12 +305,17 @@ async def _run_impl(args, progress):
         "plan",
     } and not (args.command == "evolve" and args.evaluation_only):
         repository = SkillRepository(root / config.skill_store)
-        active_packages = repository.active_packages()
+        if args.command == "evolve" and args.skill_bank != "active":
+            raise ValueError("evolve must continue from the active Skill bank")
+        active_packages = repository.resolve_package_bank(args.skill_bank)
         if active_packages:
             from evofact.skills.package_adapter import package_to_skill_spec
 
             runner.packages = list(active_packages.values())
             runner.skills = [package_to_skill_spec(package) for package in runner.packages]
+            selected_skill_bank = repository.package_bank_info(args.skill_bank)
+        elif args.skill_bank != "active":
+            raise ValueError(f"Skill bank selector resolved to an empty bank: {args.skill_bank}")
         elif (root / config.skill_store / "active.json").exists():
             runner.skills = list(repository.active().values())
     if args.limit < 0:
@@ -477,6 +542,7 @@ async def _run_impl(args, progress):
     manifest = None
     train_domains: tuple[str, ...] | None = None
     final_test_domains: tuple[str, ...] | None = None
+    data_sampling = {"train": None, "final_test": None}
     if dataset:  # 加载单一数据集，并应用配置中的领域边界。
         uses_data_config = dataset == configured_dataset and configured_dataset is not None
         data_root = Path(args.data_root) if args.data_root else None
@@ -518,6 +584,25 @@ async def _run_impl(args, progress):
             known = {str(sample.domain or sample.dataset) for sample in all_samples}
             train_domains = tuple(sorted(known - set(final_test_domains)))
 
+        if uses_data_config and final_test_domains:
+            selected_final, final_audit = select_final_test_samples(
+                all_samples,
+                final_test_domains,
+                dataset=dataset,
+                samples_per_domain=config.data.final_test_samples_per_domain,
+                seed=config.seed,
+                repository_root=root,
+                static_pattern=config.data.static_test_pattern,
+                require_static=config.data.require_static_test,
+            )
+            final_set = set(final_test_domains)
+            all_samples = [
+                sample
+                for sample in all_samples
+                if str(sample.domain or sample.dataset) not in final_set
+            ] + selected_final
+            data_sampling["final_test"] = final_audit
+
         manifest = build_manifest(
             all_samples,
             seed=config.seed,
@@ -529,12 +614,55 @@ async def _run_impl(args, progress):
         if errors:
             raise ValueError("dataset leakage: " + "; ".join(errors))
 
-    def select(ids):
+    def select(ids, *, role: str = "split"):
         """函数作用：根据样本、技能范围、历史效用和预算选择本次调用的技能。
         输入要求：`ids`（未显式标注）需符合函数签名约定。
         输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         chosen = [s for s in (all_samples or []) if s.sample_id in set(ids)]
-        return chosen[: args.limit] if args.limit > 0 else chosen
+        if role != "train" or args.limit == 0:
+            return chosen
+        if config.data.train_sampling == "balanced_by_domain" and train_domains:
+            selected, audit = balanced_domain_sample(
+                chosen,
+                train_domains,
+                args.limit,
+                seed=config.seed,
+            )
+            data_sampling["train"] = audit
+            return selected
+        selected = chosen[: args.limit]
+        data_sampling["train"] = {
+            "strategy": "ordered",
+            "requested_total": args.limit,
+            "selected_total": len(selected),
+            "sample_ids": [sample.sample_id for sample in selected],
+        }
+        return selected
+
+    def meta_samples():
+        if all_samples is None:
+            return fixture_meta_samples()
+        if not train_domains or not final_test_domains:
+            return all_samples
+        source = [
+            sample
+            for sample in all_samples
+            if str(sample.domain or sample.dataset) in set(train_domains)
+        ]
+        if args.limit:
+            source, audit = balanced_domain_sample(
+                source,
+                train_domains,
+                args.limit,
+                seed=config.seed,
+            )
+            data_sampling["train"] = audit
+        final = [
+            sample
+            for sample in all_samples
+            if str(sample.domain or sample.dataset) in set(final_test_domains)
+        ]
+        return source + final
 
     if args.command == "data":
         if args.data_command == "inspect":
@@ -558,7 +686,10 @@ async def _run_impl(args, progress):
     if args.command in {"dry-run", "test"}:
         samples = None
         if manifest:
-            samples = select(manifest.test_ids if args.command == "test" else manifest.train_ids)
+            samples = select(
+                manifest.test_ids if args.command == "test" else manifest.train_ids,
+                role="test" if args.command == "test" else "train",
+            )
         if manifest and not samples:
             raise ValueError(f"no samples available for {args.command}")
         traces, result = await runner.run(
@@ -569,26 +700,148 @@ async def _run_impl(args, progress):
         return {
             "mode": args.command,
             "manifest_id": manifest.manifest_id if manifest else "fixture",
+            "skill_bank": selected_skill_bank,
+            "data_sampling": data_sampling,
             "n_traces": len(traces),
             "metrics": result.aggregate_metrics,
             "traces": [asdict(t) for t in traces],
             "budget": runner._budget_manager().snapshot().model_dump(),
         }
     if args.command == "evolve":  # 使用skill 进化
-        train = select(manifest.train_ids) if manifest else None
+        train = select(manifest.train_ids, role="train") if manifest else None
         validation = select(manifest.evolution_validation_ids) if manifest else None
         if manifest and (not train or not validation):
             raise ValueError("evolution requires non-empty train and evolution-validation splits")
+        if args.resume and args.evaluation_only:
+            raise ValueError("evolve --resume cannot be combined with --evaluation-only")
         repo = None if args.evaluation_only else SkillRepository(root / config.skill_store)
-        return await runner.closed_loop_batched(
+        config_path = (
+            root / args.config if not Path(args.config).is_absolute() else Path(args.config)
+        )
+        identity = {
+            "schema_version": "evolve_run_identity_v1",
+            "command": "evolve",
+            "config": _stable_value(config),
+            "config_file": str(config_path.resolve()),
+            "config_file_digest": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+            "manifest_id": manifest.manifest_id if manifest else "fixture",
+            "train_sample_ids_digest": _stable_digest([row.sample_id for row in train or []]),
+            "validation_sample_ids_digest": _stable_digest(
+                [row.sample_id for row in validation or []]
+            ),
+            "train_sample_count": len(train or []),
+            "validation_sample_count": len(validation or []),
+            "limit": args.limit,
+        }
+        identity_digest = _stable_digest(identity)
+        training_run_id = f"evolve-{identity_digest[:12]}-{uuid.uuid4().hex[:12]}"
+        from evofact.skills.package_adapter import package_bank_digest
+
+        starting_packages = list(repo.active_packages().values()) if repo is not None else []
+        if not starting_packages:
+            starting_packages = list(runner.packages)
+        provenance = {
+            **identity,
+            "identity_digest": identity_digest,
+            "training_run_id": training_run_id,
+            "starting_skill_bank": {
+                "bank_digest": package_bank_digest(starting_packages),
+                "packages": {
+                    package.manifest.name: package.package_digest for package in starting_packages
+                },
+                "versions": {
+                    package.manifest.name: package.manifest.version for package in starting_packages
+                },
+            },
+        }
+        checkpoint_path = (
+            Path(args.checkpoint)
+            if args.checkpoint
+            else Path(config.output_dir) / "evolve-checkpoint.json"
+        )
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = root / checkpoint_path
+        start_batch = 0
+        prior_batch_audit = []
+        prior_state = {}
+        checkpoint = None
+        if args.resume:
+            if not checkpoint_path.is_file():
+                raise ValueError(f"evolution checkpoint does not exist: {checkpoint_path}")
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            if checkpoint.get("schema_version") != "evolve_checkpoint_v1":
+                raise ValueError("unsupported evolution checkpoint schema")
+            if checkpoint.get("identity_digest") != identity_digest:
+                raise ValueError(
+                    "evolution checkpoint does not match the effective config or split"
+                )
+            if checkpoint.get("status") == "complete":
+                raise ValueError("evolution checkpoint is already complete")
+            provenance = dict(checkpoint.get("provenance", provenance))
+            training_run_id = str(checkpoint.get("training_run_id", training_run_id))
+            expected_active = checkpoint.get("active_packages", {})
+            current_active = {
+                name: package.package_digest for name, package in repo.active_packages().items()
+            }
+            if current_active != expected_active:
+                raise ValueError("active Skill bank differs from the checkpoint")
+            start_batch = int(checkpoint.get("completed_batches", 0))
+            prior_batch_audit = list(checkpoint.get("batch_audit", []))
+            prior_state = dict(checkpoint.get("accumulated", {}))
+            runner._budget_manager().restore(dict(checkpoint.get("budget_state", {})))
+
+        def save_checkpoint(state: dict, *, status: str = "running") -> None:
+            _atomic_json_file(
+                checkpoint_path,
+                {
+                    "schema_version": "evolve_checkpoint_v1",
+                    "status": status,
+                    "identity_digest": identity_digest,
+                    "training_run_id": training_run_id,
+                    "provenance": provenance,
+                    **state,
+                },
+            )
+
+        outcome = await runner.closed_loop_batched(
             train,
             validation,
             repository=repo,
             evaluation_only=args.evaluation_only,
             progress=progress,
+            start_batch=start_batch,
+            prior_batch_audit=prior_batch_audit,
+            prior_state=prior_state,
+            checkpoint_callback=None if args.evaluation_only else save_checkpoint,
+            training_run_id=training_run_id,
+            provenance=provenance,
         )
+        if not args.evaluation_only:
+            final_state = {
+                "completed_batches": len(outcome["batches"]),
+                "total_batches": len(outcome["batches"]),
+                "batch_audit": outcome["batches"],
+                "active_packages": {
+                    name: package.package_digest for name, package in repo.active_packages().items()
+                },
+                "budget_state": runner._budget_manager().export_state(),
+                "accumulated": {
+                    "traces": outcome["traces"],
+                    "sample_evaluations": outcome["evaluation"].per_sample,
+                    "attributions": outcome["attributions"],
+                    "proposals": outcome["proposals"],
+                    "gate_decisions": outcome["gate_decisions"],
+                    "utilities": outcome["utilities"],
+                    "distillation": outcome["distillation"],
+                },
+            }
+            save_checkpoint(final_state, status="complete")
+        outcome["checkpoint"] = str(checkpoint_path) if not args.evaluation_only else None
+        outcome["skill_bank"] = repo.package_bank_info("active") if repo is not None else None
+        outcome["data_sampling"] = data_sampling
+        return outcome
     if args.command == "meta-evolve":  # 使用元进化
-        rows = fixture_meta_samples() if all_samples is None else all_samples
+        rows = meta_samples()
         final_domains = final_test_domains or cli_final_domains or ("outer_holdout",)
         overrides = {}
         if args.episodes is not None:
@@ -625,6 +878,7 @@ async def _run_impl(args, progress):
             "decisions": [asdict(x) for x in outcome.decisions],
             "committed_snapshots": outcome.committed_snapshots,
             "mock_results": outcome.mock_results,
+            "data_sampling": data_sampling,
             "reports": paths,
         }
     if args.command == "adversarial-evolve":  # 使用元-对抗进化
@@ -673,7 +927,7 @@ async def _run_impl(args, progress):
             "reports": paths,
         }
     if args.command == "validate":
-        train = select(manifest.train_ids) if manifest else None
+        train = select(manifest.train_ids, role="train") if manifest else None
         validation = select(manifest.evolution_validation_ids) if manifest else None
         if manifest and (not train or not validation):
             raise ValueError("validation requires non-empty train and evolution-validation splits")
@@ -688,7 +942,7 @@ async def _run_impl(args, progress):
         from evofact.generation.data import fixture_adversarial_data, load_facts
 
         arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())
-        train = select(manifest.train_ids) if manifest else fixture_samples()
+        train = select(manifest.train_ids, role="train") if manifest else fixture_samples()
         validation = (
             select(manifest.evolution_validation_ids) if manifest else fixture_validation_samples()
         )
@@ -696,7 +950,7 @@ async def _run_impl(args, progress):
         needs_generation = any(arm in GENERATION_ABLATION_ARMS for arm in arms)
         needs_meta = any(arm in META_ABLATION_ARMS for arm in arms)
         facts = load_facts(args.facts) if args.facts else []
-        unified_samples = all_samples
+        unified_samples = meta_samples() if all_samples is not None else None
         if unified_samples is None and needs_generation:
             unified_samples, fixture_facts = fixture_adversarial_data()
             if not facts:
@@ -766,6 +1020,23 @@ async def _run_impl(args, progress):
         return write_report(root / config.output_dir, "EvoFactSkill multi-seed report", payload)
     repo = SkillRepository(root / config.skill_store)
     command = args.skills_command
+    if command == "banks":
+        return {
+            "active": repo.package_bank_info("active") if repo.active_packages() else None,
+            "history": repo.package_bank_records(),
+        }
+    if command == "bank-show":
+        return repo.package_bank_info(args.selector)
+    if command == "bank-export":
+        info = repo.package_bank_info(args.selector)
+        return {
+            "schema_version": "skill_bank_lock_v1",
+            "bank_digest": info["bank_digest"],
+            "run_id": info["run_id"],
+            "packages": info["packages"],
+            "versions": info["versions"],
+            "provenance": info["provenance"],
+        }
     if command == "list":
         return {n: asdict(s) for n, s in repo.active().items()}
     if command == "show":
@@ -819,7 +1090,7 @@ def main(argv=None):
             {
                 "cancelled": True,
                 "reason": "keyboard interrupt",
-                "resume": "Use --resume for meta-evolve or adversarial-evolve.",
+                "resume": "Use --resume for evolve, meta-evolve, or adversarial-evolve.",
             }
         )
         raise SystemExit(130) from None

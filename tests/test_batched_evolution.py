@@ -123,3 +123,52 @@ def test_failed_batch_commit_does_not_publish_working_bank() -> None:
         else:
             raise AssertionError("commit failure was not propagated")
     assert tuple((skill.name, skill.version) for skill in runner.skills) == before
+
+
+def test_evolve_resume_skips_atomically_completed_batches() -> None:
+    config = replace(AppConfig(), execution=ExecutionConfig(batch_size=2, max_concurrent_samples=2))
+    rows = fixture_samples()
+    captured = {}
+
+    def interrupt_after_first_batch(state):
+        captured.update(state)
+        raise RuntimeError("simulated interruption")
+
+    with tempfile.TemporaryDirectory() as temp:
+        repository = SkillRepository(Path(temp) / "skills")
+        first = AcceptedBatchRunner(config, ROOT)
+        try:
+            asyncio.run(
+                first.closed_loop_batched(
+                    rows,
+                    rows[::-1],
+                    repository=repository,
+                    checkpoint_callback=interrupt_after_first_batch,
+                    training_run_id="resume-test",
+                    provenance={"identity_digest": "identity"},
+                )
+            )
+        except RuntimeError as error:
+            assert "simulated interruption" in str(error)
+        else:
+            raise AssertionError("interruption was not propagated")
+
+        assert captured["completed_batches"] == 1
+        resumed = AcceptedBatchRunner(config, ROOT)
+        result = asyncio.run(
+            resumed.closed_loop_batched(
+                rows,
+                rows[::-1],
+                repository=repository,
+                start_batch=1,
+                prior_batch_audit=captured["batch_audit"],
+                prior_state=captured["accumulated"],
+                training_run_id="resume-test",
+                provenance={"identity_digest": "identity"},
+            )
+        )
+
+    assert len(resumed.seen_versions) == 1
+    assert result["resumed_from_batch"] == 1
+    assert [row["batch_index"] for row in result["batches"]] == [1, 2]
+    assert len(result["evaluation"].per_sample) == len(rows)
