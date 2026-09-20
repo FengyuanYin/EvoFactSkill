@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from dataclasses import replace
 
 from evofact.core.budget_models import BudgetLimits, BudgetRequest
 from evofact.core.dag_models import ExecutionPlan, NodeStatus
@@ -63,6 +64,7 @@ class InferenceRuntime:
             "metadata": {"temporal_window": sample.metadata.get("temporal_window")},
         }
         eligible_skills = [skill for skill in self.skills if matches_scope(skill, scope_view)]
+        evidence_available = bool(sample.evidence)
 
         route_reservation = None
         budget_denied: str | None = None
@@ -134,6 +136,23 @@ class InferenceRuntime:
             )
         else:
             raise TypeError("router must return a RoutingDecision or ExecutionPlan")
+
+        if not evidence_available:
+            skills_by_id = {skill.skill_id: skill for skill in eligible_skills}
+            plan = replace(
+                plan,
+                nodes=tuple(
+                    replace(node, required=False)
+                    if getattr(
+                        getattr(skills_by_id.get(node.skill_id), "report_contract", None),
+                        "report_type",
+                        None,
+                    )
+                    == "evidence_assessment"
+                    else node
+                    for node in plan.nodes
+                ),
+            )
 
         detailed_usage = [_usage_details(routing_result)]
 

@@ -6,9 +6,13 @@ skill_store: skills/store_weibo21
 data:
   dataset: weibo21
   root: datasets/Weibo21
-  train_domains: ["军事", "政治", "教育考试", "文体娱乐", "灾难事故", "社会生活", "科技", "财经商业"]
-  final_test_domains: ["医药健康"]
+  train_domains: ["政治", "财经商业", "军事", "科技", "社会生活", "文体娱乐", "医药健康", "教育考试"]
+  final_test_domains: ["灾难事故"]
   excluded_domains: ["无法确定"]
+  train_sampling: balanced_by_domain
+  final_test_samples_per_domain: 100
+  static_test_pattern: outputs/static/{dataset}-test-{domain}.json
+  require_static_test: true
 
 backend: openai-compatible
 model: deepseek-flash
@@ -28,12 +32,30 @@ pricing:
 # 每条样本最坏 5 次调用（1 router + ≤3 specialist + 1 judge）、≤12000 token：
 # 955 × 5 ≈ 4775 calls、955 × 12000 ≈ 11.5M tokens，这里各留约 2 倍余量。
 budget:
+  max_calls_per_sample: 8
+  max_tokens_per_sample: 40000
+  max_cost_per_sample: 1.0
+
   max_calls_per_run: 10000
   max_tokens_per_run: 30000000
+  max_cost_per_run: 100.0
+
+  max_sample_concurrency: 4
+  max_global_concurrency: 8
+
+  judge_reserved_calls: 1
+  judge_reserved_tokens: 4000
+  judge_reserved_cost: 0.10
+
+dag:
+  max_nodes: 8
+  max_depth: 4
+  node_timeout_ms: 180000
+  sample_timeout_ms: 600000
 
 execution:
   batch_size: 16
-  max_concurrent_samples: 32
+  max_concurrent_samples: 16
   progress: auto
 
 evolution:

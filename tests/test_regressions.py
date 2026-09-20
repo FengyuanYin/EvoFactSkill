@@ -96,6 +96,21 @@ class RuntimeRegressionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             build_parser().parse_args(["skills", "rollback", "claim_decomposition"])
 
+    def test_evolve_resume_and_skill_bank_cli_options(self):
+        args = build_parser().parse_args(
+            [
+                "--skill-bank",
+                "training-run-1",
+                "evolve",
+                "--resume",
+                "--checkpoint",
+                "outputs/evolve-checkpoint.json",
+            ]
+        )
+        self.assertEqual(args.skill_bank, "training-run-1")
+        self.assertTrue(args.resume)
+        self.assertEqual(args.checkpoint, "outputs/evolve-checkpoint.json")
+
 
 class LifecycleRegressionTests(unittest.TestCase):
     def setUp(self):

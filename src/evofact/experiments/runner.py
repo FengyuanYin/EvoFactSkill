@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -585,6 +586,12 @@ class ExperimentRunner:
         repository=None,
         evaluation_only: bool = False,
         progress: ProgressSink | None = None,
+        start_batch: int = 0,
+        prior_batch_audit: list[dict] | None = None,
+        prior_state: dict | None = None,
+        checkpoint_callback=None,
+        training_run_id: str | None = None,
+        provenance: dict | None = None,
     ):
         """Evolve sequential training batches with one atomic bank update per batch."""
         from evofact.data.domains import skillbank_fingerprint
@@ -595,7 +602,13 @@ class ExperimentRunner:
         )
         if not rows or not validation_rows:
             raise ValueError("evolution requires non-empty training and validation samples")
+        batch_size = self.config.execution.batch_size
+        batch_count = (len(rows) + batch_size - 1) // batch_size
+        if start_batch < 0 or start_batch > batch_count:
+            raise ValueError("resume batch is outside the configured training range")
         if evaluation_only:
+            if start_batch or checkpoint_callback is not None:
+                raise ValueError("evaluation-only evolution cannot be resumed")
             from evofact.skills.repository import SkillRepository
 
             with tempfile.TemporaryDirectory(prefix="evofact-evaluation-only-") as temp:
@@ -605,6 +618,7 @@ class ExperimentRunner:
                     repository=SkillRepository(Path(temp) / "skill-store"),
                     evaluation_only=False,
                     progress=progress,
+                    provenance=provenance,
                 )
             result["evaluation_only"] = True
             return result
@@ -620,32 +634,42 @@ class ExperimentRunner:
                     legacy_packages,
                     run_id="migrate-active-v2",
                     expected_active={},
-                    audit={"source": "legacy-active-v2"},
+                    audit={"source": "legacy-active-v2", "provenance": provenance or {}},
                 )
             else:
                 repository.commit_package_bank(
                     self.packages,
                     run_id="initialize-package-bank-" + package_bank_digest(self.packages)[:16],
                     expected_active={},
-                    audit={"source": "seed-packages"},
+                    audit={"source": "seed-packages", "provenance": provenance or {}},
                 )
             active_packages = repository.active_packages()
         if active_packages:
             self.packages = list(active_packages.values())
             self.skills = [package_to_skill_spec(package) for package in self.packages]
 
-        all_traces = []
-        all_rows = []
-        all_attributions = []
-        all_proposals = []
-        all_decisions = []
-        batch_audit = []
-        utilities = {}
-        distillation = []
-        batch_size = self.config.execution.batch_size
-        batch_count = (len(rows) + batch_size - 1) // batch_size
-
+        restored = prior_state or {}
+        all_traces = list(restored.get("traces", []))
+        all_rows = [
+            item
+            if isinstance(item, SampleEvaluation)
+            else SampleEvaluation(
+                **{
+                    **item,
+                    "allowed_labels": tuple(item.get("allowed_labels", ("REAL", "FAKE"))),
+                }
+            )
+            for item in restored.get("sample_evaluations", [])
+        ]
+        all_attributions = list(restored.get("attributions", []))
+        all_proposals = list(restored.get("proposals", []))
+        all_decisions = list(restored.get("gate_decisions", []))
+        batch_audit = list(prior_batch_audit or [])
+        utilities = dict(restored.get("utilities", {}))
+        distillation = list(restored.get("distillation", []))
         for batch_index, start in enumerate(range(0, len(rows), batch_size), start=1):
+            if batch_index <= start_batch:
+                continue
             batch = rows[start : start + batch_size]
             baseline = list(self.skills)
             baseline_id = skillbank_fingerprint(baseline)
@@ -705,7 +729,8 @@ class ExperimentRunner:
             if accepted and repository is not None and not evaluation_only:
                 proposal_ids = tuple(item.proposal_id for item in accepted)
                 run_id = (
-                    f"batch-{batch_index}-"
+                    (f"{training_run_id}-" if training_run_id else "")
+                    + f"batch-{batch_index}-"
                     + skillbank_fingerprint(baseline)[:12]
                     + "-"
                     + skillbank_fingerprint(candidate_bank)[:12]
@@ -741,6 +766,7 @@ class ExperimentRunner:
                         "batch_index": batch_index,
                         "proposal_ids": proposal_ids,
                         "decisions": [asdict(decision) for _, decision in pairs],
+                        "provenance": provenance or {},
                     },
                 )
                 self.packages = list(repository.active_packages().values())
@@ -777,6 +803,30 @@ class ExperimentRunner:
                         f"batch {batch_index}/{batch_count}: complete",
                     )
                 )
+            if checkpoint_callback is not None:
+                checkpoint_result = checkpoint_callback(
+                    {
+                        "completed_batches": batch_index,
+                        "total_batches": batch_count,
+                        "batch_audit": batch_audit,
+                        "active_packages": {
+                            package.manifest.name: package.package_digest
+                            for package in self.packages
+                        },
+                        "budget_state": self._budget_manager().export_state(),
+                        "accumulated": {
+                            "traces": all_traces,
+                            "sample_evaluations": all_rows,
+                            "attributions": all_attributions,
+                            "proposals": all_proposals,
+                            "gate_decisions": all_decisions,
+                            "utilities": utilities,
+                            "distillation": distillation,
+                        },
+                    }
+                )
+                if inspect.isawaitable(checkpoint_result):
+                    await checkpoint_result
 
         return {
             "traces": all_traces,
@@ -789,6 +839,9 @@ class ExperimentRunner:
             "budget_snapshot": self._budget_manager().snapshot(),
             "batches": batch_audit,
             "evaluation_only": evaluation_only,
+            "resumed_from_batch": start_batch,
+            "training_run_id": training_run_id,
+            "provenance": provenance or {},
         }
 
 

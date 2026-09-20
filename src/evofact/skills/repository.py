@@ -417,6 +417,85 @@ class SkillRepository:
             name: self.get_package(digest) for name, digest in payload.get("packages", {}).items()
         }
 
+    def _packages_from_mapping(self, mapping: dict[str, str]) -> dict[str, SkillPackage]:
+        packages = {}
+        for name, digest in sorted(mapping.items()):
+            package = self.get_package(digest)
+            if package.manifest.name != name:
+                raise ValueError(f"Package bank entry {name} points to {package.manifest.name}")
+            packages[name] = package
+        return packages
+
+    def package_bank_records(self) -> list[dict]:
+        """Return immutable Package-bank transactions with stable bank digests."""
+        from evofact.skills.package_adapter import package_bank_digest
+
+        payload = self._package_active_payload()
+        records = []
+        for run_id, transaction in payload.get("transactions", {}).items():
+            mapping = dict(transaction.get("after", {}))
+            packages = self._packages_from_mapping(mapping)
+            records.append(
+                {
+                    "run_id": run_id,
+                    "bank_digest": package_bank_digest(list(packages.values())),
+                    "packages": mapping,
+                    "audit": transaction.get("audit", {}),
+                }
+            )
+        return records
+
+    def resolve_package_bank(self, selector: str = "active") -> dict[str, SkillPackage]:
+        """Resolve an active, historical, digest-addressed, or lock-file Package bank."""
+        selector = str(selector).strip()
+        if not selector:
+            raise ValueError("Package bank selector must not be empty")
+        if selector == "active":
+            return self.active_packages()
+
+        path = Path(selector)
+        if path.is_file():
+            lock = json.loads(path.read_text(encoding="utf-8"))
+            if lock.get("schema_version") != "skill_bank_lock_v1":
+                raise ValueError("unsupported Skill bank lock schema")
+            mapping = lock.get("packages")
+            if not isinstance(mapping, dict) or not mapping:
+                raise ValueError("Skill bank lock requires a non-empty packages mapping")
+            return self._packages_from_mapping({str(k): str(v) for k, v in mapping.items()})
+
+        payload = self._package_active_payload()
+        transaction = payload.get("transactions", {}).get(selector)
+        if transaction is not None:
+            return self._packages_from_mapping(dict(transaction.get("after", {})))
+        for record in self.package_bank_records():
+            if record["bank_digest"] == selector:
+                return self._packages_from_mapping(record["packages"])
+        raise KeyError(f"unknown Skill bank selector: {selector}")
+
+    def package_bank_info(self, selector: str = "active") -> dict:
+        """Describe the exact package versions and training provenance for one bank."""
+        from evofact.skills.package_adapter import package_bank_digest
+
+        packages = self.resolve_package_bank(selector)
+        mapping = {name: package.package_digest for name, package in packages.items()}
+        digest = package_bank_digest(list(packages.values()))
+        matching = [
+            record for record in self.package_bank_records() if record["packages"] == mapping
+        ]
+        transaction = matching[-1] if matching else None
+        return {
+            "schema_version": "skill_bank_lock_v1",
+            "selector": selector,
+            "bank_digest": digest,
+            "run_id": transaction["run_id"] if transaction else None,
+            "packages": mapping,
+            "versions": {
+                name: package.manifest.version for name, package in sorted(packages.items())
+            },
+            "provenance": transaction["audit"].get("provenance", {}) if transaction else {},
+            "audit": transaction["audit"] if transaction else {},
+        }
+
     def package_transaction(self, run_id: str) -> dict | None:
         return self._package_active_payload().get("transactions", {}).get(run_id)
 
