@@ -3,5 +3,5 @@ build==1.6.1
 pip-audit==2.10.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
-ruff==0.16.7
+ruff==0.16.8
 twine==7.0.0
