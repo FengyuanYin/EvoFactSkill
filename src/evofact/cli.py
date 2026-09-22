@@ -174,6 +174,10 @@ def build_parser():
             command.add_argument("--evaluation-only", action="store_true")
             command.add_argument("--resume", action="store_true")
             command.add_argument("--checkpoint")
+            command.add_argument(
+                "--trace-log",
+                help="single JSONL file containing every training and validation inference trace",
+            )
         if name == "ablation":
             command.add_argument(
                 "--arms",
@@ -208,6 +212,10 @@ def build_parser():
     )
     meta_parser.add_argument("--resume", action="store_true")
     meta_parser.add_argument("--evaluation-only", action="store_true")
+    meta_parser.add_argument(
+        "--trace-log",
+        help="single JSONL file containing every meta-train and meta-test inference trace",
+    )
 
     adversarial = subparsers.add_parser("adversarial-evolve")
     adversarial.add_argument("--output", help=output_help)
@@ -218,6 +226,10 @@ def build_parser():
     adversarial.add_argument("--final-test-domains", default=None)
     adversarial.add_argument("--resume", action="store_true")
     adversarial.add_argument("--evaluation-only", action="store_true")
+    adversarial.add_argument(
+        "--trace-log",
+        help="single JSONL file containing every detector training and validation trace",
+    )
 
     package_parser = subparsers.add_parser("package")
     package_subparsers = package_parser.add_subparsers(dest="package_command", required=True)
@@ -722,6 +734,7 @@ async def _run_impl(args, progress):
             "schema_version": "evolve_run_identity_v1",
             "command": "evolve",
             "config": _stable_value(config),
+            "model_identity": runner.model_identity(),
             "config_file": str(config_path.resolve()),
             "config_file_digest": hashlib.sha256(config_path.read_bytes()).hexdigest(),
             "manifest_id": manifest.manifest_id if manifest else "fixture",
@@ -790,6 +803,27 @@ async def _run_impl(args, progress):
             prior_state = dict(checkpoint.get("accumulated", {}))
             runner._budget_manager().restore(dict(checkpoint.get("budget_state", {})))
 
+        configured_trace_log = (
+            Path(args.trace_log)
+            if args.trace_log
+            else Path(checkpoint["trace_log"])
+            if checkpoint and checkpoint.get("trace_log")
+            else config.execution.trace_log
+            if config.execution.trace_log is not None
+            else Path(config.output_dir) / f"{training_run_id}-traces.jsonl"
+        )
+        if not configured_trace_log.is_absolute():
+            configured_trace_log = root / configured_trace_log
+        if checkpoint and checkpoint.get("trace_log"):
+            saved_trace_log = Path(checkpoint["trace_log"]).resolve()
+            if configured_trace_log.resolve() != saved_trace_log:
+                raise ValueError("resume trace log differs from the checkpoint")
+        runner.enable_trace_logging(
+            configured_trace_log,
+            run_id=training_run_id,
+            resume=args.resume,
+        )
+
         def save_checkpoint(state: dict, *, status: str = "running") -> None:
             _atomic_json_file(
                 checkpoint_path,
@@ -798,6 +832,7 @@ async def _run_impl(args, progress):
                     "status": status,
                     "identity_digest": identity_digest,
                     "training_run_id": training_run_id,
+                    "trace_log": str(configured_trace_log.resolve()),
                     "provenance": provenance,
                     **state,
                 },
@@ -837,6 +872,7 @@ async def _run_impl(args, progress):
             }
             save_checkpoint(final_state, status="complete")
         outcome["checkpoint"] = str(checkpoint_path) if not args.evaluation_only else None
+        outcome["trace_log"] = str(configured_trace_log)
         outcome["skill_bank"] = repo.package_bank_info("active") if repo is not None else None
         outcome["data_sampling"] = data_sampling
         return outcome
@@ -861,6 +897,15 @@ async def _run_impl(args, progress):
         if overrides:
             config = replace(config, meta_learning=replace(config.meta_learning, **overrides))
         repository = None if args.evaluation_only else SkillRepository(root / config.skill_store)
+        trace_log_path = (
+            Path(args.trace_log)
+            if args.trace_log
+            else config.execution.trace_log
+            if config.execution.trace_log is not None
+            else Path(config.output_dir) / "meta-evolve-traces.jsonl"
+        )
+        if not trace_log_path.is_absolute():
+            trace_log_path = root / trace_log_path
         outcome = await MetaEvolutionRunner(config, root, repository).run(
             rows,
             final_test_domains=final_domains,
@@ -868,6 +913,7 @@ async def _run_impl(args, progress):
             resume=args.resume,
             evaluation_only=args.evaluation_only,
             progress=progress,
+            trace_log_path=trace_log_path,
         )
         paths = write_meta_report(root / config.output_dir, outcome)
         return {
@@ -879,6 +925,7 @@ async def _run_impl(args, progress):
             "committed_snapshots": outcome.committed_snapshots,
             "mock_results": outcome.mock_results,
             "data_sampling": data_sampling,
+            "trace_log": str(trace_log_path),
             "reports": paths,
         }
     if args.command == "adversarial-evolve":  # 使用元-对抗进化
@@ -902,6 +949,15 @@ async def _run_impl(args, progress):
             rows, facts = fixture_adversarial_data()
         final = final_test_domains or cli_final_domains or ("outer_holdout",)
         repo = None if args.evaluation_only else SkillRepository(root / config.skill_store)
+        trace_log_path = (
+            Path(args.trace_log)
+            if args.trace_log
+            else config.execution.trace_log
+            if config.execution.trace_log is not None
+            else Path(config.output_dir) / "adversarial-evolve-traces.jsonl"
+        )
+        if not trace_log_path.is_absolute():
+            trace_log_path = root / trace_log_path
         adversarial_runner = AdversarialEvolutionRunner(config, root, facts, repo)
         outcome = await adversarial_runner.run(
             rows,
@@ -909,6 +965,7 @@ async def _run_impl(args, progress):
             resume=args.resume,
             evaluation_only=args.evaluation_only,
             progress=progress,
+            trace_log_path=trace_log_path,
         )
         paths = write_adversarial_report(
             root / config.output_dir, outcome, adversarial_runner.audit, config.generation
@@ -924,6 +981,7 @@ async def _run_impl(args, progress):
                 e["metrics"]["accepted"] for e in adversarial_runner.audit.values()
             ),
             "committed_snapshots": outcome.committed_snapshots,
+            "trace_log": str(trace_log_path),
             "reports": paths,
         }
     if args.command == "validate":

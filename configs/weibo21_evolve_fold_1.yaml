@@ -1,13 +1,13 @@
 seed: 42
 
-output_dir: outputs/weibo21_cross_domain
-skill_store: skills/store_weibo21
+output_dir: outputs/weibo21_evolve_fold_1
+skill_store: skills/store_weibo21_evolve_fold_1
 
 data:
   dataset: weibo21
   root: datasets/Weibo21
-  train_domains: ["政治", "财经商业", "军事", "科技", "社会生活", "文体娱乐", "医药健康", "教育考试"]
-  final_test_domains: ["灾难事故"]
+  train_domains: ["政治", "军事", "科技", "社会生活"]
+  final_test_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
   excluded_domains: ["无法确定"]
   train_sampling: balanced_by_domain
   final_test_samples_per_domain: 100
@@ -21,29 +21,22 @@ api_key_env: DEEPSEEK_API_KEY
 routing_strategy: llm
 max_skills_per_item: 3
 
-# Training-only high-capability model. Values are resolved at runtime so the
-# optimizer can use a different provider endpoint without storing credentials.
 optimizer_backend:
   enabled: true
   backend: openai-compatible
   model_env: EVOFACT_OPTIMIZER_MODEL
   base_url_env: EVOFACT_OPTIMIZER_BASE_URL
   api_key_env: EVOFACT_OPTIMIZER_API_KEY
-  provider: openai-compatible
+  provider: deepseek
   pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
   temperature: 1.0
-  require_distinct_base_url: true
+  require_distinct_base_url: false
 
-# DeepSeek official peak rates captured on 2026-09-18. Refresh this dated table
-# before a publication run; off-peak billing can be lower.
 pricing:
   provider: deepseek
   table_path: pricing/deepseek-2026-09-18-peak.json
   require_cost_for_promotion: true
 
-# run 级预算按整次 run() 调用累加，test 会把全部 955 条测试样本放进一次 run()。
-# 每条样本最坏 5 次调用（1 router + ≤3 specialist + 1 judge）、≤12000 token：
-# 955 × 5 ≈ 4775 calls、955 × 12000 ≈ 11.5M tokens，这里各留约 2 倍余量。
 budget:
   max_calls_per_sample: 8
   max_tokens_per_sample: 40000
@@ -70,7 +63,7 @@ execution:
   batch_size: 16
   max_concurrent_samples: 16
   progress: auto
-  trace_log: outputs/weibo21_cross_domain/training-traces.jsonl
+  trace_log: outputs/weibo21_evolve_fold_1/training-traces.jsonl
 
 evolution:
   enabled: true
@@ -98,9 +91,9 @@ gate:
   max_cost_ratio: 1.5
 
 meta_learning:
-  enabled: true
+  enabled: false
   strategy: leave_one_domain_out
-  episodes: 8
+  episodes: 4
   meta_test_domain_count: 1
   min_source_domains: 3
   min_valid_episodes: 3
@@ -118,4 +111,4 @@ meta_learning:
   evaluation_repeats: 1
   max_meta_test_samples_per_domain: 10
   isolate_candidate_budget: true
-  checkpoint_path: outputs/weibo21_cross_domain/checkpoint.json
+  checkpoint_path: outputs/weibo21_evolve_fold_1/meta-checkpoint.json

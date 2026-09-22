@@ -12,13 +12,29 @@ class TraceStore:
         输出：返回 `None`；初始化 `TraceStore` 的实例状态，构造参数非法时可能抛出异常。"""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._sequence = self._existing_line_count()
 
-    def append(self, trace: InferenceTrace) -> None:
+    def _existing_line_count(self) -> int:
+        if not self.path.is_file():
+            return 0
+        with self.path.open("r", encoding="utf-8") as stream:
+            return sum(1 for line in stream if line.strip())
+
+    def reset(self) -> None:
+        """Start a fresh JSONL trace log while preserving the configured path."""
+        self.path.write_text("", encoding="utf-8")
+        self._sequence = 0
+
+    def append(self, trace: InferenceTrace, *, context: dict | None = None) -> None:
         """函数作用：把一条新记录追加到持久化存储，并维护对象内的完成状态。
         输入要求：`self` 应为已初始化的 `TraceStore` 实例；`trace`（InferenceTrace）需符合函数签名约定。
         输出：返回 `None`；可能按函数职责修改对象状态或持久化文件。"""
+        row = asdict(trace)
+        if context:
+            row["training_context"] = {**context, "sequence": self._sequence}
         with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(asdict(trace), ensure_ascii=False, default=str) + "\n")
+            stream.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        self._sequence += 1
 
     def read_raw(self, *, allow_v1: bool = False) -> list[dict]:
         if not self.path.exists():

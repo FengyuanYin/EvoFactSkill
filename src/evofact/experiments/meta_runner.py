@@ -132,6 +132,7 @@ class MetaEvolutionRunner:
         resume: bool = False,
         evaluation_only: bool = False,
         progress: ProgressSink | None = None,
+        trace_log_path: Path | None = None,
     ) -> MetaEvolutionOutcome:
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`samples`（list[Sample]）需符合函数签名约定；`final_test_domains`（tuple[str, ...]，默认 `()`）需以关键字传入并符合签名约定；`resume`（bool，默认 `False`）需以关键字传入并符合签名约定；`evaluation_only`（bool，默认 `False`）需以关键字传入并符合签名约定。
@@ -240,6 +241,22 @@ class MetaEvolutionRunner:
         completed = set(saved.get("completed_episode_ids", ()))
         if not completed <= set(planned):
             raise ValueError("checkpoint contains unplanned completed episodes")
+        if trace_log_path is None and saved.get("trace_log"):
+            resolved_trace_log = Path(saved["trace_log"]).resolve()
+        elif trace_log_path is not None:
+            resolved_trace_log = (
+                trace_log_path if trace_log_path.is_absolute() else self.root / trace_log_path
+            ).resolve()
+        else:
+            resolved_trace_log = None
+        if saved.get("trace_log") and resolved_trace_log != Path(saved["trace_log"]).resolve():
+            raise ValueError("resume trace log differs from the checkpoint")
+        if trace_log_path is not None:
+            self.base.enable_trace_logging(
+                resolved_trace_log,
+                run_id=run_id,
+                resume=resume,
+            )
         results = [_episode_result_from(item) for item in saved.get("episode_results", ())]
         proposals = {
             key: _proposal_from(value) for key, value in saved.get("candidates", {}).items()
@@ -255,6 +272,7 @@ class MetaEvolutionRunner:
                     **self._checkpoint_extra(),
                     "baseline_skills": [asdict(s) for s in self.base.skills],
                     "run_id": run_id,
+                    "trace_log": str(resolved_trace_log) if resolved_trace_log else None,
                     "config_fingerprint": config_id,
                     "data_fingerprint": data_id,
                     "skillbank_snapshot_id": bank_id,
@@ -291,6 +309,7 @@ class MetaEvolutionRunner:
                 raise RuntimeError("meta-evolution baseline changed before episode evaluation")
             train_rows = [by_id[sample_id] for sample_id in episode.meta_train_sample_ids]
             test_rows = [by_id[sample_id] for sample_id in episode.meta_test_sample_ids]
+            test_rows = self._bounded_meta_test_rows(test_rows, episode.episode_id)
             inner = await self._evolve_episode(train_rows, episode, firewall, progress=progress)
             allowed_traces = {trace.trace_id for trace in inner["traces"]}
             episode_candidates = set()
@@ -312,27 +331,51 @@ class MetaEvolutionRunner:
                         raise ValueError("candidate fingerprint maps to different Packages")
                 candidate_skills = _apply_candidate(self.base.skills, proposal)
                 baseline_rows, candidate_rows = [], []
-                for repeat_index in range(self.config.gate.repeats):
+                repeats = self.config.meta_learning.evaluation_repeats or self.config.gate.repeats
+                for repeat_index in range(repeats):
+                    if self.config.meta_learning.isolate_candidate_budget:
+                        baseline_inputs = [
+                            replace(
+                                sample,
+                                sample_id=(
+                                    f"{sample.sample_id}::meta::{episode.episode_id}::"
+                                    f"{identity.fingerprint}::baseline::{repeat_index}"
+                                ),
+                            )
+                            for sample in test_rows
+                        ]
+                        candidate_inputs = [
+                            replace(
+                                sample,
+                                sample_id=(
+                                    f"{sample.sample_id}::meta::{episode.episode_id}::"
+                                    f"{identity.fingerprint}::candidate::{repeat_index}"
+                                ),
+                            )
+                            for sample in test_rows
+                        ]
+                    else:
+                        baseline_inputs = candidate_inputs = test_rows
                     _, baseline = await self.base.run(
-                        test_rows,
+                        baseline_inputs,
                         progress=progress,
                         task_name=f"meta-evolve {episode.episode_id}",
                         phase=f"meta-test baseline r{repeat_index + 1}",
                     )
                     _, candidate = await self.base.run(
-                        test_rows,
+                        candidate_inputs,
                         skills=candidate_skills,
                         progress=progress,
                         task_name=f"meta-evolve {episode.episode_id}",
                         phase=f"meta-test candidate r{repeat_index + 1}",
                     )
                     baseline_rows.extend(
-                        replace(row, sample_id=f"{row.sample_id}:r{repeat_index}")
-                        for row in baseline.per_sample
+                        replace(row, sample_id=f"{sample.sample_id}:r{repeat_index}")
+                        for sample, row in zip(test_rows, baseline.per_sample)
                     )
                     candidate_rows.extend(
-                        replace(row, sample_id=f"{row.sample_id}:r{repeat_index}")
-                        for row in candidate.per_sample
+                        replace(row, sample_id=f"{sample.sample_id}:r{repeat_index}")
+                        for sample, row in zip(test_rows, candidate.per_sample)
                     )
                 baseline_result, candidate_result = (
                     evaluate(baseline_rows),
@@ -379,6 +422,7 @@ class MetaEvolutionRunner:
                     **self._checkpoint_extra(),
                     "baseline_skills": [asdict(s) for s in self.base.skills],
                     "run_id": run_id,
+                    "trace_log": str(resolved_trace_log) if resolved_trace_log else None,
                     "config_fingerprint": config_id,
                     "data_fingerprint": data_id,
                     "skillbank_snapshot_id": bank_id,
@@ -461,6 +505,7 @@ class MetaEvolutionRunner:
                 **self._checkpoint_extra(),
                 "baseline_skills": [asdict(s) for s in self.base.skills],
                 "run_id": run_id,
+                "trace_log": str(resolved_trace_log) if resolved_trace_log else None,
                 "config_fingerprint": config_id,
                 "data_fingerprint": data_id,
                 "skillbank_snapshot_id": bank_id,
@@ -483,14 +528,96 @@ class MetaEvolutionRunner:
         """函数作用：负责`MetaEvolutionRunner` 中的 `_evolve_episode` 处理，封装调用方需要复用的业务步骤。
         输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；`train_rows`（未显式标注）需符合函数签名约定；`episode`（未显式标注）需符合函数签名约定；`firewall`（未显式标注）需符合函数签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
-        return await self.base.evolve_once(
+        return await self._evolve_rows_in_updates(
             train_rows,
-            generation_guard=lambda traces, reports: firewall.build_generation_view(
-                episode, traces, reports
-            ),
+            episode,
+            firewall,
             progress=progress,
             task_name=f"meta-evolve {episode.episode_id}",
         )
+
+    async def _evolve_rows_in_updates(
+        self,
+        rows,
+        episode,
+        firewall,
+        *,
+        progress=None,
+        task_name: str,
+    ):
+        """Generate bounded candidates from multiple small meta-train updates.
+
+        The active Skill Bank is intentionally frozen. Candidates produced by an
+        inner update are promoted only after evaluation on the episode's held-out
+        domain and cross-episode aggregation.
+        """
+        interval = self.config.evolution.update_interval_samples or len(rows)
+        limit = self.config.evolution.max_proposals_per_update
+        combined = {
+            "traces": [],
+            "sample_evaluations": [],
+            "attributions": [],
+            "utilities": {},
+            "distillation": [],
+            "proposals": [],
+            "package_candidates": {},
+        }
+        update_count = (len(rows) + interval - 1) // interval
+        for update_index, start in enumerate(range(0, len(rows), interval), start=1):
+            batch = rows[start : start + interval]
+            outcome = await self.base.evolve_once(
+                batch,
+                generation_guard=lambda traces, reports: firewall.build_generation_view(
+                    episode, traces, reports
+                ),
+                progress=progress,
+                task_name=f"{task_name} update {update_index}/{update_count}",
+            )
+            proposals = list(outcome["proposals"])
+            if limit:
+                proposals = proposals[:limit]
+            proposal_ids = {proposal.proposal_id for proposal in proposals}
+            combined["traces"].extend(outcome["traces"])
+            combined["sample_evaluations"].extend(outcome["evaluation"].per_sample)
+            combined["attributions"].extend(outcome["attributions"])
+            combined["utilities"].update(outcome["utilities"])
+            combined["distillation"].append(outcome["distillation"])
+            combined["proposals"].extend(proposals)
+            combined["package_candidates"].update(
+                {
+                    proposal_id: candidate
+                    for proposal_id, candidate in outcome["package_candidates"].items()
+                    if proposal_id in proposal_ids
+                }
+            )
+        return {
+            "traces": combined["traces"],
+            "evaluation": evaluate(combined["sample_evaluations"]),
+            "attributions": combined["attributions"],
+            "utilities": combined["utilities"],
+            "distillation": combined["distillation"],
+            "proposals": combined["proposals"],
+            "package_candidates": combined["package_candidates"],
+        }
+
+    def _bounded_meta_test_rows(self, rows, episode_id: str):
+        """Select a deterministic, domain-balanced outer validation subset."""
+        limit = self.config.meta_learning.max_meta_test_samples_per_domain
+        if not limit:
+            return rows
+        groups = {}
+        for sample in rows:
+            groups.setdefault(sample.domain or sample.dataset, []).append(sample)
+        selected = []
+        for domain in sorted(groups):
+            ranked = sorted(
+                groups[domain],
+                key=lambda sample: _stable_digest(
+                    self.config.seed, episode_id, domain, sample.sample_id
+                ),
+            )
+            selected.extend(ranked[:limit])
+        return selected
 
     def _checkpoint_extra(self):
         """函数作用：负责`MetaEvolutionRunner` 中的 `_checkpoint_extra` 处理，封装调用方需要复用的业务步骤。
@@ -593,6 +720,8 @@ class MetaEvolutionRunner:
             audit={
                 "decisions": [asdict(d) for d in decisions],
                 "proposals": {key: asdict(value) for key, value in proposals.items()},
+                "model_identity": self.base.model_identity(),
+                "pricing_identity": self.base.pricing_identity(),
             },
         )
         self.base.packages = list(self.repository.active_packages().values())

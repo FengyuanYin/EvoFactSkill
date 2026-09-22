@@ -58,10 +58,66 @@ class PricingConfig:
 
 
 @dataclass(frozen=True)
+class OptimizerBackendConfig:
+    enabled: bool = False
+    backend: str = "openai-compatible"
+    model: str | None = None
+    model_env: str | None = None
+    base_url: str | None = None
+    base_url_env: str | None = None
+    api_key_env: str = "EVOFACT_OPTIMIZER_API_KEY"
+    provider: str = "openai-compatible"
+    pricing_table_path: Path | None = None
+    pricing_table_path_env: str | None = None
+    temperature: float = 1.0
+    require_distinct_base_url: bool = True
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"mock", "openai-compatible"}:
+            raise ValueError("optimizer_backend.backend must be mock or openai-compatible")
+        if not 0 <= self.temperature <= 2:
+            raise ValueError("optimizer_backend.temperature must be between 0 and 2")
+        if not self.enabled or self.backend == "mock":
+            return
+        if bool(self.model) == bool(self.model_env):
+            raise ValueError("configure exactly one optimizer model or model_env")
+        if bool(self.base_url) == bool(self.base_url_env):
+            raise ValueError("configure exactly one optimizer base_url or base_url_env")
+        if self.pricing_table_path is not None and self.pricing_table_path_env:
+            raise ValueError("configure at most one optimizer pricing table source")
+
+    @staticmethod
+    def _required_env(name: str | None, field_name: str) -> str:
+        if not name:
+            raise ValueError(f"optimizer_backend.{field_name} is not configured")
+        value = os.getenv(name, "").strip()
+        if not value:
+            raise ValueError(f"missing optimizer environment variable: {name}")
+        return value
+
+    def resolved_model(self) -> str:
+        return self.model or self._required_env(self.model_env, "model_env")
+
+    def resolved_base_url(self) -> str:
+        return self.base_url or self._required_env(self.base_url_env, "base_url_env")
+
+    def resolved_api_key(self) -> str:
+        return self._required_env(self.api_key_env, "api_key_env")
+
+    def resolved_pricing_table_path(self) -> Path | None:
+        if self.pricing_table_path is not None:
+            return self.pricing_table_path
+        if self.pricing_table_path_env:
+            return Path(self._required_env(self.pricing_table_path_env, "pricing_table_path_env"))
+        return None
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     batch_size: int = 16
     max_concurrent_samples: int = 4
     progress: str = "auto"
+    trace_log: Path | None = None
 
     def __post_init__(self) -> None:
         if self.batch_size < 1 or self.max_concurrent_samples < 1:
@@ -107,6 +163,9 @@ class MetaLearningConfig:  # 元学习配置
     aggregate_across_episodes: bool = True
     enforce_negative_transfer: bool = True
     enforce_worst_domain: bool = True
+    evaluation_repeats: int = 0
+    max_meta_test_samples_per_domain: int = 0
+    isolate_candidate_budget: bool = False
     checkpoint_path: Path = Path("outputs/demse/checkpoint.json")
 
     def __post_init__(self) -> None:
@@ -125,6 +184,10 @@ class MetaLearningConfig:  # 元学习配置
             raise ValueError("invalid meta-learning metric constraint")
         if self.max_calibration_increase < 0:
             raise ValueError("max_calibration_increase must be non-negative")
+        if self.evaluation_repeats < 0:
+            raise ValueError("meta_learning.evaluation_repeats must be non-negative")
+        if self.max_meta_test_samples_per_domain < 0:
+            raise ValueError("meta_learning.max_meta_test_samples_per_domain must be non-negative")
 
 
 @dataclass
@@ -151,6 +214,19 @@ class EvolutionConfig:
 
     max_total_chars: int = 300000
 
+    # Number of meta-train samples consumed before requesting another candidate.
+    # Zero preserves the legacy single-update behavior for the complete episode.
+    update_interval_samples: int = 0
+
+    # Zero keeps every proposal. A positive value bounds optimizer and validation
+    # work independently for each inner update.
+    max_proposals_per_update: int = 0
+
+    # Zero preserves exhaustive attribution. Positive limits reduce the number
+    # of counterfactual inference calls made by each evolution update.
+    max_attribution_samples_per_update: int = 0
+    max_counterfactuals_per_sample: int = 0
+
     def __post_init__(self) -> None:
         if self.proposer not in {"rule", "llm"}:
             raise ValueError("evolution.proposer must be rule or llm")
@@ -173,6 +249,15 @@ class EvolutionConfig:
 
         if invalid:
             raise ValueError("evolution limits must be positive: " + ", ".join(invalid))
+
+        update_limits = (
+            self.update_interval_samples,
+            self.max_proposals_per_update,
+            self.max_attribution_samples_per_update,
+            self.max_counterfactuals_per_sample,
+        )
+        if any(value < 0 for value in update_limits):
+            raise ValueError("evolution update controls must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -244,6 +329,7 @@ class AppConfig:  # runner 配置
     dag: DAGConfig = field(default_factory=DAGConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
+    optimizer_backend: OptimizerBackendConfig = field(default_factory=OptimizerBackendConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
 
     def __post_init__(self) -> None:
@@ -354,7 +440,16 @@ def load_config(path: str | Path) -> AppConfig:
     if pricing_raw.get("table_path") is not None:
         pricing_raw["table_path"] = Path(pricing_raw["table_path"])
     pricing = PricingConfig(**pricing_raw)
-    execution = ExecutionConfig(**raw.pop("execution", {}))
+    optimizer_backend_raw = raw.pop("optimizer_backend", {})
+    if optimizer_backend_raw.get("pricing_table_path") is not None:
+        optimizer_backend_raw["pricing_table_path"] = Path(
+            optimizer_backend_raw["pricing_table_path"]
+        )
+    optimizer_backend = OptimizerBackendConfig(**optimizer_backend_raw)
+    execution_raw = raw.pop("execution", {})
+    if execution_raw.get("trace_log") is not None:
+        execution_raw["trace_log"] = Path(execution_raw["trace_log"])
+    execution = ExecutionConfig(**execution_raw)
     meta_raw = raw.pop("meta_learning", {})
     if "checkpoint_path" in meta_raw:
         meta_raw["checkpoint_path"] = Path(meta_raw["checkpoint_path"])
@@ -371,6 +466,7 @@ def load_config(path: str | Path) -> AppConfig:
         dag=dag,
         budget=budget,
         pricing=pricing,
+        optimizer_backend=optimizer_backend,
         execution=execution,
         data=data,
         **raw,

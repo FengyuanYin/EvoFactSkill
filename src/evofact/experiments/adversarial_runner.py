@@ -85,6 +85,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         resume=False,
         evaluation_only=False,
         progress=None,
+        trace_log_path=None,
     ):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `AdversarialEvolutionRunner` 实例；`samples`（未显式标注）需符合函数签名约定；`final_test_domains`（未显式标注，默认 `()`）需以关键字传入并符合签名约定；`resume`（未显式标注，默认 `False`）需以关键字传入并符合签名约定；`evaluation_only`（未显式标注，默认 `False`）需以关键字传入并符合签名约定。
@@ -140,6 +141,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
             resume=resume,
             evaluation_only=evaluation_only,
             progress=progress,
+            trace_log_path=trace_log_path,
         )
         if not evaluation_only:
             self._commit_generation(store_path, outcome.run_id)
@@ -444,11 +446,10 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         )
         inner_firewall = CandidateFirewall(rows, episode.final_test_domains)
         phase("evolve")
-        inner = await self.base.evolve_once(
+        inner = await self._evolve_rows_in_updates(
             rows,
-            generation_guard=lambda traces, reports: inner_firewall.build_generation_view(
-                inner_episode, traces, reports
-            ),
+            inner_episode,
+            inner_firewall,
             progress=progress,
             task_name=task_name,
         )
