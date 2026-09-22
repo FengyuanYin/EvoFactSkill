@@ -169,6 +169,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
   --sample-concurrency 4 \
   evolve \
   --checkpoint outputs/weibo21-evolve-checkpoint.json \
+  --trace-log outputs/weibo21-evolve-traces.jsonl \
   --output outputs/evolve.json
 
 # Resume after the last atomically completed batch
@@ -178,6 +179,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
   --sample-concurrency 4 \
   evolve --resume \
   --checkpoint outputs/weibo21-evolve-checkpoint.json \
+  --trace-log outputs/weibo21-evolve-traces.jsonl \
   --output outputs/evolve-resumed.json
 
 # Evaluate proposals and gates without updating the active package bank
@@ -187,6 +189,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
 # Cross-domain meta-learning episodes
 evofact --config configs/weibo21_cross_domain.yaml \
   meta-evolve --episodes 8 --strategy leave_one_domain_out \
+  --trace-log outputs/weibo21-meta-traces.jsonl \
   --output outputs/meta-evolve.json
 
 # Evaluate an existing meta-evolution checkpoint without proposing updates
@@ -196,6 +199,80 @@ evofact --config configs/weibo21_cross_domain.yaml \
 ```
 
 Evolution is batch-style: every sample in one batch uses the same active package snapshot; candidate packages are considered only after the batch/validation boundary. This prevents mid-batch parameter drift.
+
+Every training command writes all detector inference traces to one UTF-8 JSONL log. `evolve` uses a run-ID-specific file by default; `meta-evolve` and `adversarial-evolve` use command-specific files under `output_dir`. Use `--trace-log` to select an explicit path. Each line is a complete `InferenceTrace` plus `training_context` containing the run ID, task, phase, sequence number, sample position, and active Skill IDs. The same file therefore includes training forward passes, counterfactual passes, validation baselines, candidate validation, meta-train, meta-test, and adversarial detector probes. Generator request/response audits remain in the generation audit store because they are not detector `InferenceTrace` objects.
+
+The recommended persistent setting is `execution.trace_log` in the experiment YAML. `--trace-log` remains an optional one-run override. Resolution order is CLI override, checkpoint-recorded path during resume, YAML path, then the command default:
+
+```yaml
+execution:
+  batch_size: 16
+  max_concurrent_samples: 16
+  progress: auto
+  trace_log: outputs/weibo21_cross_domain/training-traces.jsonl
+```
+
+A fresh run truncates its selected trace log. `--resume` appends to the checkpoint-recorded log and refuses a missing or different file, preventing a resumed experiment from silently splitting traces across files. An interrupted, uncommitted batch can appear twice after resume; those records are intentionally retained as API-usage audit evidence and are distinguishable by `training_context.sequence` and phase.
+
+`meta-evolve` additionally supports frequent, bounded candidate updates inside each
+meta-training episode. These controls do not alter `test` or its inference path:
+
+```yaml
+evolution:
+  update_interval_samples: 25
+  max_proposals_per_update: 1
+  max_attribution_samples_per_update: 8
+  max_counterfactuals_per_sample: 1
+
+meta_learning:
+  evaluation_repeats: 1
+  max_meta_test_samples_per_domain: 10
+  isolate_candidate_budget: true
+```
+
+For each leave-one-domain-out episode, the active Package Bank remains frozen while
+the meta-train partition is consumed in 25-sample updates. Each update can emit at
+most one candidate, attribution is restricted to at most eight failed samples, and
+each selected sample triggers at most one counterfactual inference. Candidates are
+then evaluated on a deterministic, domain-balanced subset of the held-out source
+domain. The true `data.final_test_domains` never enter candidate generation or the
+Meta Gate. A zero value restores the legacy unbounded/full-partition behavior;
+`evaluation_repeats: 0` inherits `gate.repeats`. Candidate budget isolation gives
+each baseline/candidate comparison its own per-sample allowance while preserving
+the cumulative run-level call, token, and cost budgets.
+
+The forward pipeline and the training-only Package Optimizer may use different
+OpenAI-compatible endpoints. Weibo21 configurations keep the inexpensive forward
+model in the existing top-level fields and resolve the optimizer endpoint from
+separate environment variables:
+
+```powershell
+$env:DEEPSEEK_API_KEY = "<forward-api-key>"
+$env:EVOFACT_OPTIMIZER_BASE_URL = "https://<optimizer-provider>/v1"
+$env:EVOFACT_OPTIMIZER_MODEL = "<advanced-model>"
+$env:EVOFACT_OPTIMIZER_API_KEY = "<optimizer-api-key>"
+$env:EVOFACT_OPTIMIZER_PRICING_TABLE = "pricing/<optimizer-pricing>.json"
+```
+
+```yaml
+optimizer_backend:
+  enabled: true
+  backend: openai-compatible
+  model_env: EVOFACT_OPTIMIZER_MODEL
+  base_url_env: EVOFACT_OPTIMIZER_BASE_URL
+  api_key_env: EVOFACT_OPTIMIZER_API_KEY
+  provider: openai-compatible
+  pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
+  temperature: 1.0
+  require_distinct_base_url: true
+```
+
+Router, Specialist, Judge, counterfactual inference, Meta-test, and final test keep
+using the top-level forward model. Only `PackageOptimizerAgent` uses the optimizer
+backend. When cost-aware promotion is enabled, the optimizer pricing table is
+mandatory and its `provider` must match `optimizer_backend.provider`. Checkpoints
+and Skill Bank provenance record both resolved model names and endpoint identities,
+but never API keys. Resume fails if the effective model/pricing identity changes.
 
 For a configured cross-domain dataset, `--limit` is the **total source-training budget**, not a per-domain limit and not a final-test limit. The sampler allocates it as evenly as possible across `data.train_domains` using the experiment seed. With the eight Weibo21 source domains, `--limit 400` selects 50 training samples from each domain. If a domain lacks its nominal quota, the deficit is deterministically reassigned to domains with remaining samples and disclosed in `data_sampling.selected_by_domain`.
 
@@ -289,6 +366,7 @@ evofact --config configs/adversarial_llm.yaml \
   adversarial-evolve \
   --samples data/adversarial/samples.jsonl \
   --facts data/adversarial/facts.jsonl \
+  --trace-log outputs/adversarial-evolve-traces.jsonl \
   --output outputs/adversarial-evolve.json
 
 # Inspect a generation audit
@@ -357,6 +435,7 @@ execution:
   batch_size: 16
   max_concurrent_samples: 8
   progress: auto
+  trace_log: outputs/experiment/training-traces.jsonl
 
 evolution:
   enabled: true

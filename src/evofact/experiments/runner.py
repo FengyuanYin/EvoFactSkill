@@ -1,5 +1,6 @@
 import hashlib
 import inspect
+import json
 import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -41,6 +42,7 @@ from evofact.runtime.inference import InferenceRuntime
 from evofact.runtime.mock_backend import MockBackend
 from evofact.runtime.openai_backend import OpenAICompatibleBackend
 from evofact.runtime.progress import ProgressEvent, ProgressSink
+from evofact.runtime.trace_store import TraceStore
 from evofact.security.scanner import scan_resources
 from evofact.skills.candidates import apply_candidate
 from evofact.skills.loader import load_skill_package
@@ -117,6 +119,30 @@ class ExperimentRunner:
         self.label_contract_registry = DataRegistry().label_contracts
         self.label_contract_registry.register(fixture_binary_contract())
         self._operation_budget_manager: BudgetManager | None = None
+        self._trace_store: TraceStore | None = None
+        self._trace_run_id: str | None = None
+
+    def enable_trace_logging(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        resume: bool = False,
+    ) -> Path:
+        """Persist every inference trace produced by this training runner to one JSONL file."""
+        store = TraceStore(path)
+        if resume:
+            if not store.path.is_file():
+                raise ValueError(f"training trace log does not exist for resume: {store.path}")
+        else:
+            store.reset()
+        self._trace_store = store
+        self._trace_run_id = run_id
+        return store.path
+
+    @property
+    def trace_log_path(self) -> Path | None:
+        return self._trace_store.path if self._trace_store is not None else None
 
     def _backend(self):
         """函数作用：负责`ExperimentRunner` 中的 `_backend` 处理，封装调用方需要复用的业务步骤。
@@ -141,19 +167,100 @@ class ExperimentRunner:
             pricing_table=pricing_table,
         )
 
+    def _optimizer_backend(self):
+        """Build the training-only optimizer backend without changing inference."""
+        config = self.config.optimizer_backend
+        if not config.enabled:
+            return self._backend()
+        if config.backend == "mock":
+            return MockBackend()
+        base_url = config.resolved_base_url()
+        if (
+            config.require_distinct_base_url
+            and base_url.rstrip("/") == self.config.base_url.rstrip("/")
+        ):
+            raise ValueError("optimizer and forward base_url must be different")
+        pricing_table = None
+        pricing_path = config.resolved_pricing_table_path()
+        if pricing_path is not None:
+            if not pricing_path.is_absolute():
+                pricing_path = self.root / pricing_path
+            pricing_table = load_pricing_table(pricing_path)
+            if pricing_table.provider != config.provider:
+                raise ValueError("optimizer pricing provider does not match configured provider")
+        elif self.config.pricing.require_cost_for_promotion:
+            raise ValueError(
+                "optimizer pricing table is required when promotion requires complete cost data"
+            )
+        return OpenAICompatibleBackend(
+            base_url,
+            config.resolved_api_key(),
+            config.resolved_model(),
+            provider=config.provider,
+            pricing_table=pricing_table,
+            temperature=config.temperature,
+        )
+
     def pricing_identity(self) -> str:
         """Fingerprint actual pricing contents, not only the configured path."""
         if self.config.pricing.table_path is None:
-            return hashlib.sha256(
+            forward_identity = hashlib.sha256(
                 f"unpriced:{self.config.pricing.provider}".encode("utf-8")
             ).hexdigest()
-        path = self.config.pricing.table_path
-        if not path.is_absolute():
-            path = self.root / path
-        table = load_pricing_table(path)
-        if table.provider != self.config.pricing.provider:
-            raise ValueError("pricing provider does not match configured provider")
-        return table.identity
+        else:
+            path = self.config.pricing.table_path
+            if not path.is_absolute():
+                path = self.root / path
+            table = load_pricing_table(path)
+            if table.provider != self.config.pricing.provider:
+                raise ValueError("pricing provider does not match configured provider")
+            forward_identity = table.identity
+        optimizer = self.config.optimizer_backend
+        if not optimizer.enabled:
+            return forward_identity
+        optimizer_path = optimizer.resolved_pricing_table_path()
+        optimizer_pricing_identity = f"unpriced:{optimizer.provider}"
+        if optimizer_path is not None:
+            if not optimizer_path.is_absolute():
+                optimizer_path = self.root / optimizer_path
+            optimizer_table = load_pricing_table(optimizer_path)
+            if optimizer_table.provider != optimizer.provider:
+                raise ValueError("optimizer pricing provider does not match configured provider")
+            optimizer_pricing_identity = optimizer_table.identity
+        payload = {
+            "forward": forward_identity,
+            "optimizer": optimizer_pricing_identity,
+            "optimizer_provider": optimizer.provider,
+            "optimizer_model": optimizer.resolved_model(),
+            "optimizer_base_url": optimizer.resolved_base_url(),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def model_identity(self) -> dict:
+        """Return credential-free model provenance for checkpoints and Skill Banks."""
+        optimizer = self.config.optimizer_backend
+        return {
+            "forward": {
+                "backend": self.config.backend,
+                "provider": self.config.pricing.provider,
+                "model": self.config.model,
+                "base_url": self.config.base_url,
+                "temperature": 0,
+            },
+            "optimizer": (
+                {
+                    "backend": optimizer.backend,
+                    "provider": optimizer.provider,
+                    "model": optimizer.resolved_model(),
+                    "base_url": optimizer.resolved_base_url(),
+                    "temperature": optimizer.temperature,
+                }
+                if optimizer.enabled
+                else {"inherits_forward": True}
+            ),
+        }
 
     def _budget_manager(self) -> BudgetManager:
         if self._operation_budget_manager is None:
@@ -271,6 +378,18 @@ class ExperimentRunner:
         )
         traces = [trace for trace, _ in pairs]
         evaluations = [evaluation for _, evaluation in pairs]
+        if self._trace_store is not None:
+            for sample_index, trace in enumerate(traces):
+                self._trace_store.append(
+                    trace,
+                    context={
+                        "run_id": self._trace_run_id,
+                        "task": task_name,
+                        "phase": phase,
+                        "sample_index": sample_index,
+                        "skill_ids": [skill.skill_id for skill in skill_snapshot],
+                    },
+                )
         return traces, evaluate(evaluations)
 
     async def evolve_once(
@@ -306,14 +425,35 @@ class ExperimentRunner:
             }
         tracker = UtilityTracker()
         jobs = []
+        attribution_limit = self.config.evolution.max_attribution_samples_per_update
+        if attribution_limit:
+            attributed_indexes = [
+                index for index, report in enumerate(reports) if report.error_types
+            ][:attribution_limit]
+        else:
+            attributed_indexes = list(range(len(reports)))
+        attributed = set(attributed_indexes)
         for trace_index, (trace, sample) in enumerate(zip(traces, rows)):
-            for skill_index, sid in enumerate(trace.routing.selected_skill_ids):
+            if trace_index not in attributed:
+                continue
+            selected_skill_ids = trace.routing.selected_skill_ids
+            counterfactual_limit = self.config.evolution.max_counterfactuals_per_sample
+            if counterfactual_limit:
+                selected_skill_ids = selected_skill_ids[:counterfactual_limit]
+            for skill_index, sid in enumerate(selected_skill_ids):
                 reduced = [skill for skill in self.skills if skill.skill_id != sid]
                 jobs.append((trace_index, skill_index, sid, sample, reduced))
 
         async def counterfactual(job):
             trace_index, skill_index, sid, sample, reduced = job
-            cf_trace = (await self.run([sample], skills=reduced))[0][0]
+            cf_trace = (
+                await self.run(
+                    [sample],
+                    skills=reduced,
+                    task_name=task_name,
+                    phase=f"counterfactual without {sid}",
+                )
+            )[0][0]
             return trace_index, skill_index, sid, cf_trace
 
         def counterfactual_done(completed, total):
@@ -374,7 +514,7 @@ class ExperimentRunner:
             if len(optimizer_packages) != 1:
                 raise ValueError("optimizer Package must resolve to exactly one META Package")
             optimizer = PackageOptimizerAgent(
-                backend=self._backend(),
+                backend=self._optimizer_backend(),
                 optimizer_package=optimizer_packages[0],
                 budget_manager=self._budget_manager(),
             )

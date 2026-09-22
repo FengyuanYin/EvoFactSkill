@@ -351,6 +351,7 @@ class OpenAICompatibleBackend:
         *,
         provider: str = "openai-compatible",
         pricing_table=None,
+        temperature: float = 0,
     ):
         """函数作用：创建并初始化 `OpenAICompatibleBackend` 对象，为后续方法调用准备依赖和初始状态。
         输入要求：`self` 应为已初始化的 `OpenAICompatibleBackend` 实例；`base_url`（str）需符合函数签名约定；`api_key`（str）需符合函数签名约定；`model`（str）需符合函数签名约定。
@@ -360,6 +361,7 @@ class OpenAICompatibleBackend:
         self.model = model
         self.provider = provider
         self.pricing_table = pricing_table
+        self.temperature = temperature
         self._usage_context: ContextVar[UsageDetails | None] = ContextVar(
             f"usage-{id(self)}", default=None
         )
@@ -380,7 +382,7 @@ class OpenAICompatibleBackend:
                     },
                 ],
                 "response_format": {"type": "json_object"},
-                "temperature": 0,
+                "temperature": self.temperature,
             }
         ).encode()
         req = urllib.request.Request(
