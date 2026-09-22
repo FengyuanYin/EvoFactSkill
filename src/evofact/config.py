@@ -187,9 +187,7 @@ class MetaLearningConfig:  # 元学习配置
         if self.evaluation_repeats < 0:
             raise ValueError("meta_learning.evaluation_repeats must be non-negative")
         if self.max_meta_test_samples_per_domain < 0:
-            raise ValueError(
-                "meta_learning.max_meta_test_samples_per_domain must be non-negative"
-            )
+            raise ValueError("meta_learning.max_meta_test_samples_per_domain must be non-negative")
 
 
 @dataclass

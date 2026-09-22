@@ -331,10 +331,7 @@ class MetaEvolutionRunner:
                         raise ValueError("candidate fingerprint maps to different Packages")
                 candidate_skills = _apply_candidate(self.base.skills, proposal)
                 baseline_rows, candidate_rows = [], []
-                repeats = (
-                    self.config.meta_learning.evaluation_repeats
-                    or self.config.gate.repeats
-                )
+                repeats = self.config.meta_learning.evaluation_repeats or self.config.gate.repeats
                 for repeat_index in range(repeats):
                     if self.config.meta_learning.isolate_candidate_budget:
                         baseline_inputs = [

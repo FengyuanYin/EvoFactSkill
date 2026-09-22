@@ -70,6 +70,4 @@ def test_weibo_config_declares_environment_backed_optimizer():
     assert config.optimizer_backend.model_env == "EVOFACT_OPTIMIZER_MODEL"
     assert config.optimizer_backend.base_url_env == "EVOFACT_OPTIMIZER_BASE_URL"
     assert config.optimizer_backend.api_key_env == "EVOFACT_OPTIMIZER_API_KEY"
-    assert config.optimizer_backend.pricing_table_path_env == (
-        "EVOFACT_OPTIMIZER_PRICING_TABLE"
-    )
+    assert config.optimizer_backend.pricing_table_path_env == ("EVOFACT_OPTIMIZER_PRICING_TABLE")

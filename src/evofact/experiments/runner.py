@@ -175,9 +175,8 @@ class ExperimentRunner:
         if config.backend == "mock":
             return MockBackend()
         base_url = config.resolved_base_url()
-        if (
-            config.require_distinct_base_url
-            and base_url.rstrip("/") == self.config.base_url.rstrip("/")
+        if config.require_distinct_base_url and base_url.rstrip("/") == self.config.base_url.rstrip(
+            "/"
         ):
             raise ValueError("optimizer and forward base_url must be different")
         pricing_table = None
@@ -234,9 +233,7 @@ class ExperimentRunner:
             "optimizer_model": optimizer.resolved_model(),
             "optimizer_base_url": optimizer.resolved_base_url(),
         }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True).encode("utf-8")
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     def model_identity(self) -> dict:
         """Return credential-free model provenance for checkpoints and Skill Banks."""

@@ -79,6 +79,4 @@ def test_training_commands_accept_explicit_trace_log() -> None:
 
 def test_weibo_config_declares_training_trace_log() -> None:
     config = load_config(ROOT / "configs/weibo21_cross_domain.yaml")
-    assert config.execution.trace_log == Path(
-        "outputs/weibo21_cross_domain/training-traces.jsonl"
-    )
+    assert config.execution.trace_log == Path("outputs/weibo21_cross_domain/training-traces.jsonl")
