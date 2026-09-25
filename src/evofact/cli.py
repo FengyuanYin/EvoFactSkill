@@ -467,17 +467,22 @@ async def _run_impl(args, progress):
             ]
             if len(optimizer_packages) != 1:
                 raise ValueError("optimizer Package must resolve to exactly one Package")
-            candidate = await PackageOptimizerAgent(
+            outcome = await PackageOptimizerAgent(
                 runner._backend(),
                 optimizer_packages[0],
+                config=config.evolution,
                 budget_manager=runner._budget_manager(),
             ).propose(
                 champion,
                 package_bank,
                 audits=audits,
             )
+            candidate = outcome.candidate
             if candidate is None:
-                raise ValueError("Package Optimizer proposed no Generator change")
+                raise ValueError(
+                    "Package Optimizer proposed no Generator change"
+                    f" (status={outcome.status}, reason={outcome.reason})"
+                )
             package = candidate.package
         validation = validate_package(package)
         if not validation.valid:

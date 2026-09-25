@@ -32,7 +32,12 @@ optimizer_backend:
   api_key_env: EVOFACT_OPTIMIZER_API_KEY
   provider: deepseek
   pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
-  temperature: 1.0
+  # 低温：改写 Skill 指令/文件需要可复现，1.0 会让同一输入产出差异很大的 patch，
+  # 也让"为什么被拒"无法归因。
+  temperature: 0.2
+  # 显式给出补全上限：整包改写要塞进一个 JSON 字符串，被服务端默认上限截断就会
+  # 变成静默的 JSON 解析失败。
+  max_output_tokens: 8192
 
 # DeepSeek official peak rates captured on 2026-09-18. Refresh this dated table
 # before a publication run; off-peak billing can be lower.

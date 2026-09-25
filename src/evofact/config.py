@@ -73,6 +73,10 @@ class OptimizerBackendConfig:
     pricing_table_path: Path | None = None
     pricing_table_path_env: str | None = None
     temperature: float = 1.0
+    # Explicit completion cap for optimizer calls. A full Package rewrite inside one JSON
+    # string can otherwise be truncated by the provider default, which surfaces only as a
+    # silent JSON parse failure.
+    max_output_tokens: int | None = None
     # Legacy config field: accepted for old YAML files, but endpoint reuse is allowed.
     require_distinct_base_url: bool = False
 
@@ -81,6 +85,8 @@ class OptimizerBackendConfig:
             raise ValueError("optimizer_backend.backend must be mock or openai-compatible")
         if not 0 <= self.temperature <= 2:
             raise ValueError("optimizer_backend.temperature must be between 0 and 2")
+        if self.max_output_tokens is not None and self.max_output_tokens < 1:
+            raise ValueError("optimizer_backend.max_output_tokens must be positive or null")
         if not self.enabled or self.backend == "mock":
             return
         if bool(self.model) == bool(self.model_env):

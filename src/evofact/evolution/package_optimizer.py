@@ -5,10 +5,19 @@ import base64
 import hashlib
 import logging
 import uuid
+from collections import Counter
+from dataclasses import dataclass
 
+from evofact.config import EvolutionConfig
 from evofact.core.budget_models import BudgetRequest
 from evofact.core.frontmatter import normalize_newlines, parse_frontmatter, render_frontmatter
-from evofact.core.models import SkillKind, SkillScope, SkillStatus, Trigger
+from evofact.core.models import (
+    EvolutionProposal,
+    SkillKind,
+    SkillScope,
+    SkillStatus,
+    Trigger,
+)
 from evofact.core.package_models import (
     FileOperation,
     FileOperationKind,
@@ -26,7 +35,11 @@ from evofact.runtime.node_runner import _usage_details
 from evofact.skills.package_adapter import package_to_skill_spec
 
 from .optimizer_context import build_optimizer_context
-from .package_candidate import build_package_addition_candidate, build_package_candidate
+from .package_candidate import (
+    PackageCandidate,
+    build_package_addition_candidate,
+    build_package_candidate,
+)
 
 ALLOWED_TARGET_KINDS = {SkillKind.ROUTER, SkillKind.SPECIALIST, SkillKind.JUDGE, SkillKind.WORKFLOW}
 LOGGER = logging.getLogger(__name__)
@@ -344,6 +357,21 @@ def legacy_instruction_edit_to_patch(
     )
 
 
+@dataclass(frozen=True)
+class OptimizerOutcome:
+    """What one optimizer attempt produced, including why it produced nothing.
+
+    ``status`` is one of ``candidate`` (a validated PackageCandidate is attached),
+    ``no_change`` (the optimizer deliberately proposed nothing), ``fallback`` (the LLM
+    path failed and the rule proposer supplied ``proposal``) or ``skipped``.
+    """
+
+    status: str
+    reason: str = ""
+    candidate: PackageCandidate | None = None
+    proposal: EvolutionProposal | None = None
+
+
 class PackageOptimizerAgent:
     """Model-facing optimizer for complete Skill Packages.
 
@@ -352,63 +380,115 @@ class PackageOptimizerAgent:
     outside the model-controlled boundary.
     """
 
-    def __init__(self, backend, optimizer_package: SkillPackage, *, budget_manager=None):
+    def __init__(
+        self,
+        backend,
+        optimizer_package: SkillPackage,
+        *,
+        config: EvolutionConfig | None = None,
+        budget_manager=None,
+        rule_fallback=None,
+    ):
         if optimizer_package.manifest.kind != SkillKind.META:
             raise ValueError("optimizer_package must be a META Package")
         self.backend = backend
         self.optimizer_package = optimizer_package
         self.optimizer_skill = package_to_skill_spec(optimizer_package)
+        self.config = config if config is not None else EvolutionConfig()
         self.budget_manager = budget_manager
+        # Injected by the runner so the agent stays free of Skill-bank knowledge.
+        self.rule_fallback = rule_fallback
+        self.skips: Counter[str] = Counter()
+
+    def _skipped(self, reason: str) -> OptimizerOutcome:
+        self.skips[reason] += 1
+        return OptimizerOutcome("skipped", reason)
+
+    def _failed(self, reason: str, reports, cluster_id: str) -> OptimizerOutcome:
+        """Record a failure and, when configured, let the rule proposer answer instead."""
+        if not self.config.fallback_to_rule or self.rule_fallback is None:
+            return self._skipped(reason)
+        self.skips[f"fallback:{reason}"] += 1
+        proposal = self.rule_fallback(cluster_id, reports)
+        if proposal is None:
+            return self._skipped(f"{reason}+no_rule_proposal")
+        return OptimizerOutcome("fallback", reason, proposal=proposal)
 
     async def propose(
         self,
         target: SkillPackage,
         packages,
         *,
+        cluster_id: str = "",
         reports=(),
         traces=(),
         audits=(),
-    ):
+        distillation=None,
+        prior_proposals=(),
+    ) -> OptimizerOutcome:
         if target.skill_id == self.optimizer_package.skill_id:
             raise ValueError("optimizer cannot optimize itself")
-        context = build_optimizer_context(
-            target=target,
-            reports=reports,
-            traces=traces,
-            audits=audits,
-        )
+        try:
+            context = build_optimizer_context(
+                target=target,
+                reports=reports,
+                traces=traces,
+                audits=audits,
+                distillation=distillation,
+                prior_proposals=prior_proposals,
+                max_reports=self.config.max_reports,
+                max_text_chars=self.config.max_text_chars,
+                max_total_chars=self.config.max_total_chars,
+            )
+        except ValueError as exc:
+            LOGGER.warning("Skipping optimizer context for %s: %s", target.skill_id, exc)
+            return self._failed(f"context:{type(exc).__name__}", reports, cluster_id)
         reservation = None
         # Each proposal is a separate budget unit. Reusing only the target ID
         # would exhaust its per-sample call cap across unrelated training batches.
         sample_id = f"package-optimizer:{target.skill_id}:{uuid.uuid4().hex}"
         try:
-            if self.budget_manager is not None:
-                async with self.budget_manager.concurrency(sample_id):
-                    reservation = await self.budget_manager.reserve(
-                        sample_id,
-                        BudgetRequest(calls=1, tokens=4000, purpose="package_optimizer"),
-                    )
-                    result = await asyncio.wait_for(
-                        self.backend.optimize_package(context, self.optimizer_skill),
-                        self.budget_manager.limits.call_timeout_ms / 1000,
-                    )
-            else:
-                result = await self.backend.optimize_package(context, self.optimizer_skill)
+            try:
+                if self.budget_manager is not None:
+                    async with self.budget_manager.concurrency(sample_id):
+                        reservation = await self.budget_manager.reserve(
+                            sample_id,
+                            BudgetRequest(calls=1, tokens=4000, purpose="package_optimizer"),
+                        )
+                        result = await asyncio.wait_for(
+                            self.backend.optimize_package(context, self.optimizer_skill),
+                            self.budget_manager.limits.call_timeout_ms / 1000,
+                        )
+                else:
+                    result = await self.backend.optimize_package(context, self.optimizer_skill)
+            except Exception as exc:
+                # One flaky optimizer call must not abort a multi-batch run.
+                LOGGER.warning("Optimizer call failed for %s: %s", target.skill_id, exc)
+                return self._failed(f"call:{type(exc).__name__}", reports, cluster_id)
             if reservation is not None:
                 await self.budget_manager.reconcile(reservation, _usage_details(result))
                 reservation = None
             try:
                 proposal = parse_package_optimizer_response(result.value, tuple(packages))
                 if proposal is None:
-                    return None
+                    self.skips["no_change"] += 1
+                    return OptimizerOutcome("no_change")
                 if isinstance(proposal, SkillPackageAddition):
-                    return build_package_addition_candidate(proposal)
+                    return OptimizerOutcome(
+                        "candidate", candidate=build_package_addition_candidate(proposal)
+                    )
                 if proposal.target_skill_id != target.skill_id:
-                    raise ValueError("optimizer response targeted a Package outside this evaluation")
-                return build_package_candidate(target, proposal)
+                    raise ValueError(
+                        "optimizer response targeted a Package outside this evaluation"
+                    )
+                return OptimizerOutcome(
+                    "candidate", candidate=build_package_candidate(target, proposal)
+                )
             except ValueError as exc:
-                LOGGER.warning("Skipping invalid optimizer proposal for %s: %s", target.skill_id, exc)
-                return None
+                LOGGER.warning(
+                    "Skipping invalid optimizer proposal for %s: %s", target.skill_id, exc
+                )
+                return self._failed(f"invalid:{type(exc).__name__}", reports, cluster_id)
         finally:
             if reservation is not None:
                 await self.budget_manager.release(reservation)

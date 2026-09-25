@@ -74,8 +74,9 @@ class AcceptedBatchRunner(ExperimentRunner):
         *,
         progress=None,
         task_name="evolve",
+        prior_proposals=(),
     ):
-        del validation_samples, progress, task_name
+        del validation_samples, progress, task_name, prior_proposals
         self.seen_versions.append(tuple(skill.version for skill in self.skills))
         target = self.skills[0]
         major, minor, patch = (int(part) for part in target.version.split("."))

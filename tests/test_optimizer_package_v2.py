@@ -217,7 +217,10 @@ def test_invalid_optimizer_proposal_is_skipped_without_failing_batch(caplog):
             )
 
     agent = PackageOptimizerAgent(InvalidBackend(), optimizer)
-    assert asyncio.run(agent.propose(target, [target, optimizer])) is None
+    outcome = asyncio.run(agent.propose(target, [target, optimizer]))
+    assert outcome.status == "skipped"
+    assert outcome.reason == "invalid:ValueError"
+    assert agent.skips["invalid:ValueError"] == 1
     assert "Skipping invalid optimizer proposal" in caplog.text
 
 
@@ -234,8 +237,8 @@ def test_optimizer_proposals_for_same_target_use_separate_sample_budgets():
     agent = PackageOptimizerAgent(NoChangeBackend(), optimizer, budget_manager=budget)
 
     async def propose_twice():
-        assert await agent.propose(target, [target, optimizer]) is None
-        assert await agent.propose(target, [target, optimizer]) is None
+        assert (await agent.propose(target, [target, optimizer])).status == "no_change"
+        assert (await agent.propose(target, [target, optimizer])).status == "no_change"
 
     asyncio.run(propose_twice())
     ledgers = [
@@ -252,7 +255,7 @@ def test_package_optimizer_agent_uses_meta_prompt_but_does_not_evolve_itself():
     target = load_package(PROJECT_ROOT / "skills" / "seeds" / "generation_agent")
     optimizer = load_package(PROJECT_ROOT / "skills" / "seeds" / "skill_optimizer")
     agent = PackageOptimizerAgent(MockBackend(), optimizer)
-    assert asyncio.run(agent.propose(target, [target, optimizer])) is None
+    assert asyncio.run(agent.propose(target, [target, optimizer])).status == "no_change"
     with pytest.raises(ValueError, match="itself"):
         asyncio.run(agent.propose(optimizer, [target, optimizer]))
 
@@ -301,3 +304,88 @@ def test_ordinary_llm_evolution_emits_exact_package_candidate(monkeypatch):
     assert candidate.package.file("SKILL.md").content.endswith(
         b"Use an auditable package-level edit.\n"
     )
+
+
+class _FileEditBackend(MockBackend):
+    """Applies the given edit to the current optimizer target Package."""
+
+    def __init__(self, runner, extra_file: str | None):
+        self.runner = runner
+        self.extra_file = extra_file
+
+    async def optimize_package(self, context, optimizer_skill):
+        del optimizer_skill
+        target_id = context["target"]["skill_id"]
+        target = next(package for package in self.runner.packages if package.skill_id == target_id)
+        instructions = target.file(target.manifest.entrypoints.instructions)
+        operations = [
+            {
+                "operation": "update",
+                "path": instructions.path,
+                "content": instructions.content.decode("utf-8") + "\nSharpen the wording.\n",
+                "expected_digest": instructions.digest,
+                "media_type": instructions.media_type,
+            }
+        ]
+        if self.extra_file is not None:
+            other = target.file(self.extra_file)
+            operations.append(
+                {
+                    "operation": "update",
+                    "path": other.path,
+                    "content": other.content.decode("utf-8"),
+                    "expected_digest": other.digest,
+                    "media_type": other.media_type,
+                }
+            )
+        return BackendResult(
+            {
+                "action": "edit",
+                "target_skill_id": target_id,
+                "rationale": "instruction-scope probe",
+                "file_operations": operations,
+            },
+            UsageRecord(calls=1),
+        )
+
+
+def _evolve_once_with(monkeypatch, config, backend):
+    runner = ExperimentRunner(config, PROJECT_ROOT)
+    monkeypatch.setattr(runner, "_backend", lambda: backend)
+    monkeypatch.setattr(
+        "evofact.experiments.runner.cluster_reports",
+        lambda reports: {"forced": reports[:1]},
+    )
+    return asyncio.run(runner.evolve_once(fixture_samples()))
+
+
+def test_instructions_scope_keeps_instruction_only_edits(monkeypatch):
+    config = load_config(PROJECT_ROOT / "configs" / "dry_run.yaml")
+    config = replace(
+        config, evolution=replace(config.evolution, proposer="llm", scope="instructions")
+    )
+    runner = ExperimentRunner(config, PROJECT_ROOT)
+
+    outcome = _evolve_once_with(monkeypatch, config, _FileEditBackend(runner, extra_file=None))
+
+    assert len(outcome["proposals"]) == 1
+    candidate = outcome["package_candidates"][outcome["proposals"][0].proposal_id]
+    assert candidate.package.file("SKILL.md").content.endswith(b"Sharpen the wording.\n")
+
+
+def test_instructions_scope_skips_file_level_edits_instead_of_discarding_them(monkeypatch):
+    """instructions scope used to drop metadata/schema edits silently; now it refuses them."""
+    config = load_config(PROJECT_ROOT / "configs" / "dry_run.yaml")
+    config = replace(
+        config, evolution=replace(config.evolution, proposer="llm", scope="instructions")
+    )
+    runner = ExperimentRunner(config, PROJECT_ROOT)
+
+    outcome = _evolve_once_with(
+        monkeypatch, config, _FileEditBackend(runner, extra_file="metadata.json")
+    )
+
+    assert outcome["proposals"] == []
+    assert outcome["package_candidates"] == {}
+    assert outcome["optimizer_skips"]["scope_violation"] == 1
+    assert ("forced", "scope_violation") in outcome["skipped_proposals"]
