@@ -1,14 +1,14 @@
 seed: 42
 
-output_dir: outputs/weibo21_outer_fold_1
-skill_store: skills/store_weibo21_outer_fold_1
+output_dir: outputs/weibo21_cross_domain_5
+skill_store: skills/store_weibo21_cross_domain_5
 
 data:
   dataset: weibo21
   root: datasets/Weibo21
   evolution_validation_samples: 50
-  train_domains: ["政治", "军事", "科技", "社会生活"]
-  final_test_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
+  train_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
+  final_test_domains: ["政治", "军事", "科技", "社会生活"]
   excluded_domains: ["无法确定"]
   train_sampling: balanced_by_domain
   final_test_samples_per_domain: 100
@@ -61,7 +61,7 @@ execution:
   batch_size: 16
   max_concurrent_samples: 16
   progress: auto
-  trace_log: outputs/weibo21_outer_fold_1/training-traces.jsonl
+  trace_log: outputs/weibo21_cross_domain_5/training-traces.jsonl
 
 evolution:
   enabled: true
@@ -91,7 +91,7 @@ gate:
 meta_learning:
   enabled: true
   strategy: leave_one_domain_out
-  episodes: 4
+  episodes: 5
   meta_test_domain_count: 1
   min_source_domains: 3
   min_valid_episodes: 3
@@ -109,4 +109,4 @@ meta_learning:
   evaluation_repeats: 1
   max_meta_test_samples_per_domain: 50
   isolate_candidate_budget: true
-  checkpoint_path: outputs/weibo21_outer_fold_1/meta-checkpoint.json
+  checkpoint_path: outputs/weibo21_cross_domain_5/checkpoint.json

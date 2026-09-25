@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from evofact.config import BudgetConfig
 from evofact.core.budget_models import (
     BudgetLimits,
     BudgetRequest,
@@ -49,6 +50,21 @@ def test_optional_call_cannot_consume_reserved_judge_call() -> None:
             await manager.reserve("sample", BudgetRequest(required=False))
 
     asyncio.run(scenario())
+
+
+def test_unlimited_token_budget_still_records_usage() -> None:
+    assert BudgetConfig().max_tokens_per_sample is None
+    assert BudgetConfig().max_tokens_per_run is None
+
+    async def scenario():
+        manager = BudgetManager(BudgetLimits(max_calls_per_sample=2, max_calls_per_run=2))
+        reservation = await manager.reserve("sample", BudgetRequest(tokens=50_000))
+        await manager.reconcile(reservation, UsageDetails(calls=1, input_tokens=60_000))
+        return manager.snapshot("sample"), manager.snapshot()
+
+    sample, run = asyncio.run(scenario())
+    assert sample.tokens_used == run.tokens_used == 60_000
+    assert sample.calls_used == run.calls_used == 1
 
 
 def test_openai_usage_and_pricing_include_cache_and_reasoning() -> None:

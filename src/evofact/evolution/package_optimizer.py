@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
+import uuid
 
 from evofact.core.budget_models import BudgetRequest
 from evofact.core.frontmatter import normalize_newlines, parse_frontmatter, render_frontmatter
@@ -27,6 +29,7 @@ from .optimizer_context import build_optimizer_context
 from .package_candidate import build_package_addition_candidate, build_package_candidate
 
 ALLOWED_TARGET_KINDS = {SkillKind.ROUTER, SkillKind.SPECIALIST, SkillKind.JUDGE, SkillKind.WORKFLOW}
+LOGGER = logging.getLogger(__name__)
 FROZEN_TARGET_NAMES = {
     "generation_verifier",
     "verifier",
@@ -258,9 +261,16 @@ def parse_package_optimizer_response(
             "entrypoints",
             "safety_level",
         }
-        if set(manifest_raw) - allowed_manifest:
-            raise ValueError("name and kind cannot be changed by optimizer")
+        unknown = set(manifest_raw) - allowed_manifest - {"name", "kind"}
+        if unknown:
+            raise ValueError(f"unknown manifest patch fields: {sorted(unknown)}")
+        if manifest_raw.get("name") not in (None, target.manifest.name):
+            raise ValueError("name cannot be changed by optimizer")
+        if manifest_raw.get("kind") not in (None, target.manifest.kind.value):
+            raise ValueError("kind cannot be changed by optimizer")
         converted = dict(manifest_raw)
+        converted.pop("name", None)
+        converted.pop("kind", None)
         if "scope" in converted:
             raw = converted["scope"]
             if not isinstance(raw, dict):
@@ -281,7 +291,8 @@ def parse_package_optimizer_response(
             if not isinstance(raw, dict):
                 raise ValueError("manifest entrypoints must be an object")
             converted["entrypoints"] = _parse_entrypoints(raw)
-        manifest_patch = ManifestPatch(**converted)
+        if converted:
+            manifest_patch = ManifestPatch(**converted)
     risk_flags = tuple(data.get("risk_flags", ()))
     if any(item.path.startswith("scripts/") for item in operations):
         risk_flags = tuple(dict.fromkeys((*risk_flags, "script_change", "human_review_required")))
@@ -367,7 +378,9 @@ class PackageOptimizerAgent:
             audits=audits,
         )
         reservation = None
-        sample_id = f"package-optimizer:{target.skill_id}"
+        # Each proposal is a separate budget unit. Reusing only the target ID
+        # would exhaust its per-sample call cap across unrelated training batches.
+        sample_id = f"package-optimizer:{target.skill_id}:{uuid.uuid4().hex}"
         try:
             if self.budget_manager is not None:
                 async with self.budget_manager.concurrency(sample_id):
@@ -384,14 +397,18 @@ class PackageOptimizerAgent:
             if reservation is not None:
                 await self.budget_manager.reconcile(reservation, _usage_details(result))
                 reservation = None
-            proposal = parse_package_optimizer_response(result.value, tuple(packages))
-            if proposal is None:
+            try:
+                proposal = parse_package_optimizer_response(result.value, tuple(packages))
+                if proposal is None:
+                    return None
+                if isinstance(proposal, SkillPackageAddition):
+                    return build_package_addition_candidate(proposal)
+                if proposal.target_skill_id != target.skill_id:
+                    raise ValueError("optimizer response targeted a Package outside this evaluation")
+                return build_package_candidate(target, proposal)
+            except ValueError as exc:
+                LOGGER.warning("Skipping invalid optimizer proposal for %s: %s", target.skill_id, exc)
                 return None
-            if isinstance(proposal, SkillPackageAddition):
-                return build_package_addition_candidate(proposal)
-            if proposal.target_skill_id != target.skill_id:
-                raise ValueError("optimizer response targeted a Package outside this evaluation")
-            return build_package_candidate(target, proposal)
         finally:
             if reservation is not None:
                 await self.budget_manager.release(reservation)

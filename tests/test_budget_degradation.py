@@ -70,6 +70,29 @@ def test_runner_survives_run_budget_exhaustion_for_every_sample() -> None:
     assert all(any("router budget denied" in error for error in trace.errors) for trace in traces)
 
 
+def test_repeated_validation_inferences_get_separate_sample_call_budgets() -> None:
+    sample = fixture_samples()[0]
+    config = replace(AppConfig(), budget=BudgetConfig(max_calls_per_sample=5))
+    runner = ExperimentRunner(config, ROOT)
+
+    async def infer_twice():
+        first, _ = await runner.run(
+            [sample], task_name="validation", phase="baseline r1", isolate_sample_budget=True
+        )
+        second, _ = await runner.run(
+            [sample], task_name="validation", phase="candidate r1", isolate_sample_budget=True
+        )
+        return first[0], second[0]
+
+    first, second = asyncio.run(infer_twice())
+    assert first.sample_id == second.sample_id == sample.sample_id
+    assert first.decision.label != "ABSTAIN"
+    assert second.decision.label != "ABSTAIN"
+    assert first.usage.calls == second.usage.calls == 4
+    assert runner._budget_manager().snapshot().calls_used == 8
+    assert len(runner._budget_manager().export_state()["samples"]) == 2
+
+
 def test_runner_keeps_later_batches_after_mid_run_exhaustion() -> None:
     """预算在一轮中途耗尽时，后续批次仍必须跑完，而不是整轮被取消。"""
     config = replace(

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 from dataclasses import replace
 
+from evofact.core.frontmatter import parse_frontmatter, render_frontmatter
 from evofact.core.package_models import (
     FileOperationKind,
     SkillFile,
@@ -11,6 +13,32 @@ from evofact.core.package_models import (
     SkillPackagePatch,
 )
 from evofact.governance.package_policy import require_valid_package
+
+
+def _with_content(file: SkillFile, content: bytes) -> SkillFile:
+    return replace(file, content=content, digest=hashlib.sha256(content).hexdigest())
+
+
+def _sync_manifest_version(files: dict[str, SkillFile], version: str) -> None:
+    """Keep the two descriptive version fields aligned with the manifest."""
+    skill_file = files.get("SKILL.md")
+    if skill_file is not None:
+        raw = skill_file.content.decode("utf-8")
+        frontmatter, body = parse_frontmatter(raw)
+        if "version" in frontmatter and frontmatter["version"] != version:
+            frontmatter["version"] = version
+            files["SKILL.md"] = _with_content(
+                skill_file, render_frontmatter(frontmatter, body).encode("utf-8")
+            )
+
+    metadata = files.get("metadata.json")
+    if metadata is not None:
+        raw = json.loads(metadata.content.decode("utf-8"))
+        if isinstance(raw, dict) and "version" in raw and raw["version"] != version:
+            raw["version"] = version
+            files["metadata.json"] = _with_content(
+                metadata, json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            )
 
 
 def apply_package_patch(base: SkillPackage, patch: SkillPackagePatch) -> SkillPackage:
@@ -75,6 +103,8 @@ def apply_package_patch(base: SkillPackage, patch: SkillPackagePatch) -> SkillPa
             if getattr(patch.manifest_patch, key) is not None
         }
         manifest = replace(manifest, **changes)
+    if manifest.version != base.manifest.version:
+        _sync_manifest_version(files, manifest.version)
     candidate = SkillPackage(
         skill_id=base.skill_id,
         manifest=manifest,

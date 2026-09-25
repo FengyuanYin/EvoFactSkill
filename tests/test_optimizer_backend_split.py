@@ -1,8 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
-
 from evofact.config import OptimizerBackendConfig, load_config
 from evofact.experiments.runner import ExperimentRunner
 
@@ -43,7 +41,7 @@ def test_optimizer_backend_uses_independent_endpoint_and_model(monkeypatch):
     assert optimizer.temperature == 1.0
 
 
-def test_optimizer_backend_rejects_forward_endpoint_reuse(monkeypatch):
+def test_optimizer_backend_allows_forward_endpoint_reuse(monkeypatch):
     monkeypatch.setenv("OPTIMIZER_KEY", "optimizer-secret")
     config = load_config(ROOT / "configs/dry_run.yaml")
     config = replace(
@@ -55,11 +53,14 @@ def test_optimizer_backend_rejects_forward_endpoint_reuse(monkeypatch):
             model="advanced-model",
             base_url="https://same.example/v1/",
             api_key_env="OPTIMIZER_KEY",
+            require_distinct_base_url=True,
         ),
     )
 
-    with pytest.raises(ValueError, match="must be different"):
-        ExperimentRunner(config, ROOT)._optimizer_backend()
+    optimizer = ExperimentRunner(config, ROOT)._optimizer_backend()
+
+    assert optimizer.model == "advanced-model"
+    assert optimizer.url == "https://same.example/v1/chat/completions"
 
 
 def test_weibo_config_declares_environment_backed_optimizer():
@@ -71,3 +72,20 @@ def test_weibo_config_declares_environment_backed_optimizer():
     assert config.optimizer_backend.base_url_env == "EVOFACT_OPTIMIZER_BASE_URL"
     assert config.optimizer_backend.api_key_env == "EVOFACT_OPTIMIZER_API_KEY"
     assert config.optimizer_backend.pricing_table_path_env == ("EVOFACT_OPTIMIZER_PRICING_TABLE")
+
+
+def test_weibo_optimizer_accepts_same_endpoint_and_deepseek_pricing(monkeypatch):
+    monkeypatch.setenv("EVOFACT_OPTIMIZER_MODEL", "deepseek-flash")
+    monkeypatch.setenv("EVOFACT_OPTIMIZER_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("EVOFACT_OPTIMIZER_API_KEY", "test-key")
+    monkeypatch.setenv(
+        "EVOFACT_OPTIMIZER_PRICING_TABLE",
+        "pricing/deepseek-2026-09-18-peak.json",
+    )
+    config = load_config(ROOT / "configs/weibo21_cross_domain.yaml")
+
+    optimizer = ExperimentRunner(config, ROOT)._optimizer_backend()
+
+    assert optimizer.url == "https://api.deepseek.com/v1/chat/completions"
+    assert optimizer.provider == "deepseek"
+    assert optimizer.pricing_table.provider == "deepseek"

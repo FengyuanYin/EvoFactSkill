@@ -188,7 +188,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
 
 # Cross-domain meta-learning episodes
 evofact --config configs/weibo21_cross_domain.yaml \
-  meta-evolve --episodes 8 --strategy leave_one_domain_out \
+  meta-evolve --episodes 4 --strategy leave_one_domain_out \
   --trace-log outputs/weibo21-meta-traces.jsonl \
   --output outputs/meta-evolve.json
 
@@ -209,7 +209,7 @@ execution:
   batch_size: 16
   max_concurrent_samples: 16
   progress: auto
-  trace_log: outputs/weibo21_cross_domain/training-traces.jsonl
+  trace_log: outputs/weibo21_cross_domain_4/training-traces.jsonl
 ```
 
 A fresh run truncates its selected trace log. `--resume` appends to the checkpoint-recorded log and refuses a missing or different file, preventing a resumed experiment from silently splitting traces across files. An interrupted, uncommitted batch can appear twice after resume; those records are intentionally retained as API-usage audit evidence and are distinguishable by `training_context.sequence` and phase.
@@ -264,7 +264,6 @@ optimizer_backend:
   provider: openai-compatible
   pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
   temperature: 1.0
-  require_distinct_base_url: true
 ```
 
 Router, Specialist, Judge, counterfactual inference, Meta-test, and final test keep
@@ -445,7 +444,6 @@ evolution:
 
 budget:
   max_calls_per_run: 10000
-  max_tokens_per_run: 30000000
 
 pricing:
   provider: your-provider

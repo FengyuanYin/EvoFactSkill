@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
+from evofact.cli import _allows_unlimited_token_resume, _stable_digest
 from evofact.config import AppConfig, ExecutionConfig
 from evofact.core.models import (
     EvaluationResult,
@@ -19,6 +21,37 @@ from evofact.experiments.runner import ExperimentRunner, fixture_samples
 from evofact.skills.repository import SkillRepository
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_evolve_resume_accepts_only_removed_token_caps() -> None:
+    previous = {
+        "config": {
+            "budget": {
+                "max_tokens_per_sample": 40_000,
+                "max_tokens_per_run": 30_000_000,
+                "max_calls_per_run": 10_000,
+            },
+            "model": "model-a",
+        },
+        "config_file_digest": "before",
+        "manifest_id": "split-a",
+    }
+    checkpoint = {
+        "identity_digest": _stable_digest(previous),
+        "provenance": previous,
+    }
+    current = deepcopy(previous)
+    current["config"]["budget"]["max_tokens_per_sample"] = None
+    current["config"]["budget"]["max_tokens_per_run"] = None
+    current["config_file_digest"] = "after"
+    assert _allows_unlimited_token_resume(checkpoint, current)
+
+    changed_split = deepcopy(current)
+    changed_split["manifest_id"] = "split-b"
+    assert not _allows_unlimited_token_resume(checkpoint, changed_split)
+    changed_cost = deepcopy(current)
+    changed_cost["config"]["budget"]["max_calls_per_run"] = 20_000
+    assert not _allows_unlimited_token_resume(checkpoint, changed_cost)
 
 
 def _evaluation(samples) -> EvaluationResult:
@@ -97,6 +130,29 @@ def test_evolve_updates_only_between_batches() -> None:
     assert (
         result["batches"][0]["result_fingerprint"] == result["batches"][1]["baseline_fingerprint"]
     )
+
+
+def test_opt_in_active_bank_validation_is_recorded_after_each_batch() -> None:
+    config = replace(
+        AppConfig(),
+        execution=ExecutionConfig(
+            batch_size=2,
+            max_concurrent_samples=2,
+            validate_after_each_batch=True,
+        ),
+    )
+    runner = AcceptedBatchRunner(config, ROOT)
+    with tempfile.TemporaryDirectory() as temp:
+        result = asyncio.run(
+            runner.closed_loop_batched(
+                fixture_samples(),
+                fixture_samples()[::-1],
+                repository=SkillRepository(Path(temp) / "skills"),
+            )
+        )
+    assert len(result["batches"]) == 2
+    assert all(batch["validation_metrics"]["n"] == 4 for batch in result["batches"])
+    assert all("brier" in batch["validation_metrics"] for batch in result["batches"])
 
 
 class FailingRepository(SkillRepository):

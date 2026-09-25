@@ -101,5 +101,5 @@ def test_weibo_meta_cost_controls_are_loaded():
     assert config.evolution.max_attribution_samples_per_update == 8
     assert config.evolution.max_counterfactuals_per_sample == 1
     assert config.meta_learning.evaluation_repeats == 1
-    assert config.meta_learning.max_meta_test_samples_per_domain == 10
+    assert config.meta_learning.max_meta_test_samples_per_domain == 50
     assert config.meta_learning.isolate_candidate_budget

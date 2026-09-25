@@ -135,3 +135,6 @@ def test_cli_output_flag_writes_utf8_and_keeps_stdout_clean(tmp_path) -> None:
     assert f"wrote {target}" in stderr.getvalue()
     payload = json.loads(target.read_text(encoding="utf-8"))
     assert payload["mode"] == "test"
+    assert set(payload["domain_metrics"]) == {"health", "science", "social"}
+    assert sum(item["n"] for item in payload["domain_metrics"].values()) == payload["metrics"]["n"]
+    assert payload["domain_metrics"]["social"]["n"] == 2
