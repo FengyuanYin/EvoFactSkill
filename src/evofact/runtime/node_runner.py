@@ -26,8 +26,18 @@ def _usage_details(result) -> UsageDetails:
     )
 
 
+def _carries_usage(item: UsageDetails) -> bool:
+    """Return whether a usage record describes at least one real model call.
+
+    A skipped, timed-out or failed node contributes an empty ``UsageDetails()``
+    whose ``cost`` is ``None``. Treating that as "cost unknown" would mark the whole
+    trace unpriced even though every call that actually happened was priced.
+    """
+    return bool(item.calls or item.input_tokens or item.output_tokens or item.cost is not None)
+
+
 def merge_usage_details(items) -> UsageDetails:
-    rows = [item for item in items if item is not None]
+    rows = [item for item in items if item is not None and _carries_usage(item)]
     if not rows:
         return UsageDetails()
     costs_available = all(item.cost is not None for item in rows)

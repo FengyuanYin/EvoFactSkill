@@ -138,10 +138,19 @@ class GateConfig:  # 验证门配置
     repeats: int = 3
     min_macro_f1_gain: float = 0.01
     min_coverage: float = 0.8
+    # 兼容既有 YAML 保留，但 ValidationGate 已不再按域跌幅否决候选：验证集每个源域只有
+    # ~12-13 条样本，单条翻转就会让该域 macro-F1 变动 0.022-0.071，0.02 的阈值低于噪声
+    # 下限，等价于"任何域都不许退步"。域级指标仍会记录在报告里。
     max_protected_domain_drop: float = 0.02
     alpha: float = 0.05
+    # 兼容既有 YAML 保留，但 ValidationGate 已不再按成本比否决候选：mean_cost 只被记录
+    # 和报告，不参与晋升判定。（meta-evolve 走 MetaLearningConfig 的同名字段，仍然生效。）
     max_cost_ratio: float = 1.5
     max_calibration_increase: float = 0.2
+    # 成本门控要求参与比较的样本行中至少有这个比例拿到已知成本。真实 API 运行会有
+    # 少量调用无法定价（超时/解码失败/响应缺少 usage），1.0 会让绝大多数候选因为一条
+    # 脏行而被判 "cost unavailable"，因此默认留 1% 的余量而不是要求全量可用。
+    min_cost_coverage: float = 0.99
 
     def __post_init__(self) -> None:
         """函数作用：在 `GateConfig` 数据类初始化后检查字段之间的业务约束。
@@ -149,6 +158,8 @@ class GateConfig:  # 验证门配置
         输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if self.repeats < 2 or not 0 <= self.min_coverage <= 1 or self.max_calibration_increase < 0:
             raise ValueError("invalid gate configuration")
+        if not 0 <= self.min_cost_coverage <= 1:
+            raise ValueError("gate.min_cost_coverage must be between 0 and 1")
 
 
 @dataclass(frozen=True)
@@ -163,6 +174,8 @@ class MetaLearningConfig:  # 元学习配置
     max_negative_transfer_rate: float = 0.25
     max_worst_domain_drop: float = 0.1
     min_coverage: float = 0.5
+    # 兼容既有 YAML 保留，但 MetaValidationGate 已不再按成本比否决候选（与 GateConfig
+    # 的同名字段一致）。TransferUtility.cost_ratio 仍会被计算并写入 meta 报告。
     max_cost_ratio: float = 2.0
     max_calibration_increase: float = 0.2
     confidence_level: float = 0.95

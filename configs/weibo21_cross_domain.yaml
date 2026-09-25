@@ -42,12 +42,18 @@ pricing:
   require_cost_for_promotion: true
 
 # 调用次数和费用仍受限；token 用量只记录，不设置上限。
+# run 级账本跨 batch 累加，必须覆盖"训练 + 每条提案的 3 repeats × 2 arms × 50 验证样本"。
+# 本实验按 `--limit 200` 规划（batch_size 16 → 13 batch，4 个源域各 50 条）；
+# 上一轮实测 ~0.7 条提案/batch、4.57 calls/推理、$0.0187/推理，据此：
+#   13 batch × 1 条提案 × 300 次验证推理 × ~5 calls ≈ 19.5k calls、~$77（均值 ~$55）。
+# 注意：普通 evolve 不套用 evolution.max_proposals_per_update（只有 meta-evolve 用），
+# 一个 batch 的 error cluster 数理论上可以 >1，因此上限比预期花费留出更多余量。
 budget:
   max_calls_per_sample: 8
   max_cost_per_sample: 1.0
 
-  max_calls_per_run: 10000
-  max_cost_per_run: 100.0
+  max_calls_per_run: 50000
+  max_cost_per_run: 200.0
 
   max_sample_concurrency: 4
   max_global_concurrency: 8
@@ -92,6 +98,9 @@ gate:
   max_protected_domain_drop: 0.02
   alpha: 0.05
   max_cost_ratio: 1.5
+  # 真实运行总会有极少数调用无法定价（超时/解码失败/响应缺少 usage 块，实测 0.2%~1%）。
+  # 要求 100% 可用会让候选因为一条脏行被判 "cost unavailable"，这里留 1% 余量。
+  min_cost_coverage: 0.99
 
 meta_learning:
   enabled: true

@@ -6,6 +6,7 @@ import math
 import random
 
 from evofact.core.models import SampleEvaluation, StatisticalTestResult
+from evofact.evaluation.metrics import compute_metrics
 
 
 def paired_rows(baseline, candidate):
@@ -38,6 +39,49 @@ def mcnemar(
     stat = max(0, abs(b - c) - 1) ** 2 / (b + c) if b + c else 0
     p = math.erfc(math.sqrt(stat / 2)) if b + c else 1
     return StatisticalTestResult("mcnemar", stat, p, p < alpha)
+
+
+def paired_metric_bootstrap(
+    baseline: list[SampleEvaluation],
+    candidate: list[SampleEvaluation],
+    *,
+    metric: str = "macro_f1_all",
+    seed: int = 42,
+    iterations: int = 1000,
+    alpha: float = 0.05,
+) -> tuple[tuple[float, float], StatisticalTestResult]:
+    """Paired bootstrap of a metric delta over independent sample units.
+
+    ``baseline`` and ``candidate`` must each contain exactly one row per sample: the caller
+    collapses repeated measurements first. Resampling rows that merely repeat the same
+    sample would treat correlated observations as independent and inflate significance.
+    """
+    if iterations < 1:
+        raise ValueError("bootstrap iterations must be positive")
+    pairs = paired_rows(baseline, candidate)
+    if not pairs:
+        return (0.0, 0.0), StatisticalTestResult(f"paired-{metric}-bootstrap", 0.0, 1.0, False)
+    rng = random.Random(seed)
+    observed = (
+        compute_metrics([n for _, n in pairs])[metric]
+        - compute_metrics([o for o, _ in pairs])[metric]
+    )
+    deltas = []
+    for _ in range(iterations):
+        chosen = [pairs[rng.randrange(len(pairs))] for _ in pairs]
+        deltas.append(
+            compute_metrics([n for _, n in chosen])[metric]
+            - compute_metrics([o for o, _ in chosen])[metric]
+        )
+    deltas.sort()
+    interval = (
+        deltas[int(0.025 * iterations)],
+        deltas[min(iterations - 1, int(0.975 * iterations))],
+    )
+    p_value = sum(1 for value in deltas if value <= 0) / len(deltas)
+    return interval, StatisticalTestResult(
+        f"paired-{metric}-bootstrap", observed, p_value, p_value < alpha
+    )
 
 
 def paired_bootstrap(

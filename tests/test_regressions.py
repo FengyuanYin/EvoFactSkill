@@ -33,7 +33,7 @@ from evofact.routing.router import SkillRouter
 from evofact.skills.candidates import apply_candidate
 from evofact.skills.repository import SkillRepository
 from evofact.validation.meta_gate import MetaValidationGate
-from evofact.validation.statistics import mcnemar, paired_bootstrap
+from evofact.validation.statistics import mcnemar, paired_bootstrap, paired_metric_bootstrap
 from evofact.validation.transfer import CrossEpisodeAggregator
 
 
@@ -301,6 +301,44 @@ class StatisticalRegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CrossEpisodeAggregator().aggregate([row, row])
 
+    def test_repeated_measurements_do_not_inflate_significance(self):
+        """函数作用：验证 `repeats` 不是独立样本——池化后检验会把 p 值按重复数倍缩小。
+        输入要求：`self` 应为已初始化的 `StatisticalRegressionTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+        unit_baseline = []
+        unit_candidate = []
+        index = 0
+        for _ in range(5):  # 5 条改对
+            unit_baseline.append(SampleEvaluation(f"s{index}", "FAKE", "REAL", 0.9))
+            unit_candidate.append(SampleEvaluation(f"s{index}", "FAKE", "FAKE", 0.9))
+            index += 1
+        for _ in range(1):  # 1 条改错
+            unit_baseline.append(SampleEvaluation(f"s{index}", "FAKE", "FAKE", 0.9))
+            unit_candidate.append(SampleEvaluation(f"s{index}", "FAKE", "REAL", 0.9))
+            index += 1
+        while index < 50:
+            unit_baseline.append(SampleEvaluation(f"s{index}", "FAKE", "FAKE", 0.9))
+            unit_candidate.append(SampleEvaluation(f"s{index}", "FAKE", "FAKE", 0.9))
+            index += 1
+
+        pooled_baseline = []
+        pooled_candidate = []
+        for repeat in range(3):
+            pooled_baseline.extend(
+                replace(row, sample_id=f"{row.sample_id}:r{repeat}") for row in unit_baseline
+            )
+            pooled_candidate.extend(
+                replace(row, sample_id=f"{row.sample_id}:r{repeat}") for row in unit_candidate
+            )
+
+        # 旧行为：把同一批证据重复 3 次当成 150 个独立观测，判为显著。
+        self.assertTrue(mcnemar(pooled_baseline, pooled_candidate, 0.05).significant)
+        # 新行为：按样本单位检验（50 个 unit），同一批证据并不显著。
+        _, unit_test = paired_metric_bootstrap(
+            unit_baseline, unit_candidate, metric="macro_f1_all", seed=42
+        )
+        self.assertFalse(unit_test.significant)
+
     def test_specialization_cannot_bypass_hard_constraints(self):
         """函数作用：验证 `specialization_cannot_bypass_hard_constraints` 场景的正常行为、边界条件或错误处理。
         输入要求：`self` 应为已初始化的 `StatisticalRegressionTests` 实例；无其他显式输入。
@@ -324,11 +362,16 @@ class StatisticalRegressionTests(unittest.TestCase):
         gate = MetaValidationGate(MetaLearningConfig(enabled=True))
         for changes in (
             {"mean_coverage": 0.1},
-            {"cost_ratio": 100},
             {"calibration_delta": 1},
             {"episode_count": 2},
         ):
             self.assertFalse(gate.decide(replace(base, **changes)).accepted)
+        # Cost is no longer a hard constraint, so it can no longer block the specialization
+        # path either: this candidate is accepted with its scope narrowed to the domains
+        # that still gain, exactly like any other cost profile.
+        specialized = gate.decide(replace(base, cost_ratio=100))
+        self.assertTrue(specialized.accepted)
+        self.assertEqual(specialized.disposition, "specialized")
 
 
 if __name__ == "__main__":

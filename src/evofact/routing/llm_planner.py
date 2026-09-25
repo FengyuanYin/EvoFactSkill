@@ -62,7 +62,10 @@ class LLMPlanner:
                 sample, skills, utilities, budget, "missing candidates or router"
             )
         # 只要模型调用已经发生，它的 usage 就必须被记账：否则预算台账会低估真实消耗。
+        # usage_details 也必须一起带走：它是唯一保留 provider/model/pricing_version
+        # 以及"成本未知"与"成本为零"区别的记录。
         usage = UsageRecord()
+        details = None
         try:
             result = await self.backend.route(
                 sample,
@@ -72,6 +75,7 @@ class LLMPlanner:
                 budget,
             )
             usage = result.usage
+            details = result.usage_details
             raw = result.value
             if isinstance(raw, RoutingDecision):
                 plan = contract_plan_from_decision(
@@ -97,7 +101,7 @@ class LLMPlanner:
                     decision, skills, timeout_ms=self.limits.call_timeout_ms
                 )
             require_valid_plan(plan, skills, limits=self.limits)
-            return BackendResult(plan, result.usage)
+            return BackendResult(plan, result.usage, result.usage_details)
         except Exception as exc:
             return await self._fallback(
                 sample,
@@ -106,9 +110,10 @@ class LLMPlanner:
                 budget,
                 f"LLM plan failed: {type(exc).__name__}",
                 usage,
+                details,
             )
 
-    async def _fallback(self, sample, skills, utilities, budget, cause, usage=None):
+    async def _fallback(self, sample, skills, utilities, budget, cause, usage=None, details=None):
         result = await self.fallback.plan(sample, skills, utilities, budget)
         plan = result.value
         plan = normalize_plan(
@@ -121,4 +126,4 @@ class LLMPlanner:
             max_timeout_ms=self.limits.call_timeout_ms,
         )
         require_valid_plan(plan, skills, limits=self.limits)
-        return BackendResult(plan, _merge_usage(usage, result.usage))
+        return BackendResult(plan, _merge_usage(usage, result.usage), details)

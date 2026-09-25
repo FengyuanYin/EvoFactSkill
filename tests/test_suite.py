@@ -212,6 +212,91 @@ class MetricTests(unittest.TestCase):
         self.assertFalse(d.accepted)
         self.assertTrue(d.regression_failures)
 
+    def _cost_rows(self, unpriced: int):
+        """函数作用：构造 `unpriced` 行为未知成本的 100 行评估结果。
+        输入要求：`self` 应为已初始化的 `MetricTests` 实例；`unpriced`（int）需符合函数签名约定。
+        输出：返回 `EvaluationResult` 类型结果。"""
+        rows = [SampleEvaluation(str(index), "REAL", "REAL", 0.9) for index in range(100)]
+        rows = [
+            replace(row, cost_status="unavailable") if index < unpriced else row
+            for index, row in enumerate(rows)
+        ]
+        return evaluate(rows)
+
+    def test_gate_tolerates_a_few_unpriced_rows(self):
+        """函数作用：验证 `gate_tolerates_a_few_unpriced_rows` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `MetricTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+        result = self._cost_rows(1)
+        self.assertEqual(result.aggregate_metrics["cost_available"], 0.0)
+        self.assertAlmostEqual(result.aggregate_metrics["cost_coverage"], 0.99)
+        gate = ValidationGate(
+            GateConfig(repeats=2, min_macro_f1_gain=0, min_coverage=0), require_cost=True
+        )
+        decision = gate.decide(result, result, StatisticalTestResult("x", 1, 0.01, True))
+        self.assertTrue(decision.accepted, decision.reason)
+
+    def test_gate_rejects_when_cost_coverage_is_too_low(self):
+        """函数作用：验证 `gate_rejects_when_cost_coverage_is_too_low` 场景的正常行为、边界条件或错误处理。
+        输入要求：`self` 应为已初始化的 `MetricTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+        result = self._cost_rows(5)
+        self.assertLess(result.aggregate_metrics["cost_coverage"], 0.99)
+        gate = ValidationGate(
+            GateConfig(repeats=2, min_macro_f1_gain=0, min_coverage=0), require_cost=True
+        )
+        decision = gate.decide(result, result, StatisticalTestResult("x", 1, 0.01, True))
+        self.assertFalse(decision.accepted)
+        self.assertIn("cost unavailable", decision.reason)
+
+    def test_gate_cost_coverage_requires_a_valid_config(self):
+        """函数作用：验证 `gate_cost_coverage_requires_a_valid_config` 场景的错误处理。
+        输入要求：`self` 应为已初始化的 `MetricTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+        with self.assertRaises(ValueError):
+            GateConfig(repeats=2, min_cost_coverage=1.5)
+
+    def test_gate_does_not_reject_on_cost_ratio(self):
+        """函数作用：验证成本比不再是晋升条件，更贵但更好的候选应当被接受。
+        输入要求：`self` 应为已初始化的 `MetricTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+        rows = [
+            SampleEvaluation(str(index), "REAL", "REAL", 0.9, cost=0.001) for index in range(100)
+        ]
+        baseline = evaluate(rows)
+        candidate = evaluate(
+            [replace(row, cost=0.05) for row in rows],
+            {"paired_accuracy_delta": (0.05, 0.1)},
+        )
+        self.assertGreater(candidate.aggregate_metrics["mean_cost"], 1.5 * 0.001)
+        gate = ValidationGate(GateConfig(repeats=2, min_macro_f1_gain=0, min_coverage=0))
+        decision = gate.decide(baseline, candidate, StatisticalTestResult("x", 1, 0.01, True))
+        self.assertTrue(decision.accepted, decision.reason)
+
+    def test_gate_does_not_reject_on_a_single_domain_drop(self):
+        """函数作用：验证域跌幅不再是晋升条件——验证集每域仅 ~12 条，该阈值低于噪声下限。
+        输入要求：`self` 应为已初始化的 `MetricTests` 实例；无其他显式输入。
+        输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
+        rows = [
+            SampleEvaluation(f"a{index}", "REAL", "REAL", 0.5, domain="a") for index in range(50)
+        ] + [SampleEvaluation(f"b{index}", "FAKE", "FAKE", 0.5, domain="b") for index in range(50)]
+        baseline = evaluate(rows)
+        candidate = evaluate(
+            [replace(row, predicted="REAL") for row in rows if row.domain == "b"],
+            {"paired_macro_f1_delta": (0.05, 0.15)},
+        )
+        dropped = (
+            baseline.domain_metrics["b"]["macro_f1_all"]
+            - candidate.domain_metrics["b"]["macro_f1_all"]
+        )
+        self.assertGreater(dropped, 0.02)
+        gate = ValidationGate(GateConfig(repeats=2, min_macro_f1_gain=-1, min_coverage=0))
+        decision = gate.decide(baseline, candidate, StatisticalTestResult("x", 1, 0.01, True))
+        self.assertTrue(decision.accepted, decision.reason)
+        self.assertFalse(
+            any("protected domain" in failure for failure in decision.regression_failures)
+        )
+
 
 class SkillTests(unittest.TestCase):
     def seed(self):

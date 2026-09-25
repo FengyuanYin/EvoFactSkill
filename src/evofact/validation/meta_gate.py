@@ -50,8 +50,6 @@ class MetaValidationGate:
             failures.append("worst-domain regression exceeded")
         if utility.mean_coverage < self.config.min_coverage:
             failures.append("coverage below minimum")
-        if utility.cost_ratio > self.config.max_cost_ratio:
-            failures.append("cost ratio exceeded")
         if utility.calibration_delta > self.config.max_calibration_increase:
             failures.append("calibration regression exceeded")
         if not failures:
@@ -67,7 +65,6 @@ class MetaValidationGate:
         )
         hard_constraints_pass = (
             utility.mean_coverage >= self.config.min_coverage
-            and utility.cost_ratio <= self.config.max_cost_ratio
             and utility.calibration_delta <= self.config.max_calibration_increase
         )
         if (

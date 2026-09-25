@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 from evofact.config import AppConfig, BudgetConfig, ExecutionConfig
-from evofact.core.budget_models import BudgetLimits
+from evofact.core.budget_models import BudgetLimits, CostStatus, UsageDetails
 from evofact.core.models import RunBudget, UsageRecord
 from evofact.experiments.runner import ExperimentRunner, fixture_samples, load_seed_skills
 from evofact.routing.llm_planner import LLMPlanner
@@ -15,6 +16,7 @@ from evofact.runtime.backend import BackendResult
 from evofact.runtime.budget import BudgetManager
 from evofact.runtime.inference import InferenceRuntime
 from evofact.runtime.mock_backend import MockBackend
+from evofact.runtime.node_runner import merge_usage_details
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -151,3 +153,77 @@ def test_llm_planner_keeps_usage_of_a_rejected_plan_response() -> None:
     assert result.usage.calls == 1
     assert result.usage.prompt_tokens == 1234
     assert result.usage.completion_tokens == 56
+
+
+_PRICED_DETAILS = UsageDetails(
+    calls=1,
+    input_tokens=100,
+    output_tokens=50,
+    latency_ms=12.0,
+    cost=Decimal("0.0123"),
+    cost_status=CostStatus.ESTIMATED,
+    provider="deepseek",
+    model="deepseek-flash",
+    pricing_version="pricing_v1",
+)
+
+
+class _RoutableBackend:
+    """Returns one valid plan so the LLM planning path succeeds instead of falling back."""
+
+    def __init__(self, nodes: list[dict]) -> None:
+        self.nodes = nodes
+
+    async def route(self, sample, candidates, router_skill, utilities, budget) -> BackendResult:
+        del sample, candidates, router_skill, utilities, budget
+        return BackendResult(
+            {"nodes": self.nodes, "reasons": {}, "confidence": 0.9},
+            UsageRecord(calls=1, prompt_tokens=100, completion_tokens=50, estimated_cost=0.0123),
+            _PRICED_DETAILS,
+        )
+
+
+def test_llm_planner_preserves_rich_usage_details() -> None:
+    """router 必须把权威 usage_details 带出来：它保留了 provider/model/pricing_version。
+
+    丢失它会让下游退回有损的 UsageRecord 转换，把"成本为零"和"成本未知"混为一谈。
+    """
+    skills = _skills()
+    baseline = asyncio.run(
+        RulePlanner(SkillRouter(strategy="utility-aware", seed=42)).plan(
+            _public_sample(), skills, {}, RunBudget(max_skills=3, max_calls=6)
+        )
+    )
+    nodes = [node.model_dump() for node in baseline.value.nodes]
+    planner = LLMPlanner(
+        _RoutableBackend(nodes), RulePlanner(SkillRouter(strategy="utility-aware", seed=42))
+    )
+
+    result = asyncio.run(
+        planner.plan(_public_sample(), skills, {}, RunBudget(max_skills=3, max_calls=6))
+    )
+
+    assert result.value.fallback_used is False
+    assert result.usage_details is _PRICED_DETAILS
+    assert result.usage_details.pricing_version == "pricing_v1"
+    assert result.usage_details.cost == Decimal("0.0123")
+
+
+def test_merge_usage_details_ignores_nodes_that_made_no_call() -> None:
+    """跳过/超时/失败节点贡献的空 usage 不能把整条轨迹标成成本未知。"""
+    merged = merge_usage_details([_PRICED_DETAILS, UsageDetails()])
+
+    assert merged.cost == Decimal("0.0123")
+    assert merged.cost_status == CostStatus.ESTIMATED
+    assert merged.calls == 1
+
+
+def test_merge_usage_details_keeps_unavailable_cost_for_a_real_call() -> None:
+    """真正发生过、但确实无法定价的调用仍必须让整条轨迹的成本不可用。"""
+    unpriced = UsageDetails(calls=1, input_tokens=80, cost_status=CostStatus.UNAVAILABLE)
+
+    merged = merge_usage_details([_PRICED_DETAILS, unpriced])
+
+    assert merged.calls == 2
+    assert merged.cost is None
+    assert merged.cost_status == CostStatus.UNAVAILABLE

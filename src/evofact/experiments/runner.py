@@ -3,6 +3,7 @@ import inspect
 import json
 import tempfile
 import uuid
+from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -56,7 +57,7 @@ from evofact.skills.package_loader import load_package
 from evofact.skills.utility import UtilityTracker
 from evofact.validation.evaluator import evaluate
 from evofact.validation.gate import ValidationGate
-from evofact.validation.statistics import mcnemar, paired_bootstrap
+from evofact.validation.statistics import paired_bootstrap, paired_metric_bootstrap
 
 
 def fixture_samples() -> list[Sample]:
@@ -102,6 +103,21 @@ def load_seed_skills(root: Path) -> list:
         for p in sorted(root.iterdir())
         if (p / "SKILL.md").is_file()
     ]
+
+
+def _majority_row(rows: list[SampleEvaluation]) -> SampleEvaluation:
+    """Collapse the repeated measurements of one validation sample into a single row.
+
+    The paired test must treat a sample as one unit. Keeping every repeat as a separate
+    observation would treat correlated measurements as independent evidence and shrink
+    the p-value by roughly the repeat count.
+    """
+    if not rows:
+        raise ValueError("a collapsed sample unit requires at least one row")
+    first_seen = {row.predicted: index for index, row in reversed(list(enumerate(rows)))}
+    counts = Counter(row.predicted for row in rows)
+    winner = max(counts, key=lambda label: (counts[label], -first_seen[label]))
+    return replace(rows[0], predicted=winner)
 
 
 class ExperimentRunner:
@@ -667,6 +683,8 @@ class ExperimentRunner:
             candidate_skills = apply_candidate(self.skills, proposal)
             repeated_baseline = []
             repeated_candidate = []
+            unit_baseline: dict[str, list[SampleEvaluation]] = {}
+            unit_candidate: dict[str, list[SampleEvaluation]] = {}
             for repeat_index in range(self.config.gate.repeats):
                 _, base_run = await self.run(
                     validation_rows,
@@ -683,6 +701,10 @@ class ExperimentRunner:
                     phase=f"validation candidate r{repeat_index + 1}",
                     isolate_sample_budget=True,
                 )
+                for row in base_run.per_sample:
+                    unit_baseline.setdefault(row.sample_id, []).append(row)
+                for row in candidate_run.per_sample:
+                    unit_candidate.setdefault(row.sample_id, []).append(row)
                 repeated_baseline.extend(
                     replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
                     for x in base_run.per_sample
@@ -691,13 +713,28 @@ class ExperimentRunner:
                     replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
                     for x in candidate_run.per_sample
                 )
+            # Metrics average over every repeat, but the paired test runs on one collapsed
+            # row per sample: repeats are measurements of the same unit, not extra units.
             baseline_result = evaluate(repeated_baseline)
             candidate_result = evaluate(repeated_candidate)
-            ci = paired_bootstrap(repeated_baseline, repeated_candidate, seed=self.config.seed)
-            candidate_result = replace(
-                candidate_result, confidence_intervals={"paired_accuracy_delta": ci}
+            test_baseline = [_majority_row(rows) for _, rows in sorted(unit_baseline.items())]
+            test_candidate = [_majority_row(rows) for _, rows in sorted(unit_candidate.items())]
+            interval, test = paired_metric_bootstrap(
+                test_baseline,
+                test_candidate,
+                metric="macro_f1_all",
+                seed=self.config.seed,
+                alpha=self.config.gate.alpha,
             )
-            test = mcnemar(repeated_baseline, repeated_candidate, self.config.gate.alpha)
+            candidate_result = replace(
+                candidate_result,
+                confidence_intervals={
+                    "paired_macro_f1_delta": interval,
+                    "paired_accuracy_delta": paired_bootstrap(
+                        test_baseline, test_candidate, seed=self.config.seed
+                    ),
+                },
+            )
             package_candidate = outcome["package_candidates"].get(proposal.proposal_id)
             levels = (
                 [package_candidate.safety_level]
