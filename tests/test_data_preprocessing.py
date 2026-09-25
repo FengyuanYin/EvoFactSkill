@@ -18,6 +18,7 @@ from evofact.data.deduplication import deduplicate_samples, normalize_text
 from evofact.data.domains import domain_index, split_source_and_final
 from evofact.data.manifests import build_manifest
 from evofact.data.registry import DataRegistry
+from evofact.data.sampling import balanced_domain_sample
 from evofact.governance.pricing_policy import load_pricing_table
 
 
@@ -84,6 +85,23 @@ class DeduplicationTests(unittest.TestCase):
                 train_domains=("health",),
                 final_test_domains=("health",),
             )
+
+    def test_validation_limit_selects_fifty_reproducibly_without_using_final_test(self):
+        rows = [
+            Sample(f"source-{index}", "fixture", f"source {index}", domain="source")
+            for index in range(120)
+        ]
+        held_out = Sample("final-1", "fixture", "held out", domain="final")
+        config = DataConfig(evolution_validation_samples=50)
+        first, _ = balanced_domain_sample(
+            rows, ("source",), config.evolution_validation_samples, seed=42
+        )
+        second, _ = balanced_domain_sample(
+            rows, ("source",), config.evolution_validation_samples, seed=42
+        )
+        self.assertEqual(len(first), 50)
+        self.assertEqual([s.sample_id for s in first], [s.sample_id for s in second])
+        self.assertNotIn(held_out.sample_id, {s.sample_id for s in first})
 
     def test_public_view_is_an_explicit_allow_list(self):
         published_at = datetime(2026, 1, 2, 3, 4, 5)
@@ -175,7 +193,7 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(amt.meta_learning.enabled)
         self.assertEqual(weibo.data.dataset, "weibo21")
         self.assertEqual(amt.data.dataset, "amtcele")
-        self.assertEqual(len(weibo.data.final_test_domains), 1)
+        self.assertEqual(len(weibo.data.final_test_domains), 5)
         self.assertEqual(len(amt.data.final_test_domains), 1)
         self.assertFalse(set(weibo.data.train_domains) & set(weibo.data.final_test_domains))
         self.assertFalse(set(amt.data.train_domains) & set(amt.data.final_test_domains))
@@ -192,6 +210,37 @@ class AdapterTests(unittest.TestCase):
             table = load_pricing_table(ROOT / config.pricing.table_path)
             self.assertEqual(table.provider, config.pricing.provider)
             self.assertIn(config.model, table.models)
+
+    def test_weibo_meta_configs_match_evolve_folds_and_isolate_state(self):
+        pairs = (
+            ("weibo21_cross_domain.yaml", "weibo21_evolve_fold_1.yaml", 4),
+            ("weibo21_cross_domain_5.yaml", "weibo21_evolve_fold_2.yaml", 5),
+        )
+        meta_configs = []
+        for meta_name, evolve_name, source_domain_count in pairs:
+            meta = load_config(ROOT / "configs" / meta_name)
+            evolve = load_config(ROOT / "configs" / evolve_name)
+            self.assertEqual(meta.data.train_domains, evolve.data.train_domains)
+            self.assertEqual(meta.data.final_test_domains, evolve.data.final_test_domains)
+            self.assertEqual(len(meta.data.train_domains), source_domain_count)
+            self.assertEqual(meta.meta_learning.episodes, source_domain_count)
+            self.assertTrue(meta.meta_learning.enabled)
+            self.assertFalse(evolve.meta_learning.enabled)
+            self.assertNotEqual(meta.skill_store, evolve.skill_store)
+            self.assertNotEqual(meta.output_dir, evolve.output_dir)
+            self.assertEqual(meta.optimizer_backend.provider, "deepseek")
+            meta_configs.append(meta)
+
+        first, second = meta_configs
+        self.assertEqual(set(first.data.train_domains), set(second.data.final_test_domains))
+        self.assertEqual(set(second.data.train_domains), set(first.data.final_test_domains))
+        self.assertNotEqual(first.skill_store, second.skill_store)
+        self.assertNotEqual(first.output_dir, second.output_dir)
+        self.assertNotEqual(first.execution.trace_log, second.execution.trace_log)
+        self.assertNotEqual(
+            first.meta_learning.checkpoint_path,
+            second.meta_learning.checkpoint_path,
+        )
 
     def test_cli_selects_dataset_and_domains_from_config(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -26,10 +26,10 @@ class DAGConfig:
 @dataclass(frozen=True)
 class BudgetConfig:
     max_calls_per_sample: int = 8
-    max_tokens_per_sample: int = 12000
+    max_tokens_per_sample: int | None = None
     max_cost_per_sample: Decimal = Decimal("1")
     max_calls_per_run: int = 1000
-    max_tokens_per_run: int = 1_000_000
+    max_tokens_per_run: int | None = None
     max_cost_per_run: Decimal = Decimal("100")
     max_sample_concurrency: int = 4
     max_global_concurrency: int = 16
@@ -40,14 +40,17 @@ class BudgetConfig:
     def __post_init__(self) -> None:
         integer_values = (
             self.max_calls_per_sample,
-            self.max_tokens_per_sample,
             self.max_calls_per_run,
-            self.max_tokens_per_run,
             self.max_sample_concurrency,
             self.max_global_concurrency,
         )
         if any(value < 1 for value in integer_values):
             raise ValueError("budget limits must be positive")
+        if any(
+            value is not None and value < 1
+            for value in (self.max_tokens_per_sample, self.max_tokens_per_run)
+        ):
+            raise ValueError("token budget limits must be positive or null")
 
 
 @dataclass(frozen=True)
@@ -70,7 +73,8 @@ class OptimizerBackendConfig:
     pricing_table_path: Path | None = None
     pricing_table_path_env: str | None = None
     temperature: float = 1.0
-    require_distinct_base_url: bool = True
+    # Legacy config field: accepted for old YAML files, but endpoint reuse is allowed.
+    require_distinct_base_url: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in {"mock", "openai-compatible"}:
@@ -118,12 +122,15 @@ class ExecutionConfig:
     max_concurrent_samples: int = 4
     progress: str = "auto"
     trace_log: Path | None = None
+    validate_after_each_batch: bool = False
 
     def __post_init__(self) -> None:
         if self.batch_size < 1 or self.max_concurrent_samples < 1:
             raise ValueError("execution batch size and sample concurrency must be positive")
         if self.progress not in {"auto", "on", "off"}:
             raise ValueError("execution.progress must be auto, on, or off")
+        if not isinstance(self.validate_after_each_batch, bool):
+            raise ValueError("execution.validate_after_each_batch must be boolean")
 
 
 @dataclass(frozen=True)
@@ -164,7 +171,7 @@ class MetaLearningConfig:  # 元学习配置
     enforce_negative_transfer: bool = True
     enforce_worst_domain: bool = True
     evaluation_repeats: int = 0
-    max_meta_test_samples_per_domain: int = 0
+    max_meta_test_samples_per_domain: int = 50
     isolate_candidate_budget: bool = False
     checkpoint_path: Path = Path("outputs/demse/checkpoint.json")
 
@@ -268,11 +275,14 @@ class DataConfig:
     final_test_domains: tuple[str, ...] = ()
     excluded_domains: tuple[str, ...] = ()
     train_sampling: str = "balanced_by_domain"
+    evolution_validation_samples: int = 50
     final_test_samples_per_domain: int = 0
     static_test_pattern: str | None = None
     require_static_test: bool = False
 
     def __post_init__(self) -> None:
+        if self.evolution_validation_samples < 1:
+            raise ValueError("data.evolution_validation_samples must be positive")
         configured = bool(
             self.dataset
             or self.root

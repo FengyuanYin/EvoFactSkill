@@ -2,6 +2,7 @@ import hashlib
 import inspect
 import json
 import tempfile
+import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -175,10 +176,6 @@ class ExperimentRunner:
         if config.backend == "mock":
             return MockBackend()
         base_url = config.resolved_base_url()
-        if config.require_distinct_base_url and base_url.rstrip("/") == self.config.base_url.rstrip(
-            "/"
-        ):
-            raise ValueError("optimizer and forward base_url must be different")
         pricing_table = None
         pricing_path = config.resolved_pricing_table_path()
         if pricing_path is not None:
@@ -291,6 +288,7 @@ class ExperimentRunner:
         progress: ProgressSink | None = None,
         task_name: str = "run",
         phase: str = "inference",
+        isolate_sample_budget: bool = False,
     ):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`strategy`（str，默认 `'utility-aware'`）需符合函数签名约定；`skills`（未显式标注，默认 `None`）需符合函数签名约定。
@@ -335,12 +333,21 @@ class ExperimentRunner:
             budget_manager=budget_manager,
             label_contract_registry=self.label_contract_registry,
         )
+        budget_scope = uuid.uuid4().hex if isolate_sample_budget else None
 
         async def infer_sample(sample):
             contract = self.label_contract_registry.resolve_sample(sample)
             gold = contract.normalize(sample.label)
             try:
-                trace = await runtime.infer(sample, RunBudget(self.config.max_skills_per_item))
+                trace = await runtime.infer(
+                    sample,
+                    RunBudget(self.config.max_skills_per_item),
+                    budget_sample_id=(
+                        f"{sample.sample_id}:inference:{budget_scope}"
+                        if budget_scope is not None
+                        else None
+                    ),
+                )
             except BudgetExceeded as exc:
                 # 兜底：单条样本的预算耗尽只降级为 ABSTAIN，不能让整轮实验失败（否则 955 条结果全丢）。
                 trace = _budget_abstention_trace(sample, skill_snapshot, str(exc), contract)
@@ -666,6 +673,7 @@ class ExperimentRunner:
                     progress=progress,
                     task_name=task_name,
                     phase=f"validation baseline r{repeat_index + 1}",
+                    isolate_sample_budget=True,
                 )
                 _, candidate_run = await self.run(
                     validation_rows,
@@ -673,6 +681,7 @@ class ExperimentRunner:
                     progress=progress,
                     task_name=task_name,
                     phase=f"validation candidate r{repeat_index + 1}",
+                    isolate_sample_budget=True,
                 )
                 repeated_baseline.extend(
                     replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
@@ -918,6 +927,16 @@ class ExperimentRunner:
             all_decisions.extend(outcome["gate_decisions"])
             utilities.update(outcome["utilities"])
             distillation.append(outcome["distillation"])
+            validation_metrics = None
+            if self.config.execution.validate_after_each_batch:
+                _, active_validation = await self.run(
+                    validation_rows,
+                    progress=progress,
+                    task_name=f"evolve batch {batch_index}/{batch_count}",
+                    phase="validation active bank",
+                    isolate_sample_budget=True,
+                )
+                validation_metrics = active_validation.aggregate_metrics
             batch_audit.append(
                 {
                     "batch_index": batch_index,
@@ -927,6 +946,7 @@ class ExperimentRunner:
                     "package_bank_digest": package_bank_digest(self.packages),
                     "accepted_proposal_ids": [item.proposal_id for item in accepted],
                     "committed_snapshots": list(snapshots),
+                    "validation_metrics": validation_metrics,
                 }
             )
             if progress is not None:

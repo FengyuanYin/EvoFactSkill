@@ -28,6 +28,7 @@ from evofact.experiments.runner import (
 )
 from evofact.reporting.meta_report import write_meta_report
 from evofact.reporting.report import skill_evolution_curve, summarize_runs, write_report
+from evofact.reporting.validation_curve import write_validation_curve
 from evofact.runtime.progress import NullProgressSink, ProgressEvent, make_progress_sink
 from evofact.skills.repository import SkillRepository
 
@@ -68,6 +69,39 @@ def _stable_digest(value) -> str:
         _stable_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _allows_unlimited_token_resume(checkpoint: dict, current_identity: dict) -> bool:
+    """Allow only removal of token caps from an otherwise identical evolve run."""
+    provenance = checkpoint.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    previous = {key: provenance.get(key) for key in current_identity}
+    if _stable_digest(previous) != checkpoint.get("identity_digest"):
+        return False
+    old_config = previous.get("config")
+    new_config = current_identity.get("config")
+    if not isinstance(old_config, dict) or not isinstance(new_config, dict):
+        return False
+    old_budget = old_config.get("budget")
+    new_budget = new_config.get("budget")
+    if not isinstance(old_budget, dict) or not isinstance(new_budget, dict):
+        return False
+
+    normalized_budget = dict(old_budget)
+    relaxed = False
+    for name in ("max_tokens_per_sample", "max_tokens_per_run"):
+        old, new = old_budget.get(name), new_budget.get(name)
+        if new is None and type(old) is int and old > 0:
+            normalized_budget[name] = None
+            relaxed = True
+        elif old != new:
+            return False
+    normalized_config = dict(old_config)
+    normalized_config["budget"] = normalized_budget
+    previous["config"] = normalized_config
+    previous["config_file_digest"] = current_identity.get("config_file_digest")
+    return relaxed and previous == current_identity
 
 
 def _atomic_json_file(path: Path, value) -> None:
@@ -631,6 +665,16 @@ async def _run_impl(args, progress):
         输入要求：`ids`（未显式标注）需符合函数签名约定。
         输出：返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         chosen = [s for s in (all_samples or []) if s.sample_id in set(ids)]
+        if role == "validation":
+            domains = tuple(dict.fromkeys(str(s.domain or s.dataset) for s in chosen))
+            selected, audit = balanced_domain_sample(
+                chosen,
+                domains,
+                config.data.evolution_validation_samples,
+                seed=config.seed,
+            )
+            data_sampling["evolution_validation"] = audit
+            return selected
         if role != "train" or args.limit == 0:
             return chosen
         if config.data.train_sampling == "balanced_by_domain" and train_domains:
@@ -716,12 +760,13 @@ async def _run_impl(args, progress):
             "data_sampling": data_sampling,
             "n_traces": len(traces),
             "metrics": result.aggregate_metrics,
+            "domain_metrics": result.domain_metrics,
             "traces": [asdict(t) for t in traces],
             "budget": runner._budget_manager().snapshot().model_dump(),
         }
     if args.command == "evolve":  # 使用skill 进化
         train = select(manifest.train_ids, role="train") if manifest else None
-        validation = select(manifest.evolution_validation_ids) if manifest else None
+        validation = select(manifest.evolution_validation_ids, role="validation") if manifest else None
         if manifest and (not train or not validation):
             raise ValueError("evolution requires non-empty train and evolution-validation splits")
         if args.resume and args.evaluation_only:
@@ -784,13 +829,21 @@ async def _run_impl(args, progress):
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             if checkpoint.get("schema_version") != "evolve_checkpoint_v1":
                 raise ValueError("unsupported evolution checkpoint schema")
-            if checkpoint.get("identity_digest") != identity_digest:
+            relaxed_token_budget = checkpoint.get("identity_digest") != identity_digest
+            if relaxed_token_budget and not _allows_unlimited_token_resume(checkpoint, identity):
                 raise ValueError(
                     "evolution checkpoint does not match the effective config or split"
                 )
             if checkpoint.get("status") == "complete":
                 raise ValueError("evolution checkpoint is already complete")
             provenance = dict(checkpoint.get("provenance", provenance))
+            if relaxed_token_budget:
+                identity_digest = checkpoint["identity_digest"]
+                provenance["token_budget_relaxed_on_resume"] = {
+                    "config_file_digest": identity["config_file_digest"],
+                    "max_tokens_per_sample": None,
+                    "max_tokens_per_run": None,
+                }
             training_run_id = str(checkpoint.get("training_run_id", training_run_id))
             expected_active = checkpoint.get("active_packages", {})
             current_active = {
@@ -837,6 +890,10 @@ async def _run_impl(args, progress):
                     **state,
                 },
             )
+            try:
+                write_validation_curve(checkpoint_path, root / config.output_dir)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                print(f"warning: could not update validation curve: {exc}", file=sys.stderr)
 
         outcome = await runner.closed_loop_batched(
             train,
@@ -875,6 +932,12 @@ async def _run_impl(args, progress):
         outcome["trace_log"] = str(configured_trace_log)
         outcome["skill_bank"] = repo.package_bank_info("active") if repo is not None else None
         outcome["data_sampling"] = data_sampling
+        if not args.evaluation_only:
+            outcome["validation_curve"] = {
+                "csv": str(root / config.output_dir / "validation-curve.csv"),
+                "active_csv": str(root / config.output_dir / "validation-active.csv"),
+                "svg": str(root / config.output_dir / "validation-curve.svg"),
+            }
         return outcome
     if args.command == "meta-evolve":  # 使用元进化
         rows = meta_samples()
@@ -986,7 +1049,7 @@ async def _run_impl(args, progress):
         }
     if args.command == "validate":
         train = select(manifest.train_ids, role="train") if manifest else None
-        validation = select(manifest.evolution_validation_ids) if manifest else None
+        validation = select(manifest.evolution_validation_ids, role="validation") if manifest else None
         if manifest and (not train or not validation):
             raise ValueError("validation requires non-empty train and evolution-validation splits")
         result = await runner.closed_loop(train, validation)
@@ -1002,7 +1065,9 @@ async def _run_impl(args, progress):
         arms = tuple(item.strip() for item in args.arms.split(",") if item.strip())
         train = select(manifest.train_ids, role="train") if manifest else fixture_samples()
         validation = (
-            select(manifest.evolution_validation_ids) if manifest else fixture_validation_samples()
+            select(manifest.evolution_validation_ids, role="validation")
+            if manifest
+            else fixture_validation_samples()
         )
         test = select(manifest.test_ids) if manifest else fixture_test_samples()
         needs_generation = any(arm in GENERATION_ABLATION_ARMS for arm in arms)
