@@ -249,6 +249,20 @@ def test_optimizer_backend_receives_the_output_cap(monkeypatch) -> None:
         OptimizerBackendConfig(backend="mock", max_output_tokens=0)
 
 
+def test_forward_inference_backend_is_left_uncapped(monkeypatch) -> None:
+    """The optimizer's output cap and temperature must never reach the inference path."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+    from evofact.config import load_config
+
+    config = load_config(PROJECT_ROOT / "configs" / "weibo21_cross_domain.yaml")
+    forward = ExperimentRunner(config, PROJECT_ROOT)._backend()
+
+    assert forward.max_output_tokens is None
+    assert forward.temperature == 0
+    assert config.optimizer_backend.max_output_tokens == 8192
+    assert config.optimizer_backend.temperature == 0.2
+
+
 def test_prompt_never_contains_ground_truth_keys() -> None:
     """Guard the exact-key exception for ``label``: only the prediction is allowed."""
     package: SkillPackage = load_package(PROJECT_ROOT / "skills" / "seeds" / "source_credibility")
