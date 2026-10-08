@@ -18,10 +18,10 @@ class BudgetLimits(ModelMixin):
     max_nodes: int = 8
     max_depth: int = 4
     max_calls_per_sample: int = 8
-    max_tokens_per_sample: int = 12000
+    max_tokens_per_sample: int | None = None
     max_cost_per_sample: Decimal = Decimal("1")
     max_calls_per_run: int = 1000
-    max_tokens_per_run: int = 1_000_000
+    max_tokens_per_run: int | None = None
     max_cost_per_run: Decimal = Decimal("100")
     max_sample_concurrency: int = 4
     max_global_concurrency: int = 16
@@ -36,9 +36,7 @@ class BudgetLimits(ModelMixin):
             self.max_nodes,
             self.max_depth,
             self.max_calls_per_sample,
-            self.max_tokens_per_sample,
             self.max_calls_per_run,
-            self.max_tokens_per_run,
             self.max_sample_concurrency,
             self.max_global_concurrency,
             self.call_timeout_ms,
@@ -46,6 +44,11 @@ class BudgetLimits(ModelMixin):
         )
         if any(value < 1 for value in integer_values):
             raise ValueError("budget limits must be positive")
+        if any(
+            value is not None and value < 1
+            for value in (self.max_tokens_per_sample, self.max_tokens_per_run)
+        ):
+            raise ValueError("token budget limits must be positive or null")
         if any(
             value < 0
             for value in (

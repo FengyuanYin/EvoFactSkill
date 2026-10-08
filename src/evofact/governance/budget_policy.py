@@ -27,7 +27,7 @@ def evaluate_budget(
         > limits.max_calls_per_sample
     ):
         return BudgetDecision(False, "sample call budget exhausted")
-    if (
+    if limits.max_tokens_per_sample is not None and (
         sample.tokens_used + sample.tokens_reserved + request.tokens + reserved_tokens
         > limits.max_tokens_per_sample
     ):
@@ -39,7 +39,10 @@ def evaluate_budget(
         return BudgetDecision(False, "sample cost budget exhausted")
     if run.calls_used + run.calls_reserved + request.calls > limits.max_calls_per_run:
         return BudgetDecision(False, "run call budget exhausted")
-    if run.tokens_used + run.tokens_reserved + request.tokens > limits.max_tokens_per_run:
+    if (
+        limits.max_tokens_per_run is not None
+        and run.tokens_used + run.tokens_reserved + request.tokens > limits.max_tokens_per_run
+    ):
         return BudgetDecision(False, "run token budget exhausted")
     if run.cost_used + run.cost_reserved + request.cost > limits.max_cost_per_run:
         return BudgetDecision(False, "run cost budget exhausted")

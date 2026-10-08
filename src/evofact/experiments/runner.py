@@ -2,8 +2,11 @@ import hashlib
 import inspect
 import json
 import tempfile
+import uuid
+from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 from evofact.attribution.clustering import cluster_reports
 from evofact.attribution.rules import attribute_trace
@@ -23,15 +26,11 @@ from evofact.core.models import (
 from evofact.data.label_registry import fixture_binary_contract
 from evofact.data.registry import DataRegistry
 from evofact.evolution.distiller import distill
-from evofact.evolution.package_candidate import (
-    build_package_candidate,
-    package_candidate_to_proposal,
-)
+from evofact.evolution.package_candidate import package_candidate_to_proposal
 from evofact.evolution.package_optimizer import (
     ALLOWED_TARGET_KINDS,
     FROZEN_TARGET_NAMES,
     PackageOptimizerAgent,
-    legacy_instruction_edit_to_patch,
 )
 from evofact.evolution.proposer import propose_from_cluster
 from evofact.governance.pricing_policy import load_pricing_table
@@ -55,7 +54,7 @@ from evofact.skills.package_loader import load_package
 from evofact.skills.utility import UtilityTracker
 from evofact.validation.evaluator import evaluate
 from evofact.validation.gate import ValidationGate
-from evofact.validation.statistics import mcnemar, paired_bootstrap
+from evofact.validation.statistics import paired_bootstrap, paired_metric_bootstrap
 
 
 def fixture_samples() -> list[Sample]:
@@ -101,6 +100,74 @@ def load_seed_skills(root: Path) -> list:
         for p in sorted(root.iterdir())
         if (p / "SKILL.md").is_file()
     ]
+
+
+def _majority_row(rows: list[SampleEvaluation]) -> SampleEvaluation:
+    """Collapse the repeated measurements of one validation sample into a single row.
+
+    The paired test must treat a sample as one unit. Keeping every repeat as a separate
+    observation would treat correlated measurements as independent evidence and shrink
+    the p-value by roughly the repeat count.
+    """
+    if not rows:
+        raise ValueError("a collapsed sample unit requires at least one row")
+    # Runtime abstentions and valid business labels must remain distinct ballots.
+    ballots = [(row.predicted, row.decision_origin == "runtime") for row in rows]
+    first_seen = {ballot: index for index, ballot in reversed(list(enumerate(ballots)))}
+    counts = Counter(ballots)
+    winner = max(counts, key=lambda label: (counts[label], -first_seen[label]))
+    # Keep the winning observation's origin and confidence, rather than the first repeat's.
+    return next(row for row, ballot in zip(rows, ballots) if ballot == winner)
+
+
+def proposal_history(
+    packages, proposals, decisions=None, *, limit: int = 12
+) -> tuple[dict[str, Any], ...]:
+    """Summarize what earlier batches already proposed and how the gate judged it.
+
+    Without this the optimizer re-proposes the same hypothesis batch after batch, paying
+    a full repeated validation round each time to be rejected for the same reason.
+
+    ``decisions`` may be omitted: meta-evolution evaluates a proposal only after the inner
+    updates of its episode, so an episode-scoped history is always ``pending``.
+    """
+    names = {package.skill_id: package.manifest.name for package in packages}
+    judged = list(decisions) if decisions is not None else [None] * len(proposals)
+    history = []
+    for proposal, decision in zip(proposals, judged):
+        targets = [names.get(item, item) for item in (proposal.target_skill_ids or ())]
+        failures = decision.regression_failures if decision is not None else ()
+        history.append(
+            {
+                "target": targets[0] if targets else None,
+                "operation": str(getattr(proposal.operation, "value", proposal.operation)),
+                "rationale": str(proposal.rationale)[:400],
+                "disposition": decision.disposition if decision is not None else "pending",
+                "failures": [str(item)[:120] for item in failures][:4],
+            }
+        )
+    return tuple(history[-limit:])
+
+
+def counterfactual_harm(group) -> dict[str, float]:
+    """Sum each Skill's measured counterfactual delta over a cluster.
+
+    ``delta = baseline_correct - without_skill_correct``, so the most negative total marks
+    the Skill whose removal repaired the most failures: the culprit worth rewriting.
+    """
+    totals: dict[str, float] = {}
+    for report in group:
+        for skill_id, delta in (getattr(report, "counterfactual_deltas", None) or {}).items():
+            totals[skill_id] = totals.get(skill_id, 0.0) + float(delta)
+    return totals
+
+
+def rank_optimizer_targets(editable, responsible, harm) -> list:
+    """Order responsible Packages by measured harm, keeping bank order as the tie-break."""
+    return sorted(
+        (package for package in editable if package.skill_id in responsible),
+        key=lambda package: (harm.get(package.skill_id, 0.0), editable.index(package)),
+    )
 
 
 class ExperimentRunner:
@@ -175,10 +242,6 @@ class ExperimentRunner:
         if config.backend == "mock":
             return MockBackend()
         base_url = config.resolved_base_url()
-        if config.require_distinct_base_url and base_url.rstrip("/") == self.config.base_url.rstrip(
-            "/"
-        ):
-            raise ValueError("optimizer and forward base_url must be different")
         pricing_table = None
         pricing_path = config.resolved_pricing_table_path()
         if pricing_path is not None:
@@ -198,6 +261,7 @@ class ExperimentRunner:
             provider=config.provider,
             pricing_table=pricing_table,
             temperature=config.temperature,
+            max_output_tokens=config.max_output_tokens,
         )
 
     def pricing_identity(self) -> str:
@@ -291,6 +355,7 @@ class ExperimentRunner:
         progress: ProgressSink | None = None,
         task_name: str = "run",
         phase: str = "inference",
+        isolate_sample_budget: bool = False,
     ):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`strategy`（str，默认 `'utility-aware'`）需符合函数签名约定；`skills`（未显式标注，默认 `None`）需符合函数签名约定。
@@ -335,12 +400,21 @@ class ExperimentRunner:
             budget_manager=budget_manager,
             label_contract_registry=self.label_contract_registry,
         )
+        budget_scope = uuid.uuid4().hex if isolate_sample_budget else None
 
         async def infer_sample(sample):
             contract = self.label_contract_registry.resolve_sample(sample)
             gold = contract.normalize(sample.label)
             try:
-                trace = await runtime.infer(sample, RunBudget(self.config.max_skills_per_item))
+                trace = await runtime.infer(
+                    sample,
+                    RunBudget(self.config.max_skills_per_item),
+                    budget_sample_id=(
+                        f"{sample.sample_id}:inference:{budget_scope}"
+                        if budget_scope is not None
+                        else None
+                    ),
+                )
             except BudgetExceeded as exc:
                 # 兜底：单条样本的预算耗尽只降级为 ABSTAIN，不能让整轮实验失败（否则 955 条结果全丢）。
                 trace = _budget_abstention_trace(sample, skill_snapshot, str(exc), contract)
@@ -396,6 +470,7 @@ class ExperimentRunner:
         generation_guard=None,
         progress: ProgressSink | None = None,
         task_name: str = "evolve",
+        prior_proposals=(),
     ):
         """函数作用：根据一批样本完成推理、归因、经验蒸馏和检测技能候选生成。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`generation_guard`（未显式标注，默认 `None`）需以关键字传入并符合签名约定。
@@ -500,6 +575,8 @@ class ExperimentRunner:
             generation_guard(traces, reports)
         clusters = cluster_reports([report for report in reports if report.error_types])
         package_candidates = {}
+        skipped_proposals: list[tuple[str, str]] = []
+        optimizer = None
 
         if self.config.evolution.proposer == "llm":
             optimizer_packages = [
@@ -510,10 +587,22 @@ class ExperimentRunner:
             ]
             if len(optimizer_packages) != 1:
                 raise ValueError("optimizer Package must resolve to exactly one META Package")
+
+            def cluster_distillation(cluster_id: str, group) -> dict:
+                """Compact cluster-scoped experience summary handed to the optimizer."""
+                summary = distill(traces, list(group))
+                summary.pop("trace_ids", None)
+                summary["cluster_id"] = cluster_id
+                return summary
+
             optimizer = PackageOptimizerAgent(
                 backend=self._optimizer_backend(),
                 optimizer_package=optimizer_packages[0],
+                config=self.config.evolution,
                 budget_manager=self._budget_manager(),
+                rule_fallback=lambda cluster_id, group: propose_from_cluster(
+                    cluster_id, group, self.skills
+                ),
             )
 
             cluster_items = sorted(clusters.items())
@@ -530,8 +619,9 @@ class ExperimentRunner:
                     and package.manifest.name not in FROZEN_TARGET_NAMES
                     and package.manifest.name != "generation_agent"
                 ]
+                ranked = rank_optimizer_targets(editable, responsible, counterfactual_harm(group))
                 target = next(
-                    (package for package in editable if package.skill_id in responsible),
+                    iter(ranked),
                     next(
                         (
                             package
@@ -543,31 +633,44 @@ class ExperimentRunner:
                 )
                 if target is None:
                     return None
-                candidate = await optimizer.propose(
+                outcome = await optimizer.propose(
                     target,
                     self.packages,
+                    cluster_id=cluster_id,
                     reports=group,
                     traces=traces,
+                    distillation=cluster_distillation(cluster_id, group),
+                    prior_proposals=prior_proposals,
                 )
+                if outcome.status in {"no_change", "skipped"}:
+                    if outcome.status == "skipped":
+                        skipped_proposals.append((cluster_id, outcome.reason))
+                    return None
+                if outcome.status == "fallback":
+                    # The rule proposer answered instead; it has no PackageCandidate.
+                    return outcome.proposal, None
+                candidate = outcome.candidate
                 if candidate is None:
                     return None
                 if candidate.base is None and not self.config.evolution.discovery:
                     return None
                 if candidate.base is not None and self.config.evolution.scope == "instructions":
-                    instructions = package_to_skill_spec(candidate.package).instructions
-                    candidate = build_package_candidate(
-                        target,
-                        legacy_instruction_edit_to_patch(
-                            target,
-                            instructions,
-                            rationale=(
-                                candidate.patch.rationale
-                                if candidate.patch is not None
-                                else "instruction-only ablation"
-                            ),
-                            source_trace_ids=tuple(report.trace_id for report in group),
-                        ),
+                    edits = {
+                        operation.path
+                        for operation in (
+                            candidate.patch.file_operations if candidate.patch else ()
+                        )
+                    }
+                    allowed_path = target.manifest.entrypoints.instructions
+                    changed_manifest = (
+                        replace(candidate.package.manifest, version=target.manifest.version)
+                        != target.manifest
                     )
+                    if edits - {allowed_path} or changed_manifest:
+                        # Instructions scope: never silently discard file-level edits.
+                        optimizer.skips["scope_violation"] += 1
+                        skipped_proposals.append((cluster_id, "scope_violation"))
+                        return None
                 proposal = package_candidate_to_proposal(
                     candidate,
                     cluster_id=cluster_id,
@@ -622,6 +725,8 @@ class ExperimentRunner:
             "distillation": distill(traces, reports),
             "proposals": proposals,
             "package_candidates": package_candidates,
+            "optimizer_skips": dict(optimizer.skips) if optimizer is not None else {},
+            "skipped_proposals": tuple(skipped_proposals),
         }
 
     async def closed_loop(
@@ -631,6 +736,7 @@ class ExperimentRunner:
         *,
         progress: ProgressSink | None = None,
         task_name: str = "evolve",
+        prior_proposals=(),
     ):
         """函数作用：运行候选生成与独立验证闭环，为每个候选生成门控决策。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`validation_samples`（list[Sample] | None，默认 `None`）需符合函数签名约定。
@@ -654,18 +760,23 @@ class ExperimentRunner:
         errors = detect_leakage(rows + validation_rows, manifest)
         if errors:
             raise ValueError("validation data leakage: " + "; ".join(errors))
-        outcome = await self.evolve_once(rows, progress=progress, task_name=task_name)
+        outcome = await self.evolve_once(
+            rows, progress=progress, task_name=task_name, prior_proposals=prior_proposals
+        )
         decisions = []
         for proposal in outcome["proposals"]:
             candidate_skills = apply_candidate(self.skills, proposal)
             repeated_baseline = []
             repeated_candidate = []
+            unit_baseline: dict[str, list[SampleEvaluation]] = {}
+            unit_candidate: dict[str, list[SampleEvaluation]] = {}
             for repeat_index in range(self.config.gate.repeats):
                 _, base_run = await self.run(
                     validation_rows,
                     progress=progress,
                     task_name=task_name,
                     phase=f"validation baseline r{repeat_index + 1}",
+                    isolate_sample_budget=True,
                 )
                 _, candidate_run = await self.run(
                     validation_rows,
@@ -673,7 +784,12 @@ class ExperimentRunner:
                     progress=progress,
                     task_name=task_name,
                     phase=f"validation candidate r{repeat_index + 1}",
+                    isolate_sample_budget=True,
                 )
+                for row in base_run.per_sample:
+                    unit_baseline.setdefault(row.sample_id, []).append(row)
+                for row in candidate_run.per_sample:
+                    unit_candidate.setdefault(row.sample_id, []).append(row)
                 repeated_baseline.extend(
                     replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
                     for x in base_run.per_sample
@@ -682,13 +798,28 @@ class ExperimentRunner:
                     replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
                     for x in candidate_run.per_sample
                 )
+            # Metrics average over every repeat, but the paired test runs on one collapsed
+            # row per sample: repeats are measurements of the same unit, not extra units.
             baseline_result = evaluate(repeated_baseline)
             candidate_result = evaluate(repeated_candidate)
-            ci = paired_bootstrap(repeated_baseline, repeated_candidate, seed=self.config.seed)
-            candidate_result = replace(
-                candidate_result, confidence_intervals={"paired_accuracy_delta": ci}
+            test_baseline = [_majority_row(rows) for _, rows in sorted(unit_baseline.items())]
+            test_candidate = [_majority_row(rows) for _, rows in sorted(unit_candidate.items())]
+            interval, test = paired_metric_bootstrap(
+                test_baseline,
+                test_candidate,
+                metric="macro_f1_all",
+                seed=self.config.seed,
+                alpha=self.config.gate.alpha,
             )
-            test = mcnemar(repeated_baseline, repeated_candidate, self.config.gate.alpha)
+            candidate_result = replace(
+                candidate_result,
+                confidence_intervals={
+                    "paired_macro_f1_delta": interval,
+                    "paired_accuracy_delta": paired_bootstrap(
+                        test_baseline, test_candidate, seed=self.config.seed
+                    ),
+                },
+            )
             package_candidate = outcome["package_candidates"].get(proposal.proposal_id)
             levels = (
                 [package_candidate.safety_level]
@@ -826,6 +957,7 @@ class ExperimentRunner:
                 validation_rows,
                 progress=progress,
                 task_name=f"evolve batch {batch_index}/{batch_count}",
+                prior_proposals=proposal_history(self.packages, all_proposals, all_decisions),
             )
             pairs = sorted(
                 zip(outcome["proposals"], outcome["gate_decisions"]),
@@ -918,6 +1050,16 @@ class ExperimentRunner:
             all_decisions.extend(outcome["gate_decisions"])
             utilities.update(outcome["utilities"])
             distillation.append(outcome["distillation"])
+            validation_metrics = None
+            if self.config.execution.validate_after_each_batch:
+                _, active_validation = await self.run(
+                    validation_rows,
+                    progress=progress,
+                    task_name=f"evolve batch {batch_index}/{batch_count}",
+                    phase="validation active bank",
+                    isolate_sample_budget=True,
+                )
+                validation_metrics = active_validation.aggregate_metrics
             batch_audit.append(
                 {
                     "batch_index": batch_index,
@@ -927,6 +1069,9 @@ class ExperimentRunner:
                     "package_bank_digest": package_bank_digest(self.packages),
                     "accepted_proposal_ids": [item.proposal_id for item in accepted],
                     "committed_snapshots": list(snapshots),
+                    "validation_metrics": validation_metrics,
+                    "optimizer_skips": outcome.get("optimizer_skips", {}),
+                    "skipped_proposals": list(outcome.get("skipped_proposals", ())),
                 }
             )
             if progress is not None:

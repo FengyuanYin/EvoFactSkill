@@ -40,6 +40,7 @@ def _single_schema_metrics(rows: list[SampleEvaluation]) -> dict[str, float]:
         "cost_available": float(
             bool(rows) and all(row.cost_status != "unavailable" for row in rows)
         ),
+        "cost_coverage": (sum(row.cost_status != "unavailable" for row in rows) / n if n else 0.0),
         "evidence_coverage": sum(row.evidence_available for row in rows) / n if n else 0.0,
     }
     for label in labels:
@@ -84,6 +85,7 @@ def compute_metrics(rows: list[SampleEvaluation]) -> dict[str, float]:
             "selective_risk": 1.0,
             "mean_cost": 0.0,
             "cost_available": 0.0,
+            "cost_coverage": 0.0,
             "evidence_coverage": 0.0,
         }
     by_schema: dict[str, list[SampleEvaluation]] = defaultdict(list)
@@ -104,6 +106,7 @@ def compute_metrics(rows: list[SampleEvaluation]) -> dict[str, float]:
         "selective_risk": 1 - covered_correct / covered_n if covered_n else 1.0,
         "mean_cost": sum(row.cost for row in rows) / n,
         "cost_available": float(all(row.cost_status != "unavailable" for row in rows)),
+        "cost_coverage": sum(row.cost_status != "unavailable" for row in rows) / n,
         "evidence_coverage": sum(row.evidence_available for row in rows) / n,
     }
 

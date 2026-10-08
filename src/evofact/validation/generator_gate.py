@@ -16,7 +16,6 @@ class GeneratorGateConfig:
     max_duplicate_increase: float = 0.0
     max_leakage_rate: float = 0.0
     max_safety_rejection_rate: float = 0.0
-    max_cost_ratio: float = 1.5
     min_label_coverage: float = 0.0
     min_worst_label_agreement: float = 0.0
     max_worst_label_probe_drop: float = 1.0
@@ -100,12 +99,8 @@ class GeneratorGate:
             failures.append("worst-label agreement below threshold")
         if challenger.worst_label_probe_drop > self.config.max_worst_label_probe_drop:
             failures.append("worst-label probe drop exceeded")
-        if champion.cost is None or challenger.cost is None:
-            failures.append("cost unavailable")
-        elif challenger.cost > max(champion.cost, type(champion.cost)("0.000000001")) * type(
-            champion.cost
-        )(str(self.config.max_cost_ratio)):
-            failures.append("cost ratio exceeded")
+        # Cost is recorded and reported but no longer vetoes a promotion: a single call
+        # whose price is unknown used to reject a candidate outright.
         if safety_level == "blocked":
             failures.append("candidate blocked by safety scan")
         if safety_level == "review_required":

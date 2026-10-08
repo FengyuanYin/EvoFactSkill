@@ -38,7 +38,7 @@ def test_generator_gate_compares_diversity_and_difficulty():
     assert "difficulty delta below threshold" in decision.failures
 
 
-def test_generator_gate_requires_independent_episode_and_known_cost():
+def test_generator_gate_requires_independent_episode_and_ignores_cost():
     same_episode = PairedGeneratorEvaluation(
         "episode",
         "episode",
@@ -49,6 +49,7 @@ def test_generator_gate_requires_independent_episode_and_known_cost():
     )
     assert not GeneratorGate().decide(same_episode).accepted
 
+    # Cost is reported, not gated: an unknown or much higher cost must not reject.
     unavailable_cost = PairedGeneratorEvaluation(
         "source",
         "evaluation",
@@ -57,4 +58,6 @@ def test_generator_gate_requires_independent_episode_and_known_cost():
         _metrics(),
         _metrics(cost=None),
     )
-    assert "cost unavailable" in GeneratorGate().decide(unavailable_cost).failures
+    decision = GeneratorGate().decide(unavailable_cost)
+    assert decision.accepted, decision.failures
+    assert not any("cost" in failure for failure in decision.failures)

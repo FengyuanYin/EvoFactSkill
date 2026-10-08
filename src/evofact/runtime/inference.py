@@ -50,13 +50,20 @@ class InferenceRuntime:
             (fixture_binary_contract(),)
         )
 
-    async def infer(self, sample: Sample, budget: RunBudget = RunBudget()) -> InferenceTrace:
+    async def infer(
+        self,
+        sample: Sample,
+        budget: RunBudget = RunBudget(),
+        *,
+        budget_sample_id: str | None = None,
+    ) -> InferenceTrace:
         """函数作用：对单条样本执行技能路由、专家分析、证据聚合和最终判定，形成完整轨迹。
         输入要求：`self` 应为已初始化的 `InferenceRuntime` 实例；`sample`（Sample）需符合函数签名约定；`budget`（RunBudget，默认 `RunBudget()`）需符合函数签名约定。
         输出：异步返回 `InferenceTrace` 类型结果；校验或下游调用失败时异常向上传递。"""
         contract = self.label_contract_registry.resolve_sample(sample)
         if sample.label is not None:
             contract.normalize(sample.label)
+        charge_id = budget_sample_id or sample.sample_id
         public = sample.public_view()
         scope_view = {
             "dataset": sample.dataset,
@@ -72,7 +79,7 @@ class InferenceRuntime:
             if self.budget_manager is not None and isinstance(self.router, LLMSkillRouter):
                 try:
                     route_reservation = await self.budget_manager.reserve(
-                        sample.sample_id,
+                        charge_id,
                         BudgetRequest(calls=1, tokens=1000, purpose="router"),
                     )
                 except BudgetExceeded as exc:
@@ -92,7 +99,7 @@ class InferenceRuntime:
                     return await self.router.route(public, eligible_skills, self.utilities, budget)
 
                 if self.budget_manager is not None and isinstance(self.router, LLMSkillRouter):
-                    async with self.budget_manager.concurrency(sample.sample_id):
+                    async with self.budget_manager.concurrency(charge_id):
                         routing_result = await asyncio.wait_for(
                             invoke_router(),
                             self.budget_manager.limits.call_timeout_ms / 1000,
@@ -170,7 +177,7 @@ class InferenceRuntime:
                 else None
             ),
         )
-        execution = await executor.execute(plan, public, sample_id=sample.sample_id)
+        execution = await executor.execute(plan, public, sample_id=charge_id)
         reports = [
             item.report
             for item in execution.nodes
@@ -209,9 +216,9 @@ class InferenceRuntime:
                     )
 
                 if self.budget_manager is not None:
-                    async with self.budget_manager.concurrency(sample.sample_id):
+                    async with self.budget_manager.concurrency(charge_id):
                         judge_reservation = await self.budget_manager.reserve(
-                            sample.sample_id,
+                            charge_id,
                             BudgetRequest(calls=1, tokens=1000, purpose="judge"),
                             judge=True,
                         )

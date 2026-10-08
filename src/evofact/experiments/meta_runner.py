@@ -41,7 +41,7 @@ from evofact.validation.meta_gate import MetaValidationGate
 from evofact.validation.transfer import CrossEpisodeAggregator
 
 from .checkpoint import CheckpointIdentity, CheckpointV2Store
-from .runner import ExperimentRunner
+from .runner import ExperimentRunner, proposal_history
 
 
 def _stable_digest(*values: object) -> str:
@@ -265,6 +265,8 @@ class MetaEvolutionRunner:
             key: package_from_dict(value)
             for key, value in saved.get("package_candidates", {}).items()
         }
+        optimizer_skips = dict(saved.get("optimizer_skips", {}))
+        skipped_proposals = list(saved.get("skipped_proposals", ()))
         if not saved:
             store.save(
                 checkpoint_identity,
@@ -284,6 +286,8 @@ class MetaEvolutionRunner:
                     "episode_results": [],
                     "candidates": {},
                     "package_candidates": {},
+                    "optimizer_skips": {},
+                    "skipped_proposals": [],
                     "committed": False,
                 },
             )
@@ -311,6 +315,9 @@ class MetaEvolutionRunner:
             test_rows = [by_id[sample_id] for sample_id in episode.meta_test_sample_ids]
             test_rows = self._bounded_meta_test_rows(test_rows, episode.episode_id)
             inner = await self._evolve_episode(train_rows, episode, firewall, progress=progress)
+            for key, value in (inner.get("optimizer_skips") or {}).items():
+                optimizer_skips[key] = optimizer_skips.get(key, 0) + value
+            skipped_proposals.extend(inner.get("skipped_proposals", ()))
             allowed_traces = {trace.trace_id for trace in inner["traces"]}
             episode_candidates = set()
             for proposal in inner["proposals"]:
@@ -436,6 +443,8 @@ class MetaEvolutionRunner:
                     "package_candidates": {
                         key: package_to_dict(value) for key, value in package_candidates.items()
                     },
+                    "optimizer_skips": optimizer_skips,
+                    "skipped_proposals": skipped_proposals,
                     "committed": False,
                 },
             )
@@ -519,6 +528,8 @@ class MetaEvolutionRunner:
                 "package_candidates": {
                     key: package_to_dict(value) for key, value in package_candidates.items()
                 },
+                "optimizer_skips": optimizer_skips,
+                "skipped_proposals": skipped_proposals,
                 "committed": bool(committed),
             },
         )
@@ -562,6 +573,9 @@ class MetaEvolutionRunner:
             "proposals": [],
             "package_candidates": {},
         }
+        seen_proposals: list[EvolutionProposal] = []
+        optimizer_skips: dict[str, int] = {}
+        skipped_proposals: list[tuple[str, str]] = []
         update_count = (len(rows) + interval - 1) // interval
         for update_index, start in enumerate(range(0, len(rows), interval), start=1):
             batch = rows[start : start + interval]
@@ -572,10 +586,18 @@ class MetaEvolutionRunner:
                 ),
                 progress=progress,
                 task_name=f"{task_name} update {update_index}/{update_count}",
+                # Episode-scoped memory: a later update sees what earlier updates of the
+                # same episode already proposed, and stops re-proposing that hypothesis.
+                # Proposals stay inside the episode so episodes remain independent.
+                prior_proposals=proposal_history(self.base.packages, seen_proposals),
             )
             proposals = list(outcome["proposals"])
+            seen_proposals.extend(proposals)
             if limit:
                 proposals = proposals[:limit]
+            for key, value in (outcome.get("optimizer_skips") or {}).items():
+                optimizer_skips[key] = optimizer_skips.get(key, 0) + value
+            skipped_proposals.extend(outcome.get("skipped_proposals", ()))
             proposal_ids = {proposal.proposal_id for proposal in proposals}
             combined["traces"].extend(outcome["traces"])
             combined["sample_evaluations"].extend(outcome["evaluation"].per_sample)
@@ -598,6 +620,8 @@ class MetaEvolutionRunner:
             "distillation": combined["distillation"],
             "proposals": combined["proposals"],
             "package_candidates": combined["package_candidates"],
+            "optimizer_skips": optimizer_skips,
+            "skipped_proposals": tuple(skipped_proposals),
         }
 
     def _bounded_meta_test_rows(self, rows, episode_id: str):

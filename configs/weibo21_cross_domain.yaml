@@ -1,13 +1,14 @@
 seed: 42
 
-output_dir: outputs/weibo21_cross_domain
-skill_store: skills/store_weibo21
+output_dir: outputs/weibo21_cross_domain_4
+skill_store: skills/store_weibo21_cross_domain_4
 
 data:
   dataset: weibo21
   root: datasets/Weibo21
-  train_domains: ["政治", "财经商业", "军事", "科技", "社会生活", "文体娱乐", "医药健康", "教育考试"]
-  final_test_domains: ["灾难事故"]
+  evolution_validation_samples: 50
+  train_domains: ["政治", "军事", "科技", "社会生活"]
+  final_test_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
   excluded_domains: ["无法确定"]
   train_sampling: balanced_by_domain
   final_test_samples_per_domain: 100
@@ -29,10 +30,14 @@ optimizer_backend:
   model_env: EVOFACT_OPTIMIZER_MODEL
   base_url_env: EVOFACT_OPTIMIZER_BASE_URL
   api_key_env: EVOFACT_OPTIMIZER_API_KEY
-  provider: openai-compatible
+  provider: deepseek
   pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
-  temperature: 1.0
-  require_distinct_base_url: true
+  # 低温：改写 Skill 指令/文件需要可复现，1.0 会让同一输入产出差异很大的 patch，
+  # 也让"为什么被拒"无法归因。
+  temperature: 0.2
+  # 显式给出补全上限：整包改写要塞进一个 JSON 字符串，被服务端默认上限截断就会
+  # 变成静默的 JSON 解析失败。
+  max_output_tokens: 8192
 
 # DeepSeek official peak rates captured on 2026-09-18. Refresh this dated table
 # before a publication run; off-peak billing can be lower.
@@ -41,17 +46,19 @@ pricing:
   table_path: pricing/deepseek-2026-09-18-peak.json
   require_cost_for_promotion: true
 
-# run 级预算按整次 run() 调用累加，test 会把全部 955 条测试样本放进一次 run()。
-# 每条样本最坏 5 次调用（1 router + ≤3 specialist + 1 judge）、≤12000 token：
-# 955 × 5 ≈ 4775 calls、955 × 12000 ≈ 11.5M tokens，这里各留约 2 倍余量。
+# 调用次数和费用仍受限；token 用量只记录，不设置上限。
+# run 级账本跨 batch 累加，必须覆盖"训练 + 每条提案的 3 repeats × 2 arms × 50 验证样本"。
+# 本实验按 `--limit 200` 规划（batch_size 16 → 13 batch，4 个源域各 50 条）；
+# 上一轮实测 ~0.7 条提案/batch、4.57 calls/推理、$0.0187/推理，据此：
+#   13 batch × 1 条提案 × 300 次验证推理 × ~5 calls ≈ 19.5k calls、~$77（均值 ~$55）。
+# 注意：普通 evolve 不套用 evolution.max_proposals_per_update（只有 meta-evolve 用），
+# 一个 batch 的 error cluster 数理论上可以 >1，因此上限比预期花费留出更多余量。
 budget:
   max_calls_per_sample: 8
-  max_tokens_per_sample: 40000
   max_cost_per_sample: 1.0
 
-  max_calls_per_run: 10000
-  max_tokens_per_run: 30000000
-  max_cost_per_run: 100.0
+  max_calls_per_run: 50000
+  max_cost_per_run: 200.0
 
   max_sample_concurrency: 4
   max_global_concurrency: 8
@@ -70,7 +77,7 @@ execution:
   batch_size: 16
   max_concurrent_samples: 16
   progress: auto
-  trace_log: outputs/weibo21_cross_domain/training-traces.jsonl
+  trace_log: outputs/weibo21_cross_domain_4/training-traces.jsonl
 
 evolution:
   enabled: true
@@ -96,11 +103,14 @@ gate:
   max_protected_domain_drop: 0.02
   alpha: 0.05
   max_cost_ratio: 1.5
+  # 真实运行总会有极少数调用无法定价（超时/解码失败/响应缺少 usage 块，实测 0.2%~1%）。
+  # 要求 100% 可用会让候选因为一条脏行被判 "cost unavailable"，这里留 1% 余量。
+  min_cost_coverage: 0.99
 
 meta_learning:
   enabled: true
   strategy: leave_one_domain_out
-  episodes: 8
+  episodes: 4
   meta_test_domain_count: 1
   min_source_domains: 3
   min_valid_episodes: 3
@@ -116,6 +126,6 @@ meta_learning:
   enforce_negative_transfer: true
   enforce_worst_domain: true
   evaluation_repeats: 1
-  max_meta_test_samples_per_domain: 10
+  max_meta_test_samples_per_domain: 50
   isolate_candidate_budget: true
-  checkpoint_path: outputs/weibo21_cross_domain/checkpoint.json
+  checkpoint_path: outputs/weibo21_cross_domain_4/checkpoint.json

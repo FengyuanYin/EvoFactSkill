@@ -6,6 +6,7 @@ skill_store: skills/store_weibo21_evolve_fold_2
 data:
   dataset: weibo21
   root: datasets/Weibo21
+  evolution_validation_samples: 50
   train_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
   final_test_domains: ["政治", "军事", "科技", "社会生活"]
   excluded_domains: ["无法确定"]
@@ -30,7 +31,6 @@ optimizer_backend:
   provider: openai-compatible
   pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
   temperature: 1.0
-  require_distinct_base_url: false
 
 pricing:
   provider: deepseek
@@ -39,11 +39,9 @@ pricing:
 
 budget:
   max_calls_per_sample: 8
-  max_tokens_per_sample: 40000
   max_cost_per_sample: 1.0
 
   max_calls_per_run: 10000
-  max_tokens_per_run: 30000000
   max_cost_per_run: 100.0
 
   max_sample_concurrency: 4
@@ -109,6 +107,6 @@ meta_learning:
   enforce_negative_transfer: true
   enforce_worst_domain: true
   evaluation_repeats: 1
-  max_meta_test_samples_per_domain: 10
+  max_meta_test_samples_per_domain: 50
   isolate_candidate_budget: true
   checkpoint_path: outputs/weibo21_evolve_fold_2/meta-checkpoint.json

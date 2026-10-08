@@ -26,10 +26,10 @@ class DAGConfig:
 @dataclass(frozen=True)
 class BudgetConfig:
     max_calls_per_sample: int = 8
-    max_tokens_per_sample: int = 12000
+    max_tokens_per_sample: int | None = None
     max_cost_per_sample: Decimal = Decimal("1")
     max_calls_per_run: int = 1000
-    max_tokens_per_run: int = 1_000_000
+    max_tokens_per_run: int | None = None
     max_cost_per_run: Decimal = Decimal("100")
     max_sample_concurrency: int = 4
     max_global_concurrency: int = 16
@@ -40,14 +40,17 @@ class BudgetConfig:
     def __post_init__(self) -> None:
         integer_values = (
             self.max_calls_per_sample,
-            self.max_tokens_per_sample,
             self.max_calls_per_run,
-            self.max_tokens_per_run,
             self.max_sample_concurrency,
             self.max_global_concurrency,
         )
         if any(value < 1 for value in integer_values):
             raise ValueError("budget limits must be positive")
+        if any(
+            value is not None and value < 1
+            for value in (self.max_tokens_per_sample, self.max_tokens_per_run)
+        ):
+            raise ValueError("token budget limits must be positive or null")
 
 
 @dataclass(frozen=True)
@@ -70,13 +73,20 @@ class OptimizerBackendConfig:
     pricing_table_path: Path | None = None
     pricing_table_path_env: str | None = None
     temperature: float = 1.0
-    require_distinct_base_url: bool = True
+    # Explicit completion cap for optimizer calls. A full Package rewrite inside one JSON
+    # string can otherwise be truncated by the provider default, which surfaces only as a
+    # silent JSON parse failure.
+    max_output_tokens: int | None = None
+    # Legacy config field: accepted for old YAML files, but endpoint reuse is allowed.
+    require_distinct_base_url: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in {"mock", "openai-compatible"}:
             raise ValueError("optimizer_backend.backend must be mock or openai-compatible")
         if not 0 <= self.temperature <= 2:
             raise ValueError("optimizer_backend.temperature must be between 0 and 2")
+        if self.max_output_tokens is not None and self.max_output_tokens < 1:
+            raise ValueError("optimizer_backend.max_output_tokens must be positive or null")
         if not self.enabled or self.backend == "mock":
             return
         if bool(self.model) == bool(self.model_env):
@@ -118,12 +128,15 @@ class ExecutionConfig:
     max_concurrent_samples: int = 4
     progress: str = "auto"
     trace_log: Path | None = None
+    validate_after_each_batch: bool = False
 
     def __post_init__(self) -> None:
         if self.batch_size < 1 or self.max_concurrent_samples < 1:
             raise ValueError("execution batch size and sample concurrency must be positive")
         if self.progress not in {"auto", "on", "off"}:
             raise ValueError("execution.progress must be auto, on, or off")
+        if not isinstance(self.validate_after_each_batch, bool):
+            raise ValueError("execution.validate_after_each_batch must be boolean")
 
 
 @dataclass(frozen=True)
@@ -131,10 +144,19 @@ class GateConfig:  # 验证门配置
     repeats: int = 3
     min_macro_f1_gain: float = 0.01
     min_coverage: float = 0.8
+    # 兼容既有 YAML 保留，但 ValidationGate 已不再按域跌幅否决候选：验证集每个源域只有
+    # ~12-13 条样本，单条翻转就会让该域 macro-F1 变动 0.022-0.071，0.02 的阈值低于噪声
+    # 下限，等价于"任何域都不许退步"。域级指标仍会记录在报告里。
     max_protected_domain_drop: float = 0.02
     alpha: float = 0.05
+    # 兼容既有 YAML 保留，但 ValidationGate 已不再按成本比否决候选：mean_cost 只被记录
+    # 和报告，不参与晋升判定。（meta-evolve 走 MetaLearningConfig 的同名字段，仍然生效。）
     max_cost_ratio: float = 1.5
     max_calibration_increase: float = 0.2
+    # 成本门控要求参与比较的样本行中至少有这个比例拿到已知成本。真实 API 运行会有
+    # 少量调用无法定价（超时/解码失败/响应缺少 usage），1.0 会让绝大多数候选因为一条
+    # 脏行而被判 "cost unavailable"，因此默认留 1% 的余量而不是要求全量可用。
+    min_cost_coverage: float = 0.99
 
     def __post_init__(self) -> None:
         """函数作用：在 `GateConfig` 数据类初始化后检查字段之间的业务约束。
@@ -142,6 +164,8 @@ class GateConfig:  # 验证门配置
         输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
         if self.repeats < 2 or not 0 <= self.min_coverage <= 1 or self.max_calibration_increase < 0:
             raise ValueError("invalid gate configuration")
+        if not 0 <= self.min_cost_coverage <= 1:
+            raise ValueError("gate.min_cost_coverage must be between 0 and 1")
 
 
 @dataclass(frozen=True)
@@ -156,6 +180,8 @@ class MetaLearningConfig:  # 元学习配置
     max_negative_transfer_rate: float = 0.25
     max_worst_domain_drop: float = 0.1
     min_coverage: float = 0.5
+    # 兼容既有 YAML 保留，但 MetaValidationGate 已不再按成本比否决候选（与 GateConfig
+    # 的同名字段一致）。TransferUtility.cost_ratio 仍会被计算并写入 meta 报告。
     max_cost_ratio: float = 2.0
     max_calibration_increase: float = 0.2
     confidence_level: float = 0.95
@@ -164,7 +190,7 @@ class MetaLearningConfig:  # 元学习配置
     enforce_negative_transfer: bool = True
     enforce_worst_domain: bool = True
     evaluation_repeats: int = 0
-    max_meta_test_samples_per_domain: int = 0
+    max_meta_test_samples_per_domain: int = 50
     isolate_candidate_budget: bool = False
     checkpoint_path: Path = Path("outputs/demse/checkpoint.json")
 
@@ -268,11 +294,14 @@ class DataConfig:
     final_test_domains: tuple[str, ...] = ()
     excluded_domains: tuple[str, ...] = ()
     train_sampling: str = "balanced_by_domain"
+    evolution_validation_samples: int = 50
     final_test_samples_per_domain: int = 0
     static_test_pattern: str | None = None
     require_static_test: bool = False
 
     def __post_init__(self) -> None:
+        if self.evolution_validation_samples < 1:
+            raise ValueError("data.evolution_validation_samples must be positive")
         configured = bool(
             self.dataset
             or self.root
