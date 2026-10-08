@@ -476,9 +476,12 @@ class ExperimentRunner:
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`generation_guard`（未显式标注，默认 `None`）需以关键字传入并符合签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         rows = fixture_samples() if samples is None else samples
+        # Run inference to collect traces for attribution.
         traces, result = await self.run(
             rows, progress=progress, task_name=task_name, phase="train inference"
         )
+
+        # Attribute prediction errors to the selected skills.
         reports = []
         for trace, sample in zip(traces, rows):
             contract = self.label_contract_registry.resolve_sample(sample)
@@ -512,6 +515,7 @@ class ExperimentRunner:
             counterfactual_limit = self.config.evolution.max_counterfactuals_per_sample
             if counterfactual_limit:
                 selected_skill_ids = selected_skill_ids[:counterfactual_limit]
+            # Remove one selected skill at a time for counterfactual replay.
             for skill_index, sid in enumerate(selected_skill_ids):
                 reduced = [skill for skill in self.skills if skill.skill_id != sid]
                 jobs.append((trace_index, skill_index, sid, sample, reduced))
@@ -578,6 +582,7 @@ class ExperimentRunner:
         skipped_proposals: list[tuple[str, str]] = []
         optimizer = None
 
+        # Generate skill optimization proposals from the error clusters.
         if self.config.evolution.proposer == "llm":
             optimizer_packages = [
                 package
