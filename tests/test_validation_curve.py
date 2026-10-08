@@ -26,9 +26,7 @@ def test_gate_validation_rows_join_proposal_to_batch():
                     "baseline_result": {
                         "aggregate_metrics": {"brier": 0.2, "macro_f1_all": 0.7, "n": 150.0}
                     },
-                    "candidate_result": {
-                        "aggregate_metrics": {"brier": 0.3, "macro_f1_all": 0.6}
-                    },
+                    "candidate_result": {"aggregate_metrics": {"brier": 0.3, "macro_f1_all": 0.6}},
                 }
             ],
         },

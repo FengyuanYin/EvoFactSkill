@@ -28,7 +28,7 @@ from evofact.core.models import (
 )
 from evofact.data.domains import data_fingerprint, skillbank_fingerprint
 from evofact.experiments.meta_runner import MetaEvolutionRunner, fixture_meta_samples
-from evofact.experiments.runner import ExperimentRunner, fixture_samples
+from evofact.experiments.runner import ExperimentRunner, _majority_row, fixture_samples
 from evofact.routing.router import SkillRouter
 from evofact.skills.candidates import apply_candidate
 from evofact.skills.repository import SkillRepository
@@ -283,6 +283,27 @@ class ResumeRegressionTests(unittest.TestCase):
 
 
 class StatisticalRegressionTests(unittest.TestCase):
+    def test_majority_keeps_winning_prediction_origin(self):
+        abstained = SampleEvaluation("s", "REAL", "ABSTAIN", 0, decision_origin="runtime")
+        classified = replace(abstained, predicted="REAL", confidence=0.9, decision_origin="judge")
+        winner = _majority_row([abstained, classified, classified])
+        self.assertEqual(winner, classified)
+
+    def test_majority_distinguishes_runtime_from_business_abstain(self):
+        classified = SampleEvaluation(
+            "s",
+            "ABSTAIN",
+            "ABSTAIN",
+            0.9,
+            allowed_labels=("ABSTAIN", "FAKE"),
+            positive_label="FAKE",
+            decision_origin="judge",
+        )
+        runtime = replace(classified, decision_origin="runtime", confidence=0)
+        self.assertEqual(_majority_row([runtime, classified, classified]), classified)
+        self.assertEqual(_majority_row([classified, runtime, runtime]), runtime)
+        self.assertEqual(_majority_row([classified, runtime]), classified)
+
     def test_invalid_pairs_fail(self):
         """函数作用：验证 `invalid_pairs_fail` 场景的正常行为、边界条件或错误处理。
         输入要求：`self` 应为已初始化的 `StatisticalRegressionTests` 实例；无其他显式输入。

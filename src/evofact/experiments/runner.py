@@ -111,10 +111,13 @@ def _majority_row(rows: list[SampleEvaluation]) -> SampleEvaluation:
     """
     if not rows:
         raise ValueError("a collapsed sample unit requires at least one row")
-    first_seen = {row.predicted: index for index, row in reversed(list(enumerate(rows)))}
-    counts = Counter(row.predicted for row in rows)
+    # Runtime abstentions and valid business labels must remain distinct ballots.
+    ballots = [(row.predicted, row.decision_origin == "runtime") for row in rows]
+    first_seen = {ballot: index for index, ballot in reversed(list(enumerate(ballots)))}
+    counts = Counter(ballots)
     winner = max(counts, key=lambda label: (counts[label], -first_seen[label]))
-    return replace(rows[0], predicted=winner)
+    # Keep the winning observation's origin and confidence, rather than the first repeat's.
+    return next(row for row, ballot in zip(rows, ballots) if ballot == winner)
 
 
 def proposal_history(
@@ -659,7 +662,11 @@ class ExperimentRunner:
                         )
                     }
                     allowed_path = target.manifest.entrypoints.instructions
-                    if edits - {allowed_path}:
+                    changed_manifest = (
+                        replace(candidate.package.manifest, version=target.manifest.version)
+                        != target.manifest
+                    )
+                    if edits - {allowed_path} or changed_manifest:
                         # Instructions scope: never silently discard file-level edits.
                         optimizer.skips["scope_violation"] += 1
                         skipped_proposals.append((cluster_id, "scope_violation"))

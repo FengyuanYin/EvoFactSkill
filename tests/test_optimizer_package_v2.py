@@ -309,9 +309,10 @@ def test_ordinary_llm_evolution_emits_exact_package_candidate(monkeypatch):
 class _FileEditBackend(MockBackend):
     """Applies the given edit to the current optimizer target Package."""
 
-    def __init__(self, runner, extra_file: str | None):
+    def __init__(self, runner, extra_file: str | None, manifest_patch=None):
         self.runner = runner
         self.extra_file = extra_file
+        self.manifest_patch = manifest_patch
 
     async def optimize_package(self, context, optimizer_skill):
         del optimizer_skill
@@ -344,6 +345,7 @@ class _FileEditBackend(MockBackend):
                 "target_skill_id": target_id,
                 "rationale": "instruction-scope probe",
                 "file_operations": operations,
+                "manifest_patch": self.manifest_patch,
             },
             UsageRecord(calls=1),
         )
@@ -389,3 +391,17 @@ def test_instructions_scope_skips_file_level_edits_instead_of_discarding_them(mo
     assert outcome["package_candidates"] == {}
     assert outcome["optimizer_skips"]["scope_violation"] == 1
     assert ("forced", "scope_violation") in outcome["skipped_proposals"]
+
+
+def test_instructions_scope_rejects_manifest_scope_changes(monkeypatch):
+    config = load_config(PROJECT_ROOT / "configs" / "dry_run.yaml")
+    config = replace(
+        config, evolution=replace(config.evolution, proposer="llm", scope="instructions")
+    )
+    runner = ExperimentRunner(config, PROJECT_ROOT)
+    backend = _FileEditBackend(
+        runner, extra_file=None, manifest_patch={"scope": {"domains": ["finance"]}}
+    )
+    outcome = _evolve_once_with(monkeypatch, config, backend)
+    assert outcome["proposals"] == []
+    assert outcome["optimizer_skips"]["scope_violation"] == 1

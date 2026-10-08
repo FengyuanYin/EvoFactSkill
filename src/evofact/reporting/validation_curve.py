@@ -51,8 +51,7 @@ def gate_validation_rows(checkpoint: dict) -> list[dict]:
     rows = []
     for proposal, decision in zip(proposals, decisions, strict=True):
         source_batches = {
-            trace_batch.get(trace_id)
-            for trace_id in proposal.get("source_trace_ids", [])
+            trace_batch.get(trace_id) for trace_id in proposal.get("source_trace_ids", [])
         }
         source_batches.discard(None)
         if len(source_batches) != 1:
@@ -143,10 +142,7 @@ def _svg(rows: list[dict], active_rows: list[dict], total_batches: int) -> str:
         px = x(row["batch_index"])
         base_y = y(float(row["baseline_brier"]))
         candidate_y = y(float(row["candidate_brier"]))
-        complete = (
-            row["baseline_cost_available"] == 1.0
-            and row["candidate_cost_available"] == 1.0
-        )
+        complete = row["baseline_cost_available"] == 1.0 and row["candidate_cost_available"] == 1.0
         base_color = "#2563eb" if complete else "#888"
         candidate_color = "#ea580c" if complete else "#888"
         parts.append(
@@ -157,8 +153,7 @@ def _svg(rows: list[dict], active_rows: list[dict], total_batches: int) -> str:
     valid_active = [row for row in active_rows if row["cost_available"] == 1.0]
     if len(valid_active) > 1:
         points = " ".join(
-            f'{x(row["batch_index"]):.1f},{y(float(row["brier"])):.1f}'
-            for row in valid_active
+            f"{x(row['batch_index']):.1f},{y(float(row['brier'])):.1f}" for row in valid_active
         )
         parts.append(f'<polyline points="{points}" fill="none" stroke="#16a34a" stroke-width="2"/>')
     for row in active_rows:

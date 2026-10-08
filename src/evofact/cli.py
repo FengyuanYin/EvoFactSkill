@@ -771,7 +771,9 @@ async def _run_impl(args, progress):
         }
     if args.command == "evolve":  # 使用skill 进化
         train = select(manifest.train_ids, role="train") if manifest else None
-        validation = select(manifest.evolution_validation_ids, role="validation") if manifest else None
+        validation = (
+            select(manifest.evolution_validation_ids, role="validation") if manifest else None
+        )
         if manifest and (not train or not validation):
             raise ValueError("evolution requires non-empty train and evolution-validation splits")
         if args.resume and args.evaluation_only:
@@ -1054,7 +1056,9 @@ async def _run_impl(args, progress):
         }
     if args.command == "validate":
         train = select(manifest.train_ids, role="train") if manifest else None
-        validation = select(manifest.evolution_validation_ids, role="validation") if manifest else None
+        validation = (
+            select(manifest.evolution_validation_ids, role="validation") if manifest else None
+        )
         if manifest and (not train or not validation):
             raise ValueError("validation requires non-empty train and evolution-validation splits")
         result = await runner.closed_loop(train, validation)
