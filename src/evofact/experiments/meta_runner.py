@@ -337,53 +337,50 @@ class MetaEvolutionRunner:
                     if previous.package_digest != exact.package.package_digest:
                         raise ValueError("candidate fingerprint maps to different Packages")
                 candidate_skills = _apply_candidate(self.base.skills, proposal)
-                baseline_rows, candidate_rows = [], []
-                repeats = self.config.meta_learning.evaluation_repeats or self.config.gate.repeats
-                for repeat_index in range(repeats):
-                    if self.config.meta_learning.isolate_candidate_budget:
-                        baseline_inputs = [
-                            replace(
-                                sample,
-                                sample_id=(
-                                    f"{sample.sample_id}::meta::{episode.episode_id}::"
-                                    f"{identity.fingerprint}::baseline::{repeat_index}"
-                                ),
-                            )
-                            for sample in test_rows
-                        ]
-                        candidate_inputs = [
-                            replace(
-                                sample,
-                                sample_id=(
-                                    f"{sample.sample_id}::meta::{episode.episode_id}::"
-                                    f"{identity.fingerprint}::candidate::{repeat_index}"
-                                ),
-                            )
-                            for sample in test_rows
-                        ]
-                    else:
-                        baseline_inputs = candidate_inputs = test_rows
-                    _, baseline = await self.base.run(
-                        baseline_inputs,
-                        progress=progress,
-                        task_name=f"meta-evolve {episode.episode_id}",
-                        phase=f"meta-test baseline r{repeat_index + 1}",
-                    )
-                    _, candidate = await self.base.run(
-                        candidate_inputs,
-                        skills=candidate_skills,
-                        progress=progress,
-                        task_name=f"meta-evolve {episode.episode_id}",
-                        phase=f"meta-test candidate r{repeat_index + 1}",
-                    )
-                    baseline_rows.extend(
-                        replace(row, sample_id=f"{sample.sample_id}:r{repeat_index}")
-                        for sample, row in zip(test_rows, baseline.per_sample)
-                    )
-                    candidate_rows.extend(
-                        replace(row, sample_id=f"{sample.sample_id}:r{repeat_index}")
-                        for sample, row in zip(test_rows, candidate.per_sample)
-                    )
+                if self.config.meta_learning.isolate_candidate_budget:
+                    baseline_inputs = [
+                        replace(
+                            sample,
+                            sample_id=(
+                                f"{sample.sample_id}::meta::{episode.episode_id}::"
+                                f"{identity.fingerprint}::baseline"
+                            ),
+                        )
+                        for sample in test_rows
+                    ]
+                    candidate_inputs = [
+                        replace(
+                            sample,
+                            sample_id=(
+                                f"{sample.sample_id}::meta::{episode.episode_id}::"
+                                f"{identity.fingerprint}::candidate"
+                            ),
+                        )
+                        for sample in test_rows
+                    ]
+                else:
+                    baseline_inputs = candidate_inputs = test_rows
+                _, baseline = await self.base.run(
+                    baseline_inputs,
+                    progress=progress,
+                    task_name=f"meta-evolve {episode.episode_id}",
+                    phase="meta-test baseline",
+                )
+                _, candidate = await self.base.run(
+                    candidate_inputs,
+                    skills=candidate_skills,
+                    progress=progress,
+                    task_name=f"meta-evolve {episode.episode_id}",
+                    phase="meta-test candidate",
+                )
+                baseline_rows = [
+                    replace(row, sample_id=sample.sample_id)
+                    for sample, row in zip(test_rows, baseline.per_sample)
+                ]
+                candidate_rows = [
+                    replace(row, sample_id=sample.sample_id)
+                    for sample, row in zip(test_rows, candidate.per_sample)
+                ]
                 baseline_result, candidate_result = (
                     evaluate(baseline_rows),
                     evaluate(candidate_rows),
@@ -603,7 +600,8 @@ class MetaEvolutionRunner:
             combined["sample_evaluations"].extend(outcome["evaluation"].per_sample)
             combined["attributions"].extend(outcome["attributions"])
             combined["utilities"].update(outcome["utilities"])
-            combined["distillation"].append(outcome["distillation"])
+            if outcome["distillation"]:
+                combined["distillation"].append(outcome["distillation"])
             combined["proposals"].extend(proposals)
             combined["package_candidates"].update(
                 {

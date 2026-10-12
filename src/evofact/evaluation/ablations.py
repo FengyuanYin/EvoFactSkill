@@ -89,9 +89,7 @@ def apply_evolution_ablation(config: AppConfig, arm: str) -> AppConfig:
     elif arm == "no-discovery":
         evolution = replace(evolution, discovery=False)
     elif arm == "rule-proposer":
-        if evolution.proposer == "rule":
-            raise ValueError("rule-proposer is identical to full when full already uses rule")
-        evolution = replace(evolution, proposer="rule")
+        raise ValueError("rule-proposer is unsupported: evolution uses direct trace optimization")
     return replace(config, evolution=evolution)
 
 

@@ -52,8 +52,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Meta-train Traces] --> B[失败归因]
-    B --> C[Package Optimizer]
+    A[训练 Traces] --> C[Package Optimizer]
+    B[当前 Skill 库] --> C
     C --> D[候选 Skill Package]
     D --> E[Schema、安全与包测试]
     E --> F[固定提升门控]
@@ -62,7 +62,7 @@ flowchart LR
     F -->|拒绝| I[保留当前 Champion]
 ```
 
-Package Optimizer 可以为普通 Agent Package 和 generation workflow package 提出候选修改。Optimizer 自身保持固定，当前设计不启用递归的 Meta Optimizer 自演化，从而避免无限套娃和评估边界漂移。
+普通 evolve 和 meta-evolve 直接将训练 trace 和当前 Skill 库交给 Package Optimizer，由它自行分析并选择优化目标。候选生成不再执行规则错误归因、反事实回放、错误聚类或经验蒸馏。每次更新请求一次编辑、新增专家技能或 no_change；基线和候选各验证一次。Optimizer 自身保持固定，generation workflow 使用独立的优化命令。
 
 ## 安装
 

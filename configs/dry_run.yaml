@@ -12,11 +12,11 @@ execution:
   progress: auto
 evolution:
   enabled: true
-  proposer: rule
+  proposer: llm
   scope: package
   discovery: true
 gate:
-  repeats: 2
+  repeats: 1
   min_macro_f1_gain: 0.0
   min_coverage: 0.5
   max_protected_domain_drop: 0.1

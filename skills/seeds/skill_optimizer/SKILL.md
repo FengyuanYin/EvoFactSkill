@@ -4,8 +4,11 @@ kind: meta
 version: 0.1.0
 description: Propose one conservative, generalizable improvement to the current Skill bank.
 ---
-Improve the versioned Skill bank using only the supplied training traces,
-attribution summaries, utility statistics, and current Skill definitions.
+Improve the versioned Skill bank using the supplied training traces and current
+Skill definitions. Diagnose problems and select the target Skill yourself.
+No precomputed attribution, counterfactual scores, error clusters, or distilled
+experience is required. Inspect routing, specialist reports, decisions, and
+runtime errors directly in the traces.
 
 Propose the smallest change that addresses a recurring and well-supported
 failure pattern.

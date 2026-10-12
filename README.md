@@ -52,8 +52,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Meta-train traces] --> B[Failure attribution]
-    B --> C[Package Optimizer]
+    A[Training traces] --> C[Package Optimizer]
+    B[Current Skill bank] --> C
     C --> D[Candidate Skill Package]
     D --> E[Schema, security, and package tests]
     E --> F[Fixed promotion gate]
@@ -62,7 +62,7 @@ flowchart LR
     F -->|fail| I[Reject and retain champion]
 ```
 
-The Package Optimizer proposes changes to ordinary agent packages and the generation workflow package. The optimizer package itself is fixed: recursive meta-optimizer self-evolution is intentionally out of scope.
+Ordinary and meta evolution pass training traces and the current Skill bank directly to the Package Optimizer. It diagnoses the traces and selects a target itself; rule attribution, counterfactual replay, error clustering, and experience distillation are not performed. Each update requests one edit, specialist addition, or no_change. The optimizer package itself is fixed. Generation workflow optimization uses its separate command.
 
 ## Installation
 
@@ -232,12 +232,11 @@ meta_learning:
 
 For each leave-one-domain-out episode, the active Package Bank remains frozen while
 the meta-train partition is consumed in 25-sample updates. Each update can emit at
-most one candidate, attribution is restricted to at most eight failed samples, and
-each selected sample triggers at most one counterfactual inference. Candidates are
+most one candidate directly from the traces and current skills. Candidates are
 then evaluated on a deterministic, domain-balanced subset of the held-out source
 domain. The true `data.final_test_domains` never enter candidate generation or the
-Meta Gate. A zero value restores the legacy unbounded/full-partition behavior;
-`evaluation_repeats: 0` inherits `gate.repeats`. Candidate budget isolation gives
+Meta Gate. Baseline and candidate each run once per evaluation; legacy repeat and
+attribution settings no longer control these runs. Candidate budget isolation gives
 each baseline/candidate comparison its own per-sample allowance while preserving
 the cumulative run-level call, token, and cost budgets.
 

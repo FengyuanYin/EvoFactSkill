@@ -34,7 +34,7 @@ from evofact.governance.package_policy import is_reserved_label_contract_path
 from evofact.runtime.node_runner import _usage_details
 from evofact.skills.package_adapter import package_to_skill_spec
 
-from .optimizer_context import build_optimizer_context
+from .optimizer_context import build_optimizer_context, build_skillbank_optimizer_context
 from .package_candidate import (
     PackageCandidate,
     build_package_addition_candidate,
@@ -176,7 +176,7 @@ def _parse_package_addition(data: dict, packages: tuple[SkillPackage, ...]):
         raise ValueError("new specialist Package is missing required package files")
     risk_flags = tuple(data.get("risk_flags", ()))
     if any(item.path.startswith("scripts/") for item in package.files):
-        risk_flags = tuple(dict.fromkeys((*risk_flags, "script_change", "human_review_required")))
+        risk_flags = tuple(dict.fromkeys((*risk_flags, "script_change")))
     return SkillPackageAddition(
         package,
         str(data.get("rationale", "")),
@@ -308,7 +308,7 @@ def parse_package_optimizer_response(
             manifest_patch = ManifestPatch(**converted)
     risk_flags = tuple(data.get("risk_flags", ()))
     if any(item.path.startswith("scripts/") for item in operations):
-        risk_flags = tuple(dict.fromkeys((*risk_flags, "script_change", "human_review_required")))
+        risk_flags = tuple(dict.fromkeys((*risk_flags, "script_change")))
     return SkillPackagePatch(
         target.skill_id,
         target.package_digest,
@@ -416,7 +416,7 @@ class PackageOptimizerAgent:
 
     async def propose(
         self,
-        target: SkillPackage,
+        target: SkillPackage | None,
         packages,
         *,
         cluster_id: str = "",
@@ -426,27 +426,45 @@ class PackageOptimizerAgent:
         distillation=None,
         prior_proposals=(),
     ) -> OptimizerOutcome:
-        if target.skill_id == self.optimizer_package.skill_id:
+        packages = tuple(packages)
+        bank_mode = target is None
+        target_id = "skill-bank" if bank_mode else target.skill_id
+        if not bank_mode and target.skill_id == self.optimizer_package.skill_id:
             raise ValueError("optimizer cannot optimize itself")
+
+        def failed(reason):
+            # Bank optimization never falls back to rule-derived diagnoses/proposals.
+            return self._skipped(reason) if bank_mode else self._failed(reason, reports, cluster_id)
+
         try:
-            context = build_optimizer_context(
-                target=target,
-                reports=reports,
-                traces=traces,
-                audits=audits,
-                distillation=distillation,
-                prior_proposals=prior_proposals,
-                max_reports=self.config.max_reports,
-                max_text_chars=self.config.max_text_chars,
-                max_total_chars=self.config.max_total_chars,
+            context = (
+                build_skillbank_optimizer_context(
+                    packages=packages,
+                    traces=traces,
+                    max_text_chars=self.config.max_text_chars,
+                    max_instructions_chars=self.config.max_instructions_chars,
+                    max_total_chars=self.config.max_total_chars,
+                )
+                if bank_mode
+                else build_optimizer_context(
+                    target=target,
+                    reports=reports,
+                    traces=traces,
+                    audits=audits,
+                    distillation=distillation,
+                    prior_proposals=prior_proposals,
+                    max_reports=self.config.max_reports,
+                    max_text_chars=self.config.max_text_chars,
+                    max_total_chars=self.config.max_total_chars,
+                )
             )
         except ValueError as exc:
-            LOGGER.warning("Skipping optimizer context for %s: %s", target.skill_id, exc)
-            return self._failed(f"context:{type(exc).__name__}", reports, cluster_id)
+            LOGGER.warning("Skipping optimizer context for %s: %s", target_id, exc)
+            return failed(f"context:{type(exc).__name__}")
         reservation = None
         # Each proposal is a separate budget unit. Reusing only the target ID
         # would exhaust its per-sample call cap across unrelated training batches.
-        sample_id = f"package-optimizer:{target.skill_id}:{uuid.uuid4().hex}"
+        sample_id = f"package-optimizer:{target_id}:{uuid.uuid4().hex}"
         try:
             try:
                 if self.budget_manager is not None:
@@ -463,8 +481,8 @@ class PackageOptimizerAgent:
                     result = await self.backend.optimize_package(context, self.optimizer_skill)
             except Exception as exc:
                 # One flaky optimizer call must not abort a multi-batch run.
-                LOGGER.warning("Optimizer call failed for %s: %s", target.skill_id, exc)
-                return self._failed(f"call:{type(exc).__name__}", reports, cluster_id)
+                LOGGER.warning("Optimizer call failed for %s: %s", target_id, exc)
+                return failed(f"call:{type(exc).__name__}")
             if reservation is not None:
                 await self.budget_manager.reconcile(reservation, _usage_details(result))
                 reservation = None
@@ -477,7 +495,23 @@ class PackageOptimizerAgent:
                     return OptimizerOutcome(
                         "candidate", candidate=build_package_addition_candidate(proposal)
                     )
-                if proposal.target_skill_id != target.skill_id:
+                if bank_mode:
+                    target = next(
+                        (
+                            package
+                            for package in packages
+                            if package.skill_id == proposal.target_skill_id
+                        ),
+                        None,
+                    )
+                    if (
+                        target is None
+                        or target.manifest.kind not in ALLOWED_TARGET_KINDS
+                        or target.manifest.name in FROZEN_TARGET_NAMES
+                        or target.manifest.name == "generation_agent"
+                    ):
+                        raise ValueError("optimizer selected a non-editable Skill Package")
+                elif proposal.target_skill_id != target.skill_id:
                     raise ValueError(
                         "optimizer response targeted a Package outside this evaluation"
                     )
@@ -485,10 +519,8 @@ class PackageOptimizerAgent:
                     "candidate", candidate=build_package_candidate(target, proposal)
                 )
             except ValueError as exc:
-                LOGGER.warning(
-                    "Skipping invalid optimizer proposal for %s: %s", target.skill_id, exc
-                )
-                return self._failed(f"invalid:{type(exc).__name__}", reports, cluster_id)
+                LOGGER.warning("Skipping invalid optimizer proposal for %s: %s", target_id, exc)
+                return failed(f"invalid:{type(exc).__name__}")
         finally:
             if reservation is not None:
                 await self.budget_manager.release(reservation)

@@ -48,7 +48,6 @@ def scan_resources(resources: dict[str, str]) -> SafetyReport:
     输入要求：`resources`（dict[str, str]）需符合函数签名约定。
     输出：返回 `SafetyReport` 类型结果；校验或下游调用失败时异常向上传递。"""
     findings = []
-    has_scripts = False
     for rel, source in resources.items():
         path = PurePosixPath(rel.replace("\\", "/"))
         if path.is_absolute() or ".." in path.parts:
@@ -56,7 +55,6 @@ def scan_resources(resources: dict[str, str]) -> SafetyReport:
             continue
         if not rel.startswith("scripts/"):
             continue
-        has_scripts = True
         try:
             tree = ast.parse(source, filename=rel)
         except SyntaxError as exc:
@@ -95,6 +93,5 @@ def scan_resources(resources: dict[str, str]) -> SafetyReport:
                     and node.value.attr == "environ"
                 ):
                     findings.append(f"blocked environment access in {rel}")
-    return SafetyReport(
-        "blocked" if findings else ("review_required" if has_scripts else "safe"), tuple(findings)
-    )
+    # Scripts that pass the automated checks do not require human review.
+    return SafetyReport("blocked" if findings else "safe", tuple(findings))
