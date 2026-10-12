@@ -17,13 +17,12 @@
 
 EvoFactSkill is a research codebase for cross-domain fact verification with an evolvable multi-agent skill bank. A Router builds a constrained dependency graph, specialist agents produce structured analysis reports, and a dataset-aware Judge maps the evidence to the active dataset's label space. Evolution changes complete, versioned Skill Packages—not the weights of the underlying language model—and promotes candidates only after protected validation.
 
-> Paper metadata, pretrained artifacts, and benchmark tables will be added with the public paper release. This README does not report unreleased results or fabricate a citation.
-
 ## Highlights
 
 - **Dependency-aware multi-agent execution.** The Router returns a constrained DAG, allowing independent specialists to run concurrently while preserving required expert-to-expert dependencies.
 - **Dataset-aware decisions.** Versioned label contracts constrain the Judge to the native labels of Weibo21, AMTCele, LiveFact, or AdvFake. `ABSTAIN` is reserved for Runtime failures and is not treated as a dataset label.
-- **Full Skill Package evolution.** Candidate changes may cover `SKILL.md`, manifests, schemas, scripts, and references. Packages are content-addressed, validated, tested, gated, and auditable.
+- **Direct trace-driven Skill evolution.** The optimizer receives training traces and the current Skill bank, diagnoses the traces, and selects the package to improve. Changes may cover instructions, manifests, schemas, scripts, and references.
+- **Separate promotion protocols.** Ordinary evolution requires a strict validation macro-F1 improvement; meta evolution applies cross-episode transfer constraints. Both evaluate each baseline and candidate once and retain automated safety checks.
 - **Leakage-safe generation.** Real data is split first. Rewriting-based augmentation is restricted to meta-train; meta-test and final-test remain real-only.
 - **Reproducible resource accounting.** Runs record calls, tokens, cost availability, concurrency, package digests, label-contract digests, manifests, and traces.
 
@@ -55,7 +54,7 @@ flowchart LR
     A[Training traces] --> C[Package Optimizer]
     B[Current Skill bank] --> C
     C --> D[Candidate Skill Package]
-    D --> E[Schema, security, and package tests]
+    D --> E[Package validation and security scan]
     E --> F[Fixed promotion gate]
     G[Real-only protected validation] --> F
     F -->|pass| H[Content-addressed package bank]
@@ -63,6 +62,43 @@ flowchart LR
 ```
 
 Ordinary and meta evolution pass training traces and the current Skill bank directly to the Package Optimizer. It diagnoses the traces and selects a target itself; rule attribution, counterfactual replay, error clustering, and experience distillation are not performed. Each update requests one edit, specialist addition, or no_change. The optimizer package itself is fixed. Generation workflow optimization uses its separate command.
+
+### Ordinary and meta training
+
+| Stage | `evolve` | `meta-evolve` |
+| --- | --- | --- |
+| Training input | Manifest train split, consumed in sequential batches | Source-domain samples split into meta-train/meta-test episodes |
+| Update size | `execution.batch_size` | `evolution.update_interval_samples`; `0` uses the complete meta-train episode |
+| Optimizer input | Current batch traces and the current complete Skill bank | Current meta-train update traces and the episode's frozen Skill bank |
+| Candidate evaluation | Fixed evolution-validation split | The episode's held-out source-domain meta-test samples |
+| Inference passes | Baseline once, candidate once per candidate | Baseline once, candidate once per candidate and episode |
+| Bank update | Accepted candidates committed together at the batch boundary | Decisions committed after cross-episode aggregation |
+
+Ordinary evolution makes one pass over the selected training samples. Each batch uses one Skill snapshot, runs training inference, and requests one optimizer response. The optimizer may edit an eligible existing package, add a specialist when discovery is enabled, or return `no_change`. A valid candidate is evaluated independently against the batch's starting bank. Accepted updates become active before the next batch. There is no gradient update, counterfactual replay, or repeat loop. Training metrics aggregate predictions made by the successive batch snapshots; they are not a fresh evaluation of the final bank.
+
+`execution.validate_after_each_batch: true` adds a diagnostic validation pass over the resulting active bank. It records metrics without introducing another promotion gate or automatic rollback.
+
+Meta evolution reuses the same direct optimizer path. Within an episode, updates generate proposals without promoting intermediate candidates. The baseline bank remains frozen during episode evaluation. Results are grouped by exact candidate fingerprint: only the same candidate observed in different episodes shares transfer evidence. Distinct rewrites are not pooled as one candidate. Final-test domains are excluded from candidate generation and meta-test evaluation.
+
+The optimizer receives sanitized traces and current package definitions, including readable UTF-8 file contents. Ground-truth labels and dataset-label governance are filtered; traces retain the model's prediction. `max_text_chars`, `max_instructions_chars`, and `max_total_chars` bound the payload, so oversized trace lists can be shortened. Legacy attribution and distillation output fields remain empty for report/checkpoint compatibility.
+
+### Promotion and safety
+
+| Rule | Ordinary `evolve` | Meta generalized promotion |
+| --- | --- | --- |
+| Macro-F1 gain | `candidate.macro_f1_all > baseline.macro_f1_all` | Mean episode gain ≥ `meta_learning.min_mean_gain` |
+| Statistical support | Reported, but does not veto promotion | Transfer confidence-interval lower bound > `0` |
+| Valid episodes | Not required | At least `min_valid_episodes` |
+| Coverage / calibration | Reported, but do not veto promotion | Enforce `min_coverage` and `max_calibration_increase` |
+| Negative transfer / worst domain | Do not veto promotion | Optional constraints controlled by `enforce_negative_transfer` and `enforce_worst_domain` |
+| Known costs | Do not veto promotion | Required when `pricing.require_cost_for_promotion` is enabled on a real backend |
+| Cost ratio | Reported only | Reported only |
+
+Meta evolution may accept a domain-specialized candidate even when generalized promotion fails. Specialization requires positive gains on a proper subset of tested domains, enough valid episodes, coverage/calibration constraints, and the additional severe-regression checks in [MetaValidationGate](src/evofact/validation/meta_gate.py). A `pareto` disposition retains the candidate for audit without promoting it.
+
+Scripts that pass the automated scanner receive `safe`; having a `scripts/` file alone no longer creates `review_required` or an automatic human-review risk flag. Unsafe paths, prohibited Python imports/calls, syntax errors, invalid script encoding, and missing script entrypoints can produce `blocked`. Blocked candidates cannot be promoted. An explicitly supplied `review_required` gate state still requires review. The scanner is a static rule check; `safe` means it passed those checks.
+
+`gate.repeats` and `meta_learning.evaluation_repeats` are legacy compatibility fields: validation always runs once per arm. Ordinary `gate.min_macro_f1_gain`, coverage, calibration, domain-drop, and cost thresholds no longer control promotion. `gate.alpha` still controls reported paired statistics. Resource budgets and pricing setup validation continue to apply independently of promotion metrics.
 
 ## Installation
 
@@ -91,6 +127,15 @@ No API key is required for the offline smoke test:
 ```bash
 evofact --config configs/dry_run.yaml dry-run --output outputs/dry-run.json
 ```
+
+To exercise the command paths offline:
+
+```bash
+evofact --config configs/dry_run.yaml test --output outputs/mock-test.json
+evofact --config configs/dry_run.yaml evolve --evaluation-only --output outputs/mock-evolve.json
+```
+
+The mock Package Optimizer returns `no_change`, so a successful mock evolution run can have no candidates or promotions. Candidate-producing paths are covered by injected fake optimizer responses in the tests.
 
 ## Data preparation
 
@@ -130,19 +175,20 @@ All global options must appear before the subcommand. In particular, use `--limi
 
 ### Evaluation only
 
-Run a small Weibo21 test:
+Evaluate the configured Weibo21 final-test samples:
 
 ```bash
 evofact \
   --config configs/weibo21_cross_domain.yaml \
-  --limit 100 \
   --batch-size 16 \
   --sample-concurrency 8 \
   --progress \
   test --output outputs/weibo21-test.json
 ```
 
-Run the complete configured test split by omitting `--limit` or setting it to `0`:
+`--limit` selects source-training samples; it does not shrink this final-test set. With the current Weibo21 configuration, five final-test domains × 100 samples produce 500 test samples. `--batch-size` and `--sample-concurrency` control execution, not membership. For a smaller dataset test, use a separate YAML with a smaller `data.final_test_samples_per_domain` and an appropriate static-sample policy.
+
+Run the same configured test split with default execution settings:
 
 ```bash
 evofact --config configs/weibo21_cross_domain.yaml \
@@ -192,7 +238,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
   --trace-log outputs/weibo21-meta-traces.jsonl \
   --output outputs/meta-evolve.json
 
-# Evaluate an existing meta-evolution checkpoint without proposing updates
+# Resume a meta checkpoint in evaluation-only mode without committing the active bank
 evofact --config configs/weibo21_cross_domain.yaml \
   meta-evolve --resume --evaluation-only \
   --output outputs/meta-evaluation.json
@@ -200,7 +246,7 @@ evofact --config configs/weibo21_cross_domain.yaml \
 
 Evolution is batch-style: every sample in one batch uses the same active package snapshot; candidate packages are considered only after the batch/validation boundary. This prevents mid-batch parameter drift.
 
-Every training command writes all detector inference traces to one UTF-8 JSONL log. `evolve` uses a run-ID-specific file by default; `meta-evolve` and `adversarial-evolve` use command-specific files under `output_dir`. Use `--trace-log` to select an explicit path. Each line is a complete `InferenceTrace` plus `training_context` containing the run ID, task, phase, sequence number, sample position, and active Skill IDs. The same file therefore includes training forward passes, counterfactual passes, validation baselines, candidate validation, meta-train, meta-test, and adversarial detector probes. Generator request/response audits remain in the generation audit store because they are not detector `InferenceTrace` objects.
+Every training command writes detector inference traces to one UTF-8 JSONL log. `evolve` uses a run-ID-specific file by default; `meta-evolve` and `adversarial-evolve` use command-specific files under `output_dir`. Use `--trace-log` to select an explicit path. Each line contains an `InferenceTrace` and `training_context` with the run ID, task, phase, sequence number, sample position, and active Skill IDs. Logs cover training, baseline/candidate validation, meta-test, and any adversarial detector probes. Direct optimizer calls do not create detector inference traces. Generator request/response audits are stored separately.
 
 The recommended persistent setting is `execution.trace_log` in the experiment YAML. `--trace-log` remains an optional one-run override. Resolution order is CLI override, checkpoint-recorded path during resume, YAML path, then the command default:
 
@@ -221,11 +267,8 @@ meta-training episode. These controls do not alter `test` or its inference path:
 evolution:
   update_interval_samples: 25
   max_proposals_per_update: 1
-  max_attribution_samples_per_update: 8
-  max_counterfactuals_per_sample: 1
 
 meta_learning:
-  evaluation_repeats: 1
   max_meta_test_samples_per_domain: 10
   isolate_candidate_budget: true
 ```
@@ -265,14 +308,14 @@ optimizer_backend:
   temperature: 1.0
 ```
 
-Router, Specialist, Judge, counterfactual inference, Meta-test, and final test keep
+Router, Specialist, Judge, Meta-test, and final test keep
 using the top-level forward model. Only `PackageOptimizerAgent` uses the optimizer
 backend. When cost-aware promotion is enabled, the optimizer pricing table is
 mandatory and its `provider` must match `optimizer_backend.provider`. Checkpoints
 and Skill Bank provenance record both resolved model names and endpoint identities,
 but never API keys. Resume fails if the effective model/pricing identity changes.
 
-For a configured cross-domain dataset, `--limit` is the **total source-training budget**, not a per-domain limit and not a final-test limit. The sampler allocates it as evenly as possible across `data.train_domains` using the experiment seed. With the eight Weibo21 source domains, `--limit 400` selects 50 training samples from each domain. If a domain lacks its nominal quota, the deficit is deterministically reassigned to domains with remaining samples and disclosed in `data_sampling.selected_by_domain`.
+For a configured cross-domain dataset, `--limit` is the **total source-training sample limit**, not a per-domain limit and not a final-test limit. The sampler allocates it as evenly as possible across `data.train_domains` using the experiment seed. The current `configs/weibo21_cross_domain.yaml` names four source domains, so `--limit 400` requests 100 training samples per domain. If a domain lacks its nominal quota, the deficit is deterministically reassigned and disclosed in `data_sampling.train.selected_by_domain`. `data.evolution_validation_samples` independently controls ordinary evolution's validation sample count (`50` in this configuration).
 
 The protected final-test set is configured independently:
 
@@ -284,13 +327,20 @@ data:
   require_static_test: true
 ```
 
-For Weibo21, the runtime reads the ordered `sample_id` values from the matching result under `outputs/static/`. Each final-test domain must provide at least 100 valid static samples: exactly 100 are retained when the file contains 100, and only the first 100 are retained when it contains more. Fewer than 100 is an error. Therefore, five final-test domains produce 500 test samples rather than sharing one 100-sample budget. The runtime also fails before inference if a required file is missing, an ID is absent from the currently loaded dataset, or an ID belongs to another domain. This prevents an evolved system from being evaluated on a different final-test set than the static baseline. The sampler itself is dataset-independent: AMTCele, MCFEND, and LiveFact can use the same policy after their adapters and configuration provide stable dataset IDs, domains, and a matching static-test pattern.
+For Weibo21, the runtime reads the ordered `sample_id` values from each matching result under `outputs/static/` and retains the first 100. Fewer than 100 valid static samples is an error. It also fails before inference when a required file is missing, an ID is absent from the loaded dataset, or an ID belongs to another domain. Static outputs must be supplied locally; they are not downloaded by the command. The sampler is dataset-independent and can serve other registered adapters with suitable IDs, domains, and configuration. MCFEND is not currently a registered CLI dataset.
+
+For local Weibo21 static outputs, [recompute_static_100.py](scripts/recompute_static_100.py) recomputes metrics and usage for the first 100 traces per domain and writes separate `-100.json` files. It preserves source files, makes no model calls, and compares selection against the configured local cross-domain reference result when available:
+
+```bash
+python scripts/recompute_static_100.py
+python scripts/recompute_static_100.py --check
+```
 
 #### Resumable evolution protocol
 
 Ordinary evolution writes an atomic checkpoint only after a batch has completed and its accepted Package Bank update has been committed. A checkpoint contains the number and audit records of completed batches, the exact active package mapping, accumulated traces and sample evaluations, optimizer and gate outputs, and the consumed budget state. Consequently, a resumed run preserves both the final evaluation denominator and the resource ledger of the interrupted run.
 
-Resume is deliberately fail-closed. Before skipping any batch, the runtime verifies the complete effective configuration, configuration-file digest, data manifest, ordered train/validation sample identifiers, active Package Bank, and checkpoint schema. The resumed command must therefore use the same YAML file contents, `--limit`, `--batch-size`, sample selection, split, and Skill Bank as the original command. `--sample-concurrency` is part of the effective configuration and must also remain unchanged. A batch interrupted before its checkpoint is written is executed again; already committed batches are not repeated. A checkpoint marked `complete` is terminal, and `--evaluation-only` runs are not resumable because they use an isolated temporary bank.
+Before skipping a batch on resume, the runtime verifies the effective configuration, configuration-file digest, manifest, ordered train/validation IDs, active Package Bank, and checkpoint schema. Keep the original YAML, `--limit`, `--batch-size`, `--sample-concurrency`, split, and bank. One supported exception allows removing existing positive `max_tokens_per_sample` / `max_tokens_per_run` caps by setting them to `null`, with all other settings unchanged; the relaxation is recorded in provenance. An uncommitted batch is rerun. A `complete` checkpoint cannot be resumed; ordinary `--evaluation-only` runs use a temporary bank and do not support resume.
 
 This protocol provides batch-boundary recovery rather than instruction-level replay. Calls issued inside an interrupted, uncommitted batch may be repeated after recovery and should be considered when reporting API usage.
 
@@ -346,13 +396,13 @@ The test report embeds the resolved bank digest, semantic versions, package dige
 ```bash
 evofact --config configs/weibo21_cross_domain.yaml \
   ablation \
-  --arms "full,no-evolution,instructions-only,no-discovery,rule-proposer" \
+  --arms "full,no-evolution,instructions-only,no-discovery" \
   --seeds 5 \
   --bootstrap-iterations 2000 \
   --output outputs/evolution-ablation.json
 ```
 
-Every arm starts from the same seed packages, uses the same manifest and protected final-test sample order, and writes only to an isolated temporary package bank. The report contains effective mechanism settings, per-seed metrics, McNemar tests, paired bootstrap confidence intervals, package-bank digests, and budget snapshots. `no-evolution`, `no-discovery`, `rule-proposer`, and `no-evidence` are paired against `full`; `instructions-only` is paired against `no-discovery` so package scope is the only changed factor. `no-evidence` is accepted only for evidence-bearing data. `rule-proposer` is valid only when the full configuration uses the LLM proposer. DEMSE additionally supports `--ablation no-negative-transfer-constraint`.
+Every arm starts from the same seed packages, uses the same manifest and final-test sample order, and writes to an isolated temporary bank. Reports include effective settings, per-seed metrics, McNemar tests, paired bootstrap intervals, bank digests, and budgets. `no-evolution`, `no-discovery`, and `no-evidence` are paired against `full`; `instructions-only` is paired against `no-discovery`. `no-evidence` requires evidence-bearing samples. The ordinary `rule-proposer` arm is unsupported after direct trace optimization and raises an error. Meta evolution also supports `--ablation no-negative-transfer-constraint`.
 
 The same command also accepts `meta-full` with `meta-no-cross-episode-aggregation`, `meta-no-negative-transfer-constraint`, `meta-no-worst-domain-constraint`, or `meta-no-specialization`; and `generation-full` with `generation-real-only` or `generation-rule-proposer`. Generation arms require evidence facts through `--facts`. The `unified_ablation_v2` report contains all families, one flattened run list, one summary table, and episode-paired bootstrap intervals for meta/generation controls.
 
@@ -381,6 +431,8 @@ evofact --config configs/adversarial_llm.yaml \
   --evaluation outputs/generator-evaluation.json
 ```
 
+`generator-evolve --propose-only` prints JSON containing `candidate_package`; it does not automatically create the example candidate file. Save that package object as `outputs/generator-candidate.json`, or pass a complete package directory. Supply paired evaluation measurements separately, with matching champion/candidate digests, distinct source/evaluation episode IDs, label-contract identity, and verifier/pricing provenance. The command validates those supplied measurements.
+
 Generated examples must preserve source lineage and pass the generation audit. The supported protocol is:
 
 1. Split the real samples first.
@@ -394,6 +446,8 @@ Generated examples must preserve source lineage and pass the generation audit. T
 evofact --config configs/weibo21_cross_domain.yaml \
   report --output outputs/report.json
 ```
+
+`report` runs inference to produce summary and grouped metrics. It is not an offline reader of an existing result file; a real backend can make provider calls.
 
 `test`, `evolve`, `meta-evolve`, and `adversarial-evolve` emit UTF-8 JSON when `--output` is provided. Reports include aggregate metrics, per-domain/schema slices, resource usage, trace references, active package digests, and manifest identity when available.
 
@@ -412,6 +466,8 @@ The primary classification metrics are:
 | `brier` | Brier score, only for a binary schema with a declared positive label |
 | `evidence_coverage` | Fraction of samples with evidence available to the system |
 | `mean_cost` | Mean priced backend cost when the pricing table is available |
+| `cost_available` | `1` only when every evaluated row has available cost information |
+| `cost_coverage` | Fraction of evaluated rows with available cost information |
 
 Always report `accuracy_all` and `macro_f1_all` with `coverage`. A high `covered_accuracy` is not meaningful if the Runtime rejects many difficult cases. `evidence_coverage = 0` indicates a no-external-evidence setting and must not be described as evidence-grounded verification.
 
@@ -464,6 +520,19 @@ $env:PROVIDER_API_KEY="..."
 
 Calls, tokens, priced cost, and concurrency are enforced at Runtime boundaries. Pricing snapshots are dated; refresh and archive the applicable provider table before a publication run.
 
+| Setting | Current effect |
+| --- | --- |
+| `evolution.enabled` | Enable or freeze candidate generation |
+| `evolution.scope` | `package` permits file/manifest edits; `instructions` restricts edits to the instruction entrypoint |
+| `evolution.discovery` | Allow optimizer-proposed specialist additions |
+| `optimizer_backend.enabled` | Use an independent optimizer backend; otherwise reuse the forward backend configuration |
+| `evolution.update_interval_samples` | Meta-train update size; ordinary training uses `execution.batch_size` |
+| `meta_learning.max_meta_test_samples_per_domain` | Bound each domain's meta-test sample count |
+| `evolution.proposer`, `fallback_to_rule` | Legacy selectors; ordinary/meta direct optimization uses the optimizer without rule fallback |
+| `max_attribution_samples_per_update`, `max_counterfactuals_per_sample` | Legacy compatibility fields; no attribution or counterfactual stage runs |
+
+The last two rows describe ordinary/meta detector evolution. The independent `generation.proposer` still supports a rule baseline for data rewriting, and `generator-evolve` has its own candidate/evaluation contract.
+
 ## Skill packages and extensibility
 
 Seed packages live in `skills/seeds/`. A package may contain:
@@ -488,6 +557,22 @@ evofact package test skills/seeds/temporal_reasoning
 evofact package diff path/to/before path/to/after
 ```
 
+## Code entry points
+
+| Responsibility | Source |
+| --- | --- |
+| Commands, dataset selection, checkpoints | [cli.py](src/evofact/cli.py) |
+| Ordinary training, direct optimizer call, single-pass validation | [ExperimentRunner](src/evofact/experiments/runner.py): `evolve_once`, `closed_loop`, `closed_loop_batched` |
+| Meta episodes and frozen-bank evaluation | [MetaEvolutionRunner](src/evofact/experiments/meta_runner.py) |
+| Sanitized traces and current Skill bank payload | [optimizer_context.py](src/evofact/evolution/optimizer_context.py): `build_skillbank_optimizer_context` |
+| Optimizer responses and package candidates | [package_optimizer.py](src/evofact/evolution/package_optimizer.py), [package_candidate.py](src/evofact/evolution/package_candidate.py) |
+| Inference and dependency execution | [inference.py](src/evofact/runtime/inference.py), [dag_executor.py](src/evofact/runtime/dag_executor.py) |
+| Ordinary and meta promotion | [gate.py](src/evofact/validation/gate.py), [meta_gate.py](src/evofact/validation/meta_gate.py) |
+| Transfer evidence aggregation | [transfer.py](src/evofact/validation/transfer.py) |
+| Script and package scans | [scanner.py](src/evofact/security/scanner.py), [package_scanner.py](src/evofact/security/package_scanner.py) |
+| Dataset adapters, splits, and sampling | [registry.py](src/evofact/data/registry.py), [manifests.py](src/evofact/data/manifests.py), [sampling.py](src/evofact/data/sampling.py) |
+| Immutable bank commits and history | [repository.py](src/evofact/skills/repository.py) |
+
 ## Repository layout
 
 ```text
@@ -500,7 +585,7 @@ EvoFactSkill/
 ├── src/evofact/
 │   ├── data/             # adapters, label contracts, manifests, leakage checks
 │   ├── runtime/          # routing, DAG execution, backend, budgets, traces
-│   ├── evolution/        # attribution and full-package optimization
+│   ├── evolution/        # direct trace context and full-package optimization
 │   ├── generation/       # rewriting, verification, and generation audit
 │   ├── experiments/      # test, evolution, meta-learning, adversarial runners
 │   ├── validation/       # fixed gates, calibration, transfer checks
@@ -514,7 +599,8 @@ The test suite is offline and uses injected fake backends; it does not call a pa
 
 ```bash
 python -m pytest
-python -m ruff check src tests
+python -m ruff check .
+python -m ruff format --check .
 ```
 
 For a real backend, first validate orchestration with a small `--limit` and a strict budget. Do not infer benchmark quality from the mock backend or the dry-run fixture.
@@ -530,7 +616,7 @@ For a real backend, first validate orchestration with a small `--limit` and a st
 
 ## Citation
 
-The paper citation will be added after the paper is publicly available. Until then, cite the repository URL and the exact commit used for the experiment.
+To cite this implementation, record the repository URL and the exact commit used for the experiment.
 
 ## License
 
