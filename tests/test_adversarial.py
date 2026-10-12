@@ -402,6 +402,9 @@ class AdversarialRunnerTests(unittest.TestCase):
             config = config_for(Path(temp))
             backend = FakeJSONBackend()
             runner = AdversarialEvolutionRunner(config, ROOT, facts, generation_backend=backend)
+            from optimizer_stub import EditingOptimizerBackend
+
+            runner.base._optimizer_backend = EditingOptimizerBackend
             outcome = asyncio.run(
                 runner.run(samples, final_test_domains=("outer_holdout",), evaluation_only=True)
             )

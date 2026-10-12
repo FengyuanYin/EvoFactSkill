@@ -8,8 +8,6 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from evofact.attribution.clustering import cluster_reports
-from evofact.attribution.rules import attribute_trace
 from evofact.config import AppConfig
 from evofact.core.budget_models import BudgetLimits
 from evofact.core.label_models import RUNTIME_ABSTAIN_LABEL, DecisionOrigin
@@ -25,14 +23,10 @@ from evofact.core.models import (
 )
 from evofact.data.label_registry import fixture_binary_contract
 from evofact.data.registry import DataRegistry
-from evofact.evolution.distiller import distill
 from evofact.evolution.package_candidate import package_candidate_to_proposal
 from evofact.evolution.package_optimizer import (
-    ALLOWED_TARGET_KINDS,
-    FROZEN_TARGET_NAMES,
     PackageOptimizerAgent,
 )
-from evofact.evolution.proposer import propose_from_cluster
 from evofact.governance.pricing_policy import load_pricing_table
 from evofact.routing.router import LLMSkillRouter, SkillRouter
 from evofact.runtime.batching import ordered_batched_map
@@ -51,7 +45,6 @@ from evofact.skills.package_adapter import (
     project_skill_bank_to_packages,
 )
 from evofact.skills.package_loader import load_package
-from evofact.skills.utility import UtilityTracker
 from evofact.validation.evaluator import evaluate
 from evofact.validation.gate import ValidationGate
 from evofact.validation.statistics import paired_bootstrap, paired_metric_bootstrap
@@ -472,267 +465,75 @@ class ExperimentRunner:
         task_name: str = "evolve",
         prior_proposals=(),
     ):
-        """函数作用：根据一批样本完成推理、归因、经验蒸馏和检测技能候选生成。
+        """函数作用：推理一批训练样本，直接将 trace 和当前技能库交给 optimizer 生成候选。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`generation_guard`（未显式标注，默认 `None`）需以关键字传入并符合签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         rows = fixture_samples() if samples is None else samples
-        # Run inference to collect traces for attribution.
+        # Run inference once, then let the optimizer inspect traces and select a Skill.
         traces, result = await self.run(
             rows, progress=progress, task_name=task_name, phase="train inference"
         )
 
-        # Attribute prediction errors to the selected skills.
-        reports = []
-        for trace, sample in zip(traces, rows):
-            contract = self.label_contract_registry.resolve_sample(sample)
-            reports.append(attribute_trace(trace, contract.normalize(sample.label), contract))
-        if not self.config.evolution.enabled:
-            if generation_guard is not None:
-                generation_guard(traces, reports)
-            return {
-                "traces": traces,
-                "evaluation": result,
-                "attributions": reports,
-                "utilities": {},
-                "distillation": distill(traces, reports),
-                "proposals": [],
-                "package_candidates": {},
-            }
-        tracker = UtilityTracker()
-        jobs = []
-        attribution_limit = self.config.evolution.max_attribution_samples_per_update
-        if attribution_limit:
-            attributed_indexes = [
-                index for index, report in enumerate(reports) if report.error_types
-            ][:attribution_limit]
-        else:
-            attributed_indexes = list(range(len(reports)))
-        attributed = set(attributed_indexes)
-        for trace_index, (trace, sample) in enumerate(zip(traces, rows)):
-            if trace_index not in attributed:
-                continue
-            selected_skill_ids = trace.routing.selected_skill_ids
-            counterfactual_limit = self.config.evolution.max_counterfactuals_per_sample
-            if counterfactual_limit:
-                selected_skill_ids = selected_skill_ids[:counterfactual_limit]
-            # Remove one selected skill at a time for counterfactual replay.
-            for skill_index, sid in enumerate(selected_skill_ids):
-                reduced = [skill for skill in self.skills if skill.skill_id != sid]
-                jobs.append((trace_index, skill_index, sid, sample, reduced))
-
-        async def counterfactual(job):
-            trace_index, skill_index, sid, sample, reduced = job
-            cf_trace = (
-                await self.run(
-                    [sample],
-                    skills=reduced,
-                    task_name=task_name,
-                    phase=f"counterfactual without {sid}",
-                )
-            )[0][0]
-            return trace_index, skill_index, sid, cf_trace
-
-        def counterfactual_done(completed, total):
-            if progress is not None:
-                progress.update(
-                    ProgressEvent(
-                        task_name,
-                        "counterfactual",
-                        completed,
-                        total,
-                        "evaluations",
-                    )
-                )
-
-        counterfactuals = await ordered_batched_map(
-            jobs,
-            counterfactual,
-            batch_size=self.config.execution.batch_size,
-            concurrency=self.config.execution.max_concurrent_samples,
-            on_item_done=counterfactual_done,
-        )
-        grouped = {index: [] for index in range(len(traces))}
-        for trace_index, skill_index, sid, cf_trace in counterfactuals:
-            grouped[trace_index].append((skill_index, sid, cf_trace))
-
-        credited = []
-        for trace_index, (trace, sample, report) in enumerate(zip(traces, rows, reports)):
-            gold = self.label_contract_registry.resolve_sample(sample).normalize(sample.label)
-            baseline_ok = trace.decision.label == gold
-            deltas = {}
-            for _, sid, cf_trace in sorted(grouped[trace_index]):
-                delta = float(baseline_ok) - float(cf_trace.decision.label == gold)
-                deltas[sid] = delta
-                tracker.update(
-                    sid,
-                    success=baseline_ok,
-                    delta=delta,
-                    cost=float(trace.usage.cost or 0),
-                    domain=sample.domain,
-                    window=str(sample.metadata.get("temporal_window"))
-                    if sample.metadata.get("temporal_window") is not None
-                    else None,
-                )
-            credited.append(replace(report, counterfactual_deltas=deltas))
-        reports = credited
         if generation_guard is not None:
-            generation_guard(traces, reports)
-        clusters = cluster_reports([report for report in reports if report.error_types])
-        package_candidates = {}
-        skipped_proposals: list[tuple[str, str]] = []
-        optimizer = None
-
-        # Generate skill optimization proposals from the error clusters.
-        if self.config.evolution.proposer == "llm":
-            optimizer_packages = [
-                package
-                for package in self.packages
-                if package.manifest.name == self.config.evolution.optimizer_skill
-                and package.manifest.kind == SkillKind.META
-            ]
-            if len(optimizer_packages) != 1:
-                raise ValueError("optimizer Package must resolve to exactly one META Package")
-
-            def cluster_distillation(cluster_id: str, group) -> dict:
-                """Compact cluster-scoped experience summary handed to the optimizer."""
-                summary = distill(traces, list(group))
-                summary.pop("trace_ids", None)
-                summary["cluster_id"] = cluster_id
-                return summary
-
-            optimizer = PackageOptimizerAgent(
-                backend=self._optimizer_backend(),
-                optimizer_package=optimizer_packages[0],
-                config=self.config.evolution,
-                budget_manager=self._budget_manager(),
-                rule_fallback=lambda cluster_id, group: propose_from_cluster(
-                    cluster_id, group, self.skills
-                ),
-            )
-
-            cluster_items = sorted(clusters.items())
-
-            async def optimize_cluster(item):
-                cluster_id, group = item
-                responsible = {
-                    skill_id for report in group for skill_id in report.responsible_skill_ids
-                }
-                editable = [
-                    package
-                    for package in self.packages
-                    if package.manifest.kind in ALLOWED_TARGET_KINDS
-                    and package.manifest.name not in FROZEN_TARGET_NAMES
-                    and package.manifest.name != "generation_agent"
-                ]
-                ranked = rank_optimizer_targets(editable, responsible, counterfactual_harm(group))
-                target = next(
-                    iter(ranked),
-                    next(
-                        (
-                            package
-                            for package in editable
-                            if package.manifest.kind in {SkillKind.ROUTER, SkillKind.JUDGE}
-                        ),
-                        editable[0] if editable else None,
-                    ),
-                )
-                if target is None:
-                    return None
-                outcome = await optimizer.propose(
-                    target,
-                    self.packages,
-                    cluster_id=cluster_id,
-                    reports=group,
-                    traces=traces,
-                    distillation=cluster_distillation(cluster_id, group),
-                    prior_proposals=prior_proposals,
-                )
-                if outcome.status in {"no_change", "skipped"}:
-                    if outcome.status == "skipped":
-                        skipped_proposals.append((cluster_id, outcome.reason))
-                    return None
-                if outcome.status == "fallback":
-                    # The rule proposer answered instead; it has no PackageCandidate.
-                    return outcome.proposal, None
-                candidate = outcome.candidate
-                if candidate is None:
-                    return None
-                if candidate.base is None and not self.config.evolution.discovery:
-                    return None
-                if candidate.base is not None and self.config.evolution.scope == "instructions":
-                    edits = {
-                        operation.path
-                        for operation in (
-                            candidate.patch.file_operations if candidate.patch else ()
-                        )
-                    }
-                    allowed_path = target.manifest.entrypoints.instructions
-                    changed_manifest = (
-                        replace(candidate.package.manifest, version=target.manifest.version)
-                        != target.manifest
-                    )
-                    if edits - {allowed_path} or changed_manifest:
-                        # Instructions scope: never silently discard file-level edits.
-                        optimizer.skips["scope_violation"] += 1
-                        skipped_proposals.append((cluster_id, "scope_violation"))
-                        return None
-                proposal = package_candidate_to_proposal(
-                    candidate,
-                    cluster_id=cluster_id,
-                    source_trace_ids=tuple(report.trace_id for report in group),
-                )
-                return proposal, candidate
-
-            def optimizer_done(completed, total):
-                if progress is not None:
-                    progress.update(
-                        ProgressEvent(
-                            task_name,
-                            "optimizer",
-                            completed,
-                            total,
-                            "clusters",
-                        )
-                    )
-
-            proposed = await ordered_batched_map(
-                cluster_items,
-                optimize_cluster,
-                batch_size=self.config.execution.batch_size,
-                concurrency=self.config.execution.max_concurrent_samples,
-                on_item_done=optimizer_done,
-            )
-            # NO_CHANGE 返回 None，不进入后续评估和 Gate。
-            pairs = [item for item in proposed if item is not None]
-            proposals = [proposal for proposal, _ in pairs]
-            package_candidates = {proposal.proposal_id: candidate for proposal, candidate in pairs}
-
-        else:
-            # 保留原来的规则 proposer，保证向后兼容。
-            proposals = [
-                propose_from_cluster(
-                    cluster_id,
-                    group,
-                    self.skills,
-                )
-                for cluster_id, group in clusters.items()
-            ]
-            if not self.config.evolution.discovery:
-                proposals = [
-                    proposal for proposal in proposals if proposal.operation.value != "add"
-                ]
-
-        return {
+            generation_guard(traces, [])
+        outcome = {
             "traces": traces,
             "evaluation": result,
-            "attributions": reports,
-            "utilities": tracker.values,
-            "distillation": distill(traces, reports),
-            "proposals": proposals,
-            "package_candidates": package_candidates,
-            "optimizer_skips": dict(optimizer.skips) if optimizer is not None else {},
-            "skipped_proposals": tuple(skipped_proposals),
+            "attributions": [],
+            "utilities": {},
+            "distillation": {},
+            "proposals": [],
+            "package_candidates": {},
+            "optimizer_skips": {},
+            "skipped_proposals": [],
         }
+        if not self.config.evolution.enabled or not traces:
+            return outcome
+        optimizer_packages = [
+            package
+            for package in self.packages
+            if package.manifest.name == self.config.evolution.optimizer_skill
+            and package.manifest.kind == SkillKind.META
+        ]
+        if len(optimizer_packages) != 1:
+            raise ValueError("optimizer Package must resolve to exactly one META Package")
+        optimizer = PackageOptimizerAgent(
+            backend=self._optimizer_backend(),
+            optimizer_package=optimizer_packages[0],
+            config=self.config.evolution,
+            budget_manager=self._budget_manager(),
+        )
+        optimized = await optimizer.propose(None, self.packages, traces=traces)
+        if progress is not None:
+            progress.update(
+                ProgressEvent(task_name, "optimizer", 1, 1, "updates", optimized.status)
+            )
+        outcome["optimizer_skips"] = dict(optimizer.skips)
+        if optimized.status == "skipped":
+            outcome["skipped_proposals"].append(("trace-batch", optimized.reason))
+        candidate = optimized.candidate
+        if candidate is None:
+            return outcome
+        if candidate.base is None and not self.config.evolution.discovery:
+            return outcome
+        if candidate.base is not None and self.config.evolution.scope == "instructions":
+            edits = {operation.path for operation in candidate.patch.file_operations}
+            changed_manifest = (
+                replace(candidate.package.manifest, version=candidate.base.manifest.version)
+                != candidate.base.manifest
+            )
+            if edits - {candidate.base.manifest.entrypoints.instructions} or changed_manifest:
+                outcome["optimizer_skips"]["scope_violation"] = 1
+                outcome["skipped_proposals"].append(("trace-batch", "scope_violation"))
+                return outcome
+        proposal = package_candidate_to_proposal(
+            candidate,
+            cluster_id="trace-batch",
+            source_trace_ids=tuple(trace.trace_id for trace in traces),
+        )
+        outcome["proposals"] = [proposal]
+        outcome["package_candidates"] = {proposal.proposal_id: candidate}
+        return outcome
 
     async def closed_loop(
         self,
@@ -771,44 +572,23 @@ class ExperimentRunner:
         decisions = []
         for proposal in outcome["proposals"]:
             candidate_skills = apply_candidate(self.skills, proposal)
-            repeated_baseline = []
-            repeated_candidate = []
-            unit_baseline: dict[str, list[SampleEvaluation]] = {}
-            unit_candidate: dict[str, list[SampleEvaluation]] = {}
-            for repeat_index in range(self.config.gate.repeats):
-                _, base_run = await self.run(
-                    validation_rows,
-                    progress=progress,
-                    task_name=task_name,
-                    phase=f"validation baseline r{repeat_index + 1}",
-                    isolate_sample_budget=True,
-                )
-                _, candidate_run = await self.run(
-                    validation_rows,
-                    skills=candidate_skills,
-                    progress=progress,
-                    task_name=task_name,
-                    phase=f"validation candidate r{repeat_index + 1}",
-                    isolate_sample_budget=True,
-                )
-                for row in base_run.per_sample:
-                    unit_baseline.setdefault(row.sample_id, []).append(row)
-                for row in candidate_run.per_sample:
-                    unit_candidate.setdefault(row.sample_id, []).append(row)
-                repeated_baseline.extend(
-                    replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
-                    for x in base_run.per_sample
-                )
-                repeated_candidate.extend(
-                    replace(x, sample_id=f"{x.sample_id}:r{repeat_index}")
-                    for x in candidate_run.per_sample
-                )
-            # Metrics average over every repeat, but the paired test runs on one collapsed
-            # row per sample: repeats are measurements of the same unit, not extra units.
-            baseline_result = evaluate(repeated_baseline)
-            candidate_result = evaluate(repeated_candidate)
-            test_baseline = [_majority_row(rows) for _, rows in sorted(unit_baseline.items())]
-            test_candidate = [_majority_row(rows) for _, rows in sorted(unit_candidate.items())]
+            _, baseline_result = await self.run(
+                validation_rows,
+                progress=progress,
+                task_name=task_name,
+                phase="validation baseline",
+                isolate_sample_budget=True,
+            )
+            _, candidate_result = await self.run(
+                validation_rows,
+                skills=candidate_skills,
+                progress=progress,
+                task_name=task_name,
+                phase="validation candidate",
+                isolate_sample_budget=True,
+            )
+            test_baseline = list(baseline_result.per_sample)
+            test_candidate = list(candidate_result.per_sample)
             interval, test = paired_metric_bootstrap(
                 test_baseline,
                 test_candidate,
@@ -1054,7 +834,8 @@ class ExperimentRunner:
             all_proposals.extend(outcome["proposals"])
             all_decisions.extend(outcome["gate_decisions"])
             utilities.update(outcome["utilities"])
-            distillation.append(outcome["distillation"])
+            if outcome["distillation"]:
+                distillation.append(outcome["distillation"])
             validation_metrics = None
             if self.config.execution.validate_after_each_batch:
                 _, active_validation = await self.run(

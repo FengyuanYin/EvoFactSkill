@@ -67,7 +67,7 @@ def test_evolution_ablation_switches_are_independent():
     assert not instruction.evolution.discovery
     assert discovery.evolution.scope == "package"
     assert not discovery.evolution.discovery
-    with pytest.raises(ValueError, match="identical"):
+    with pytest.raises(ValueError, match="unsupported"):
         apply_evolution_ablation(config, "rule-proposer")
     with pytest.raises(ValueError, match="scope"):
         EvolutionConfig(scope="invalid")

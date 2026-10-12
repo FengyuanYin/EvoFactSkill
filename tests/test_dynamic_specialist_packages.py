@@ -90,6 +90,22 @@ def _addition_response(name: str = "geospatial_context") -> dict:
     }
 
 
+def test_script_addition_records_change_without_automatic_human_review() -> None:
+    response = _addition_response()
+    response["new_package"]["files"].append(
+        {
+            "path": "scripts/helper.py",
+            "content": "def helper(x): return x\n",
+            "media_type": "text/x-python",
+            "executable": True,
+        }
+    )
+    response["new_package"]["manifest"]["entrypoints"]["script"] = "scripts/helper.py"
+    addition = parse_package_optimizer_response(response, [])
+    assert "script_change" in addition.risk_flags
+    assert "human_review_required" not in addition.risk_flags
+
+
 def test_runtime_prefers_package_owned_contract_for_unknown_specialist() -> None:
     skill = SkillSpec(
         "geo-id",
