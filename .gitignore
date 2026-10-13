@@ -20,3 +20,5 @@ skills/demse-store/
 /learn
 /code-to-course
 /docs
+/skills/*
+!/skills/seeds/

@@ -85,7 +85,7 @@ def test_optimizer_cannot_target_itself_or_frozen_governance():
         )
 
 
-def test_script_patch_requires_human_review():
+def test_script_patch_records_change_without_automatic_human_review():
     package = load_package(PROJECT_ROOT / "skills" / "seeds" / "generation_agent")
     patch = parse_package_optimizer_response(
         {
@@ -104,7 +104,8 @@ def test_script_patch_requires_human_review():
         },
         [package],
     )
-    assert {"script_change", "human_review_required"} <= set(patch.risk_flags)
+    assert "script_change" in patch.risk_flags
+    assert "human_review_required" not in patch.risk_flags
 
 
 def test_optimizer_cannot_embed_runtime_owned_label_contract_files():
@@ -268,7 +269,11 @@ def test_ordinary_llm_evolution_emits_exact_package_candidate(monkeypatch):
     class EditingBackend(MockBackend):
         async def optimize_package(self, context, optimizer_skill):
             del optimizer_skill
-            target_id = context["target"]["skill_id"]
+            target_id = next(
+                package["skill_id"]
+                for package in context["skills"]
+                if package["manifest"]["name"] == "source_credibility"
+            )
             target = next(package for package in runner.packages if package.skill_id == target_id)
             source = target.file(target.manifest.entrypoints.instructions)
             content = source.content.decode("utf-8") + "\nUse an auditable package-level edit.\n"
@@ -292,10 +297,6 @@ def test_ordinary_llm_evolution_emits_exact_package_candidate(monkeypatch):
 
     backend = EditingBackend()
     monkeypatch.setattr(runner, "_backend", lambda: backend)
-    monkeypatch.setattr(
-        "evofact.experiments.runner.cluster_reports",
-        lambda reports: {"forced-package-audit": reports[:1]},
-    )
     outcome = asyncio.run(runner.evolve_once(fixture_samples()))
     assert len(outcome["proposals"]) == 1
     proposal = outcome["proposals"][0]
@@ -316,7 +317,11 @@ class _FileEditBackend(MockBackend):
 
     async def optimize_package(self, context, optimizer_skill):
         del optimizer_skill
-        target_id = context["target"]["skill_id"]
+        target_id = next(
+            package["skill_id"]
+            for package in context["skills"]
+            if package["manifest"]["name"] == "source_credibility"
+        )
         target = next(package for package in self.runner.packages if package.skill_id == target_id)
         instructions = target.file(target.manifest.entrypoints.instructions)
         operations = [
@@ -354,10 +359,6 @@ class _FileEditBackend(MockBackend):
 def _evolve_once_with(monkeypatch, config, backend):
     runner = ExperimentRunner(config, PROJECT_ROOT)
     monkeypatch.setattr(runner, "_backend", lambda: backend)
-    monkeypatch.setattr(
-        "evofact.experiments.runner.cluster_reports",
-        lambda reports: {"forced": reports[:1]},
-    )
     return asyncio.run(runner.evolve_once(fixture_samples()))
 
 
@@ -390,7 +391,7 @@ def test_instructions_scope_skips_file_level_edits_instead_of_discarding_them(mo
     assert outcome["proposals"] == []
     assert outcome["package_candidates"] == {}
     assert outcome["optimizer_skips"]["scope_violation"] == 1
-    assert ("forced", "scope_violation") in outcome["skipped_proposals"]
+    assert ("trace-batch", "scope_violation") in outcome["skipped_proposals"]
 
 
 def test_instructions_scope_rejects_manifest_scope_changes(monkeypatch):

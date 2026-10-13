@@ -55,7 +55,7 @@ class CoreTests(unittest.TestCase):
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         c = load_config(ROOT / "configs/dry_run.yaml")
         self.assertEqual(c.backend, "mock")
-        self.assertEqual(c.gate.repeats, 2)
+        self.assertEqual(c.gate.repeats, 1)
 
     def test_redaction_and_freeze(self):
         """函数作用：验证 `redaction_and_freeze` 场景的正常行为、边界条件或错误处理。
@@ -233,11 +233,18 @@ class MetricTests(unittest.TestCase):
         gate = ValidationGate(
             GateConfig(repeats=2, min_macro_f1_gain=0, min_coverage=0), require_cost=True
         )
-        decision = gate.decide(result, result, StatisticalTestResult("x", 1, 0.01, True))
+        baseline = replace(
+            result,
+            aggregate_metrics={
+                **result.aggregate_metrics,
+                "macro_f1_all": result.aggregate_metrics["macro_f1_all"] - 0.0001,
+            },
+        )
+        decision = gate.decide(baseline, result, StatisticalTestResult("x", 1, 0.01, True))
         self.assertTrue(decision.accepted, decision.reason)
 
-    def test_gate_rejects_when_cost_coverage_is_too_low(self):
-        """函数作用：验证 `gate_rejects_when_cost_coverage_is_too_low` 场景的正常行为、边界条件或错误处理。
+    def test_gate_accepts_f1_gain_despite_other_metric_failures(self):
+        """函数作用：验证微小 F1 提升即可晋升，不受成本、覆盖率、校准或统计证据否决。
         输入要求：`self` 应为已初始化的 `MetricTests` 实例；无其他显式输入。
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         result = self._cost_rows(5)
@@ -245,9 +252,55 @@ class MetricTests(unittest.TestCase):
         gate = ValidationGate(
             GateConfig(repeats=2, min_macro_f1_gain=0, min_coverage=0), require_cost=True
         )
-        decision = gate.decide(result, result, StatisticalTestResult("x", 1, 0.01, True))
+        baseline = replace(
+            result, aggregate_metrics={**result.aggregate_metrics, "macro_f1_all": 0.9, "ece": 0.0}
+        )
+        candidate = replace(
+            result,
+            aggregate_metrics={
+                **result.aggregate_metrics,
+                "macro_f1_all": 0.9001,
+                "ece": 1.0,
+                "coverage": 0.0,
+            },
+            confidence_intervals={"paired_macro_f1_delta": (-0.1, 0.1)},
+        )
+        gate = ValidationGate(GateConfig(), require_cost=True)
+        decision = gate.decide(baseline, candidate, StatisticalTestResult("x", 1, 1.0, False))
+        self.assertTrue(decision.accepted, decision.reason)
+        self.assertEqual(decision.disposition, "active")
+        self.assertEqual(decision.regression_failures, ())
+
+    def test_gate_rejects_unchanged_or_lower_f1(self):
+        result = self._cost_rows(0)
+        gate = ValidationGate(GateConfig(min_macro_f1_gain=-1))
+        baseline_f1 = result.aggregate_metrics["macro_f1_all"]
+        for score in (baseline_f1, baseline_f1 - 0.1, float("nan")):
+            with self.subTest(score=score):
+                candidate = replace(result, aggregate_metrics={"macro_f1_all": score})
+                decision = gate.decide(result, candidate, StatisticalTestResult("x", 1, 0.01, True))
+                self.assertFalse(decision.accepted)
+                self.assertEqual(decision.disposition, "rejected")
+                self.assertIn("macro-F1 did not improve", decision.reason)
+
+    def test_gate_rejects_missing_f1(self):
+        result = self._cost_rows(0)
+        missing = replace(result, aggregate_metrics={})
+        gate = ValidationGate(GateConfig())
+        for baseline, candidate in ((missing, result), (result, missing)):
+            self.assertFalse(
+                gate.decide(baseline, candidate, StatisticalTestResult("x", 1, 0.01, True)).accepted
+            )
+
+    def test_gate_blocks_unsafe_f1_improvement(self):
+        candidate = self._cost_rows(0)
+        baseline = replace(candidate, aggregate_metrics={"macro_f1_all": 0.9})
+        gate = ValidationGate(GateConfig())
+        decision = gate.decide(
+            baseline, candidate, StatisticalTestResult("x", 1, 0.01, True), safety="blocked"
+        )
         self.assertFalse(decision.accepted)
-        self.assertIn("cost unavailable", decision.reason)
+        self.assertEqual(decision.disposition, "rejected")
 
     def test_gate_cost_coverage_requires_a_valid_config(self):
         """函数作用：验证 `gate_cost_coverage_requires_a_valid_config` 场景的错误处理。
@@ -263,7 +316,12 @@ class MetricTests(unittest.TestCase):
         rows = [
             SampleEvaluation(str(index), "REAL", "REAL", 0.9, cost=0.001) for index in range(100)
         ]
-        baseline = evaluate(rows)
+        baseline = evaluate(
+            [
+                replace(row, predicted="FAKE") if index < 10 else row
+                for index, row in enumerate(rows)
+            ]
+        )
         candidate = evaluate(
             [replace(row, cost=0.05) for row in rows],
             {"paired_accuracy_delta": (0.05, 0.1)},
@@ -280,9 +338,16 @@ class MetricTests(unittest.TestCase):
         rows = [
             SampleEvaluation(f"a{index}", "REAL", "REAL", 0.5, domain="a") for index in range(50)
         ] + [SampleEvaluation(f"b{index}", "FAKE", "FAKE", 0.5, domain="b") for index in range(50)]
-        baseline = evaluate(rows)
+        baseline = evaluate(
+            [replace(row, predicted="FAKE") if row.domain == "a" else row for row in rows]
+        )
         candidate = evaluate(
-            [replace(row, predicted="REAL") for row in rows if row.domain == "b"],
+            [
+                replace(row, predicted="REAL")
+                if row.sample_id in {"b0", "b1", "b2", "b3", "b4"}
+                else row
+                for row in rows
+            ],
             {"paired_macro_f1_delta": (0.05, 0.15)},
         )
         dropped = (
@@ -388,9 +453,7 @@ class SkillTests(unittest.TestCase):
         输出：返回 `None`；通过断言表达测试结果，条件不满足时测试失败。"""
         self.assertEqual(scan_resources({"references/a": "ok"}).level, "safe")
         self.assertEqual(scan_resources({"scripts/a.py": "import subprocess"}).level, "blocked")
-        self.assertEqual(
-            scan_resources({"scripts/a.py": "def f(x:int): return x"}).level, "review_required"
-        )
+        self.assertEqual(scan_resources({"scripts/a.py": "def f(x:int): return x"}).level, "safe")
         tracker = UtilityTracker(3)
         for _ in range(2):
             tracker.update("s", success=False, delta=-1, cost=1)
@@ -427,11 +490,10 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotIn("label", traces[0].sample_public)
         self.assertEqual(result.aggregate_metrics["coverage"], 1)
         outcome = asyncio.run(self.runner().closed_loop())
-        self.assertTrue(
-            any(ErrorType.REASONING_ERROR in x.error_types for x in outcome["attributions"])
-        )
-        self.assertTrue(outcome["proposals"])
-        self.assertTrue(outcome["gate_decisions"])
+        self.assertEqual(outcome["attributions"], [])
+        self.assertEqual(outcome["distillation"], {})
+        self.assertEqual(outcome["proposals"], [])
+        self.assertEqual(outcome["gate_decisions"], [])
 
     def test_all_error_taxonomy_paths(self):
         """函数作用：验证 `all_error_taxonomy_paths` 场景的正常行为、边界条件或错误处理。

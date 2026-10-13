@@ -141,7 +141,10 @@ class ExecutionConfig:
 
 @dataclass(frozen=True)
 class GateConfig:  # 验证门配置
-    repeats: int = 3
+    # 普通 evolve 仅以 macro_f1_all 严格提升作为指标晋升条件，并保留安全拦截。
+    # repeats 仅兼容旧 YAML；验证固定单次。alpha 仍用于统计报告。
+    # 其余指标阈值保留以兼容旧 YAML，不参与晋升判定。
+    repeats: int = 1
     min_macro_f1_gain: float = 0.01
     min_coverage: float = 0.8
     # 兼容既有 YAML 保留，但 ValidationGate 已不再按域跌幅否决候选：验证集每个源域只有
@@ -150,7 +153,7 @@ class GateConfig:  # 验证门配置
     max_protected_domain_drop: float = 0.02
     alpha: float = 0.05
     # 兼容既有 YAML 保留，但 ValidationGate 已不再按成本比否决候选：mean_cost 只被记录
-    # 和报告，不参与晋升判定。（meta-evolve 走 MetaLearningConfig 的同名字段，仍然生效。）
+    # 和报告，不参与晋升判定。meta-evolve 的同名成本比字段也仅用于报告。
     max_cost_ratio: float = 1.5
     max_calibration_increase: float = 0.2
     # 成本门控要求参与比较的样本行中至少有这个比例拿到已知成本。真实 API 运行会有
@@ -162,7 +165,7 @@ class GateConfig:  # 验证门配置
         """函数作用：在 `GateConfig` 数据类初始化后检查字段之间的业务约束。
         输入要求：`self` 应为已初始化的 `GateConfig` 实例；无其他显式输入。
         输出：返回 `None`；验证数据类字段，不满足约束时抛出 `ValueError`。"""
-        if self.repeats < 2 or not 0 <= self.min_coverage <= 1 or self.max_calibration_increase < 0:
+        if self.repeats < 1 or not 0 <= self.min_coverage <= 1 or self.max_calibration_increase < 0:
             raise ValueError("invalid gate configuration")
         if not 0 <= self.min_cost_coverage <= 1:
             raise ValueError("gate.min_cost_coverage must be between 0 and 1")
@@ -189,7 +192,8 @@ class MetaLearningConfig:  # 元学习配置
     aggregate_across_episodes: bool = True
     enforce_negative_transfer: bool = True
     enforce_worst_domain: bool = True
-    evaluation_repeats: int = 0
+    # 仅兼容旧 YAML；每个 episode 的基线和候选各评估一次。
+    evaluation_repeats: int = 1
     max_meta_test_samples_per_domain: int = 50
     isolate_candidate_budget: bool = False
     checkpoint_path: Path = Path("outputs/demse/checkpoint.json")
@@ -220,13 +224,15 @@ class MetaLearningConfig:  # 元学习配置
 class EvolutionConfig:
     enabled: bool = True
 
-    proposer: str = "rule"
+    # Legacy selector retained for YAML compatibility; evolve always uses the optimizer.
+    proposer: str = "llm"
 
     scope: str = "package"
 
     discovery: bool = True
 
-    fallback_to_rule: bool = True
+    # Legacy fallback for explicit single-target API calls; direct bank optimization never uses it.
+    fallback_to_rule: bool = False
 
     optimizer_skill: str = "skill_optimizer"
 
@@ -248,8 +254,8 @@ class EvolutionConfig:
     # work independently for each inner update.
     max_proposals_per_update: int = 0
 
-    # Zero preserves exhaustive attribution. Positive limits reduce the number
-    # of counterfactual inference calls made by each evolution update.
+    # Legacy attribution limits retained for YAML compatibility; direct trace optimization
+    # performs no rule attribution or counterfactual replay.
     max_attribution_samples_per_update: int = 0
     max_counterfactuals_per_sample: int = 0
 

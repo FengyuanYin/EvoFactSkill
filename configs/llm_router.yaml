@@ -40,7 +40,7 @@ evolution:
   max_total_chars: 300000
 
 gate:
-  repeats: 3
+  repeats: 1
   min_macro_f1_gain: 0.01
   min_coverage: 0.8
   max_protected_domain_drop: 0.02

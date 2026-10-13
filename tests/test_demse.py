@@ -4,11 +4,14 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 import sys
 
 sys.path.insert(0, str(ROOT / "src"))
+
+from optimizer_stub import EditingOptimizerBackend
 
 from evofact.config import MetaLearningConfig, load_config
 from evofact.core.models import (
@@ -288,6 +291,7 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
                 config.meta_learning, checkpoint_path=Path(directory) / "checkpoint.json"
             )
             runner = MetaEvolutionRunner(replace(config, meta_learning=meta), ROOT)
+            runner.base._optimizer_backend = EditingOptimizerBackend
             outcome = asyncio.run(
                 runner.run(
                     fixture_meta_samples(),
@@ -328,11 +332,19 @@ class MetaCheckpointAndRunnerTests(unittest.TestCase):
                 checkpoint_path=base / "checkpoint.json",
                 min_valid_episodes=1,
             )
-            outcome = asyncio.run(
-                MetaEvolutionRunner(replace(config, meta_learning=meta), ROOT, repository).run(
-                    fixture_meta_samples(), final_test_domains=("outer_holdout",)
+            runner = MetaEvolutionRunner(replace(config, meta_learning=meta), ROOT, repository)
+            runner.base._optimizer_backend = EditingOptimizerBackend
+            with patch.object(
+                MetaValidationGate,
+                "decide",
+                autospec=True,
+                side_effect=lambda gate, utility, **kwargs: gate._decision(
+                    utility, True, "generalized", utility.tested_domains, ()
+                ),
+            ):
+                outcome = asyncio.run(
+                    runner.run(fixture_meta_samples(), final_test_domains=("outer_holdout",))
                 )
-            )
             self.assertTrue(outcome.committed_snapshots)
             self.assertEqual(set(repository.active()), before)
             self.assertIsNotNone(repository.package_transaction(outcome.run_id))

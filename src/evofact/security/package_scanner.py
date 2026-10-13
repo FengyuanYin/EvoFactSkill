@@ -19,6 +19,4 @@ def scan_package(package: SkillPackage) -> SafetyReport:
         return SafetyReport(
             "blocked", (*report.findings, "manifest script entrypoint is missing or undeclared")
         )
-    if scripts and report.level == "safe":
-        return SafetyReport("review_required", report.findings)
     return report

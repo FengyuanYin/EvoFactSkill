@@ -2,9 +2,12 @@ from evofact.core.models import SampleEvaluation
 
 
 def brier_score(rows: list[SampleEvaluation]) -> float:
-    """函数作用：负责当前模块中的 `brier_score` 处理，封装调用方需要复用的业务步骤。
-    输入要求：`rows`（list[SampleEvaluation]）需符合函数签名约定。
-    输出：返回 `float` 类型结果；校验或下游调用失败时异常向上传递。"""
+    """评估二分类预测概率与真实标签的差距，值越低越好。
+
+    将每行置信度换算为正类概率 p，再对真实正类取 y=1、负类取 y=0，
+    计算 (p-y)^2 的样本均值。运行时弃权或非法预测按 p=0.5 计入。
+    要求所有行使用同一个二分类标签契约且定义了正类；空输入返回 0。
+    """
     if not rows:
         return 0
     signatures = {(row.label_schema_id, row.allowed_labels, row.positive_label) for row in rows}
@@ -24,9 +27,12 @@ def brier_score(rows: list[SampleEvaluation]) -> float:
 
 
 def expected_calibration_error(rows: list[SampleEvaluation], bins: int = 10) -> float:
-    """函数作用：负责当前模块中的 `expected_calibration_error` 处理，封装调用方需要复用的业务步骤。
-    输入要求：`rows`（list[SampleEvaluation]）需符合函数签名约定；`bins`（int，默认 `10`）需符合函数签名约定。
-    输出：返回 `float` 类型结果；校验或下游调用失败时异常向上传递。"""
+    """衡量预测置信度与实际正确率是否一致，值越低表示校准越好。
+
+    将置信度划入 bins 个等宽区间，计算每桶的平均置信度与正确率之差，
+    再按桶内样本占比加权求和。弃权也按预测错误计入对应置信度桶；
+    空输入返回 0。该指标衡量校准程度，不单独表示分类准确率。
+    """
     if not rows:
         return 0
     total = 0
