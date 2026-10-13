@@ -32,17 +32,19 @@ EvoFactSkill is a research codebase for cross-domain fact verification with an e
 
 ```mermaid
 flowchart LR
-    A[Claim + dataset context] --> B[Router / Planner]
-    B --> C[Constrained specialist DAG]
-    C --> D1[Source credibility]
-    C --> D2[Temporal reasoning]
-    C --> D3[Numerical consistency]
-    D1 --> E[Structured reports]
-    D2 --> E
-    D3 --> E
-    E --> F[Dataset-aware Judge]
-    G[Versioned label contract] --> F
-    F --> H[Prediction + confidence + trace]
+    A["Claim and supplied evidence"] --> B["Filter current Skills by scope"]
+    S["Current Skill bank"] --> B
+    B --> C["Router / Planner"]
+    C --> D["Validate constrained DAG"]
+    D --> E["Execute ready specialist nodes<br/>with dependencies and resource limits"]
+    E --> F{"Required reports complete<br/>and valid?"}
+    F -->|Yes| G["Dataset-aware Judge"]
+    L["Versioned label contract"] --> G
+    G -->|Valid response| H["Dataset label and confidence"]
+    F -->|No| R["Runtime ABSTAIN"]
+    G -->|Timeout or contract failure| R
+    H --> T["InferenceTrace and usage"]
+    R --> T
 ```
 
 `coordinator_routing` is the Router's skill package; it is not a separate Coordinator agent. The execution plan explicitly represents dependencies. Nodes at the same ready frontier may execute in parallel, while a downstream node waits for its declared predecessors.
@@ -51,14 +53,17 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Training traces] --> C[Package Optimizer]
-    B[Current Skill bank] --> C
-    C --> D[Candidate Skill Package]
-    D --> E[Package validation and security scan]
-    E --> F[Fixed promotion gate]
-    G[Real-only protected validation] --> F
-    F -->|pass| H[Content-addressed package bank]
-    F -->|fail| I[Reject and retain champion]
+    A["Training traces"] --> X["Sanitize and bound optimizer context"]
+    B["Current complete Skill bank"] --> X
+    X --> C["Package Optimizer<br/>diagnoses traces and selects target"]
+    C -->|Edit or add| D["Candidate Skill Package"]
+    C -->|no_change| I["Keep current bank"]
+    D --> E{"Package valid<br/>and scan passed?"}
+    E -->|Yes| V["Evaluate baseline and candidate once<br/>on the mode's validation split"]
+    E -->|No| I
+    V --> F["Ordinary F1 gate or Meta transfer gate"]
+    F -->|Accepted| H["Commit versioned Skill bank"]
+    F -->|Not accepted| I
 ```
 
 Ordinary and meta evolution pass training traces and the current Skill bank directly to the Package Optimizer. It diagnoses the traces and selects a target itself; rule attribution, counterfactual replay, error clustering, and experience distillation are not performed. Each update requests one edit, specialist addition, or no_change. The optimizer package itself is fixed. Generation workflow optimization uses its separate command.
@@ -74,9 +79,52 @@ Ordinary and meta evolution pass training traces and the current Skill bank dire
 | Inference passes | Baseline once, candidate once per candidate | Baseline once, candidate once per candidate and episode |
 | Bank update | Accepted candidates committed together at the batch boundary | Decisions committed after cross-episode aggregation |
 
+#### Ordinary `evolve`
+
+```mermaid
+flowchart TD
+    A["Manifest train split"] --> B["Next training batch"]
+    S["Current active Skill bank"] --> C["Run training inference"]
+    B --> C
+    C --> D["Batch traces and current Skills<br/>to optimizer once"]
+    D --> E{"Valid candidate?"}
+    E -->|No candidate or invalid| K["Record batch audit and checkpoint"]
+    E -->|Yes| V["Fixed evolution-validation split<br/>baseline once and candidate once"]
+    V --> G{"Macro-F1 strictly improves<br/>and safety permits promotion?"}
+    G -->|Yes| U["Commit candidate to active bank"]
+    G -->|No| K
+    U -. Updated for next batch .-> S
+    U --> K
+    K --> N{"More training batches?"}
+    N -->|Yes| B
+    N -->|No| F["Final Skill bank and training report"]
+    F -. Separate test command .-> T["Evaluate final-test split"]
+```
+
 Ordinary evolution makes one pass over the selected training samples. Each batch uses one Skill snapshot, runs training inference, and requests one optimizer response. The optimizer may edit an eligible existing package, add a specialist when discovery is enabled, or return `no_change`. A valid candidate is evaluated independently against the batch's starting bank. Accepted updates become active before the next batch. There is no gradient update, counterfactual replay, or repeat loop. Training metrics aggregate predictions made by the successive batch snapshots; they are not a fresh evaluation of the final bank.
 
 `execution.validate_after_each_batch: true` adds a diagnostic validation pass over the resulting active bank. It records metrics without introducing another promotion gate or automatic rollback.
+
+#### Cross-domain `meta-evolve`
+
+```mermaid
+flowchart TD
+    A["Source-domain samples"] --> E["Build domain episodes"]
+    E --> R["Episode meta-train updates"]
+    E --> V["Episode held-out meta-test split"]
+    S["Frozen baseline Skill bank"] --> I["Run each meta-train update"]
+    R --> I
+    I --> O["Update traces and frozen Skills<br/>to optimizer once"]
+    O --> C["Collect valid candidates<br/>without intermediate promotion"]
+    C --> P["Evaluate each episode candidate<br/>baseline once and candidate once"]
+    S --> P
+    V --> P
+    P --> X["Finish episodes and group results<br/>by exact candidate fingerprint"]
+    X --> G["Meta transfer gate"]
+    G -->|generalized or specialized| U["Commit accepted Skill bank"]
+    G -->|pareto, rejected, or review_required| K["Retain audit record without activation"]
+    U -. Separate test command .-> F["Evaluate final-test domains"]
+```
 
 Meta evolution reuses the same direct optimizer path. Within an episode, updates generate proposals without promoting intermediate candidates. The baseline bank remains frozen during episode evaluation. Results are grouped by exact candidate fingerprint: only the same candidate observed in different episodes shares transfer evidence. Distinct rewrites are not pooled as one candidate. Final-test domains are excluded from candidate generation and meta-test evaluation.
 

@@ -32,17 +32,19 @@ EvoFactSkill 是一个用于跨领域事实核验的研究型代码库，核心�
 
 ```mermaid
 flowchart LR
-    A[Claim + 数据集上下文] --> B[Router / Planner]
-    B --> C[受约束专家 DAG]
-    C --> D1[来源可信度]
-    C --> D2[时序推理]
-    C --> D3[数值一致性]
-    D1 --> E[结构化专家报告]
-    D2 --> E
-    D3 --> E
-    E --> F[数据集自适应 Judge]
-    G[版本化标签契约] --> F
-    F --> H[预测 + 置信度 + Trace]
+    A["Claim 与已提供的证据"] --> B["按 scope 筛选当前 Skills"]
+    S["当前 Skill Bank"] --> B
+    B --> C["Router / Planner"]
+    C --> D["校验受约束 DAG"]
+    D --> E["按依赖执行就绪专家节点<br/>应用预算与执行限制"]
+    E --> F{"必需报告完整<br/>且符合契约？"}
+    F -->|是| G["数据集自适应 Judge"]
+    L["版本化标签契约"] --> G
+    G -->|响应合法| H["数据集标签与置信度"]
+    F -->|否| R["Runtime ABSTAIN"]
+    G -->|超时或契约错误| R
+    H --> T["InferenceTrace 与用量"]
+    R --> T
 ```
 
 `coordinator_routing` 是 Router 使用的 Skill Package，并不存在一个独立的 Coordinator Agent。执行计划显式记录专家依赖关系：同一就绪层中的节点可以并行，后继节点必须等待其声明的前驱完成。
@@ -51,14 +53,17 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[训练 Traces] --> C[Package Optimizer]
-    B[当前 Skill 库] --> C
-    C --> D[候选 Skill Package]
-    D --> E[Package 校验与安全扫描]
-    E --> F[固定提升门控]
-    G[Real-only 受保护验证集] --> F
-    F -->|通过| H[内容寻址 Package Bank]
-    F -->|拒绝| I[保留当前 Champion]
+    A["训练 Traces"] --> X["过滤并限制 optimizer 上下文长度"]
+    B["当前完整 Skill Bank"] --> X
+    X --> C["Package Optimizer<br/>自行分析并选择目标"]
+    C -->|编辑或新增| D["候选 Skill Package"]
+    C -->|no_change| I["保持当前技能库"]
+    D --> E{"Package 合法<br/>且通过扫描？"}
+    E -->|是| V["在对应模式的验证分区<br/>基线与候选各评估一次"]
+    E -->|否| I
+    V --> F["普通 F1 门控或 Meta 迁移门控"]
+    F -->|接受| H["提交版本化 Skill Bank"]
+    F -->|不接受| I
 ```
 
 普通 evolve 和 meta-evolve 直接将训练 trace 和当前 Skill 库交给 Package Optimizer，由它自行分析并选择优化目标。候选生成不再执行规则错误归因、反事实回放、错误聚类或经验蒸馏。每次更新请求一次编辑、新增专家技能或 no_change；基线和候选各验证一次。Optimizer 自身保持固定，generation workflow 使用独立的优化命令。
@@ -74,9 +79,52 @@ flowchart LR
 | 推理次数 | 每个候选的基线、候选各一次 | 每个候选在所在 episode 的基线、候选各一次 |
 | 技能库更新 | batch 边界统一提交通过门控的候选 | 跨 episode 汇总后提交门控决策 |
 
+#### 普通 `evolve`
+
+```mermaid
+flowchart TD
+    A["Manifest train 分区"] --> B["读取下一训练 batch"]
+    S["当前 active Skill Bank"] --> C["训练推理"]
+    B --> C
+    C --> D["Batch traces 与当前 Skills<br/>调用 optimizer 一次"]
+    D --> E{"产生合法候选？"}
+    E -->|无候选或不合法| K["记录 batch 审计与 checkpoint"]
+    E -->|是| V["固定 evolution-validation 分区<br/>基线与候选各跑一次"]
+    V --> G{"Macro-F1 严格提升<br/>且安全状态允许晋升？"}
+    G -->|是| U["提交候选到 active bank"]
+    G -->|否| K
+    U -. 供下一批使用 .-> S
+    U --> K
+    K --> N{"还有训练 batch？"}
+    N -->|是| B
+    N -->|否| F["最终 Skill Bank 与训练报告"]
+    F -. 独立 test 命令 .-> T["评估 final-test 分区"]
+```
+
 普通演化对选中的训练样本走一遍。每个 batch 使用同一技能快照完成训练推理，再请求一次 optimizer 响应。Optimizer 可以编辑允许修改的现有技能、在 discovery 开启时新增专家技能，或者返回 `no_change`。合法候选独立地与该批开始时的技能库比较，通过后成为下一批的 active 技能。当前流程没有梯度更新、反事实回放或 repeat 循环。累计训练指标来自各批当时使用的技能快照，不代表最终技能库重新评估完整训练集的结果。
 
 `execution.validate_after_each_batch: true` 会对提交后的 active bank 增加一次诊断性验证，只记录指标，不增加晋升门控或自动回滚。
+
+#### 跨领域 `meta-evolve`
+
+```mermaid
+flowchart TD
+    A["源领域样本"] --> E["构造领域 episodes"]
+    E --> R["Episode meta-train 更新批次"]
+    E --> V["Episode 留出的 meta-test 分区"]
+    S["冻结的基线 Skill Bank"] --> I["逐个 meta-train 更新推理"]
+    R --> I
+    I --> O["更新 traces 与冻结的 Skills<br/>调用 optimizer 一次"]
+    O --> C["收集合法候选<br/>不晋升中间结果"]
+    C --> P["评估当前 episode 的各候选<br/>基线与候选各跑一次"]
+    S --> P
+    V --> P
+    P --> X["完成 episodes 后<br/>按精确候选 fingerprint 汇总"]
+    X --> G["Meta 迁移门控"]
+    G -->|generalized 或 specialized| U["提交接受的 Skill Bank"]
+    G -->|pareto、rejected 或 review_required| K["保留审计记录，不激活"]
+    U -. 独立 test 命令 .-> F["评估最终测试领域"]
+```
 
 元演化复用相同的直接优化路径。一个 episode 内的多个更新只生成提案，不晋升中间候选；episode 评估期间基线技能库保持冻结。结果按候选的精确 fingerprint 分组，只有不同 episode 中出现的同一候选才共享迁移证据，不同改写不会被合并成一个候选。最终测试领域不参与候选生成或 meta-test 评估。
 
