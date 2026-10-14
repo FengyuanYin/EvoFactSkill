@@ -57,7 +57,11 @@ class FakeJSONBackend:
                     for s in payload["samples"]
                 ]
             }
-        assert system == GENERATOR_SYSTEM
+        if "validation_feedback" in payload:
+            assert system.startswith(GENERATOR_SYSTEM)
+            assert "diagnose directly" in system
+        else:
+            assert system == GENERATOR_SYSTEM
         rows, decisions = [], []
         for index in range(payload["batch_size"]):
             example = payload["examples"][index % len(payload["examples"])]
@@ -76,10 +80,10 @@ class FakeJSONBackend:
                     "sample_id": row["sample_id"],
                     "source_sample_id": source["sample_id"],
                     "strategy": "success_boundary_extension"
-                    if example["outcome"] == "success"
+                    if example.get("outcome", "success") == "success"
                     else "minimal_contrast",
                     "reason": "成功类型升难度"
-                    if example["outcome"] == "success"
+                    if example.get("outcome", "success") == "success"
                     else "失败类型增样强化",
                     "source_trace_ids": [example["trace"]["trace_id"]],
                 }
@@ -587,7 +591,10 @@ class AdversarialRunnerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "real backend"):
                     asyncio.run(_run(args))
                 unused.assert_not_called()
-            original = AdversarialEvolutionRunner.__init__
+            from evofact.experiments.adversarial_batch_runner import AdversarialBatchRunner
+
+            config = replace(config, data=replace(config.data, evolution_validation_samples=2))
+            original = AdversarialBatchRunner.__init__
 
             def injected(instance, *args, **kwargs):
                 """函数作用：负责当前模块中的 `injected` 处理，封装调用方需要复用的业务步骤。
@@ -597,12 +604,17 @@ class AdversarialRunnerTests(unittest.TestCase):
 
             with (
                 patch("evofact.cli.load_config", return_value=config),
-                patch.object(AdversarialEvolutionRunner, "__init__", injected),
+                patch.object(AdversarialBatchRunner, "__init__", injected),
             ):
                 result = asyncio.run(_run(args))
             self.assertEqual(result["proposer"], "llm")
-            self.assertEqual(result["generator_calls"], 5)
-            self.assertEqual(result["accepted_samples"], 20)
+            self.assertGreater(result["generator_calls"], 0)
+            self.assertEqual(result["generator_calls"], len(result["generation_rounds"]))
+            self.assertEqual(
+                result["accepted_samples"],
+                sum(len(r["verification"]["accepted"]) for r in result["generation_rounds"]),
+            )
+            self.assertEqual(result["mode"], "adversarial-evolve")
 
     def test_interrupt_after_generation_reuses_response(self):
         """函数作用：验证 `interrupt_after_generation_reuses_response` 场景的正常行为、边界条件或错误处理。

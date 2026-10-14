@@ -7,6 +7,8 @@ seed: 42
 output_dir: outputs/adversarial-llm
 skill_store: outputs/adversarial-llm/detector-bank
 max_skills_per_item: 3
+data:
+  evolution_validation_samples: 8
 pricing:
   provider: deepseek
   table_path: pricing/deepseek-2026-09-18-peak.json
@@ -18,13 +20,14 @@ execution:
 meta_learning:
   enabled: true
   enforce_negative_transfer: true
+  # Legacy ablations only; adversarial-evolve uses execution.batch_size.
   episodes: 5
   checkpoint_path: outputs/adversarial-llm/checkpoint.json
 generation:
   enabled: true
   proposer: llm
   use_generated_in_training: true
-  batch_size: 8
+  batch_size: 4
   max_trace_examples: 32
   max_text_chars: 6000
   probe_fraction: 0.4

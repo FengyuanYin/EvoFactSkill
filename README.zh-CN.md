@@ -22,7 +22,7 @@ EvoFactSkill 是一个用于跨领域事实核验的研究型代码库，核心�
 - **依赖感知的多智能体执行。** Router 返回受约束 DAG：相互独立的专家可以并行执行，存在前后依赖的专家严格按拓扑顺序执行。
 - **数据集自适应判定。** 版本化标签契约把 Judge 的输出限制在 Weibo21、AMTCele、LiveFact 或 AdvFake 的原生标签空间中。`ABSTAIN` 只表示 Runtime 故障，不是数据集标签。
 - **直接基于 Trace 的 Skill 演化。** Optimizer 接收训练 trace 和当前技能库，自行分析并选择优化对象；修改可以覆盖指令、manifest、schema、script 和 reference。
-- **独立的晋升协议。** 普通演化要求验证集 Macro-F1 严格提升；元演化检查跨 episode 的迁移收益。基线和候选各评估一次，两者均保留自动安全检查。
+- **统一的晋升门控。** 普通演化与元演化均要求验证集 Macro-F1 严格提升。元演化使用不同领域的验证样本，失败后反馈验证 trace 并换样本重试；两者均保留自动安全检查。
 - **防泄漏的数据增强。** 先划分真实数据，再仅对 meta-train 执行基于真实样本的 rewriting；meta-test 和 final-test 始终保持 real-only。
 - **可复现的资源核算。** 运行记录 calls、tokens、成本可用性、并发度、package digest、label-contract digest、manifest 和 trace。
 
@@ -72,12 +72,12 @@ flowchart LR
 
 | 阶段 | `evolve` | `meta-evolve` |
 | --- | --- | --- |
-| 训练输入 | Manifest 的 train 分区，按顺序分批处理 | 源领域样本划分为 meta-train/meta-test episode |
-| 更新粒度 | `execution.batch_size` | `evolution.update_interval_samples`；`0` 表示完整 meta-train episode |
-| Optimizer 输入 | 当前 batch 的 trace 和当前完整 Skill Bank | 当前 meta-train 更新的 trace 和 episode 内冻结的 Skill Bank |
-| 候选评估数据 | 固定的 evolution-validation 分区 | 当前 episode 留出的源领域 meta-test 样本 |
-| 推理次数 | 每个候选的基线、候选各一次 | 每个候选在所在 episode 的基线、候选各一次 |
-| 技能库更新 | batch 边界统一提交通过门控的候选 | 跨 episode 汇总后提交门控决策 |
+| 训练输入 | Manifest 的 train 分区，按顺序分批处理 | 与验证领域、最终测试领域分离的训练领域 |
+| 更新粒度 | `execution.batch_size` | `execution.batch_size` |
+| Optimizer 输入 | 当前 batch 的 trace 和当前完整 Skill Bank | 当前 batch 的 trace、当前技能库与累积的失败验证反馈 |
+| 候选评估数据 | 固定的 evolution-validation 分区 | 每次尝试使用验证领域中尚未评估的新样本 |
+| 推理次数 | 每个候选的基线、候选各一次 | 每次尝试的基线、候选各一次 |
+| 技能库更新 | batch 边界统一提交通过门控的候选 | 晋升后立即提交，下一批使用新技能库 |
 
 #### 普通 `evolve`
 
@@ -109,40 +109,29 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["源领域样本"] --> E["构造领域 episodes"]
-    E --> R["Episode meta-train 更新批次"]
-    E --> V["Episode 留出的 meta-test 分区"]
-    S["冻结的基线 Skill Bank"] --> I["逐个 meta-train 更新推理"]
-    R --> I
-    I --> O["更新 traces 与冻结的 Skills<br/>调用 optimizer 一次"]
-    O --> C["收集合法候选<br/>不晋升中间结果"]
-    C --> P["评估当前 episode 的各候选<br/>基线与候选各跑一次"]
-    S --> P
-    V --> P
-    P --> X["完成 episodes 后<br/>按精确候选 fingerprint 汇总"]
-    X --> G["Meta 迁移门控"]
-    G -->|generalized 或 specialized| U["提交接受的 Skill Bank"]
-    G -->|pareto、rejected 或 review_required| K["保留审计记录，不激活"]
+    A["训练领域"] --> I["当前 batch 推理一次"]
+    S["当前技能库"] --> I
+    I --> O["训练 trace 与当前 skills 交给 optimizer"]
+    O --> C["候选"]
+    V["不同验证领域：取新样本"] --> P["基线和候选各推理一次"]
+    C --> P
+    P --> G["普通 ValidationGate：F1 严格提升与安全检查"]
+    G -->|晋升| U["立即更新技能库，进入下一批"]
+    U --> S
+    G -->|失败| T["累积基线与失败候选的验证 trace"]
+    T --> O
+    T --> V
+    T --> L["达到重试或样本池上限：保存并停止"]
     U -. 独立 test 命令 .-> F["评估最终测试领域"]
 ```
 
-元演化复用相同的直接优化路径。一个 episode 内的多个更新只生成提案，不晋升中间候选；episode 评估期间基线技能库保持冻结。结果按候选的精确 fingerprint 分组，只有不同 episode 中出现的同一候选才共享迁移证据，不同改写不会被合并成一个候选。最终测试领域不参与候选生成或 meta-test 评估。
+`meta-evolve` 使用独立的 [MetaBatchRunner](src/evofact/experiments/meta_batch_runner.py)。失败后复用当前 batch 的训练 trace，追加基线与失败候选的验证 trace、失败候选包和门控反馈；每次重试换一组未验证过的样本。晋升立即提交。最终测试领域始终不参与优化和验证。旧 episode 辅助代码保留给旧消融 API。
 
 Optimizer 接收经过过滤的 trace 和当前 package 定义，其中 UTF-8 文件以可读文本提供。真实标签和数据集标签治理信息会被过滤，模型自己的预测仍保留。`max_text_chars`、`max_instructions_chars` 和 `max_total_chars` 控制上下文长度，过大的 trace 列表可能被缩短。报告和 checkpoint 中旧的归因、蒸馏字段保留为空，以兼容已有格式。
 
 ### 晋升门控与安全扫描
 
-| 规则 | 普通 `evolve` | 元演化的泛化晋升 |
-| --- | --- | --- |
-| Macro-F1 收益 | 候选 `macro_f1_all` 严格高于基线 | Episode 平均收益 ≥ `meta_learning.min_mean_gain` |
-| 统计证据 | 写入报告，不否决晋升 | 迁移收益置信区间下界 > `0` |
-| 有效 episode | 无要求 | 至少 `min_valid_episodes` |
-| 覆盖率与校准 | 写入报告，不否决晋升 | 检查 `min_coverage` 和 `max_calibration_increase` |
-| 负迁移与最差领域 | 不否决晋升 | 分别由 `enforce_negative_transfer` 和 `enforce_worst_domain` 开关控制 |
-| 成本可用性 | 不否决晋升 | 真实后端开启 `pricing.require_cost_for_promotion` 时要求成本可用 |
-| 成本比 | 仅报告 | 仅报告 |
-
-元演化在泛化晋升失败后仍可能接受领域特化候选。特化要求部分但非全部测试领域收益为正、有效 episode 数足够、满足覆盖率和校准约束，并通过 [MetaValidationGate](src/evofact/validation/meta_gate.py) 中额外的严重退步检查。`pareto` 状态仅保留候选供审计，不激活技能。
+两条命令均使用 [ValidationGate](src/evofact/validation/gate.py)：候选 `macro_f1_all` 必须严格高于基线，并通过安全检查。有效 episode 数、迁移置信区间、泛化或特化分类不参与 `meta-evolve` 晋升。普通演化保留现有统计报告，批训练 meta 报告会显式标记配对统计未用于晋升。
 
 脚本通过自动扫描后返回 `safe`；仅包含 `scripts/` 文件不会自动产生 `review_required` 或人工审核风险标记。不安全路径、禁止的 Python 导入或调用、语法错误、脚本编码错误，以及脚本入口缺失可能产生 `blocked`，阻止候选晋升。显式传给门控的 `review_required` 状态仍要求审核。扫描器使用静态规则，`safe` 表示通过这些检查。
 
@@ -280,15 +269,15 @@ evofact --config configs/weibo21_cross_domain.yaml \
 evofact --config configs/weibo21_cross_domain.yaml \
   evolve --evaluation-only --output outputs/evolve-evaluation.json
 
-# 跨领域元学习 episode
+# 跨领域批训练
 evofact --config configs/weibo21_cross_domain.yaml \
-  meta-evolve --episodes 4 --strategy leave_one_domain_out \
+  meta-evolve --max-attempts-per-batch 5 \
   --trace-log outputs/weibo21-meta-traces.jsonl \
   --output outputs/meta-evolve.json
 
-# 从 checkpoint 恢复，以只评估模式运行，不提交 active bank
+# 使用相同配置与运行模式续跑
 evofact --config configs/weibo21_cross_domain.yaml \
-  meta-evolve --resume --evaluation-only \
+  meta-evolve --resume --max-attempts-per-batch 10 \
   --output outputs/meta-evaluation.json
 ```
 
@@ -308,19 +297,19 @@ execution:
 
 新运行会截断所选日志；`--resume` 追加到 checkpoint 记录的同一日志，并拒绝缺失或不同的文件。中断后重跑尚未提交的 batch 可能留下重复记录，可通过序号和阶段区分。
 
-`meta-evolve` 支持 episode 内的小批更新和有界 meta-test：
+`meta-evolve` 使用以下批次和验证设置：
 
 ```yaml
-evolution:
-  update_interval_samples: 25
-  max_proposals_per_update: 1
-
+execution:
+  batch_size: 16
+data:
+  evolution_validation_samples: 8
 meta_learning:
-  max_meta_test_samples_per_domain: 10
-  isolate_candidate_budget: true
+  enabled: true
+  checkpoint_path: outputs/meta-experiment/checkpoint.json
 ```
 
-每个 leave-one-domain-out episode 的技能库保持冻结，meta-train 按 25 条一组请求候选，每次更新最多产生一个候选。候选在留出的源领域中按领域均衡、确定性地选择 meta-test 子集进行评估。`isolate_candidate_budget` 分别隔离基线和候选的样本预算，总运行账本仍持续累加。
+通过 `--validation-domains domain1,domain2` 指定从源领域中留出的验证领域；省略时按名称排序，留出最后 `meta_test_domain_count` 个领域。`--limit` 在领域分离后只限制训练样本。每次候选评估使用一组全新的完整验证样本。达到重试上限（默认 5 次）、验证池耗尽或预算失败时，停止在当前 batch 并保存 checkpoint。重试上限后可增大 `--max-attempts-per-batch` 续跑，已消耗验证样本不循环使用。该协议请使用独立 checkpoint 与技能库，不能恢复旧 episode checkpoint；续跑必须保持原来的只评估或提交模式。上下文过长时会裁剪较旧反馈。验证样本预算隔离，运行总账持续累加。
 
 推理模型和训练用 optimizer 可以使用不同的 OpenAI-compatible 后端。Weibo21 配置通过独立环境变量指定 optimizer：
 
@@ -440,19 +429,48 @@ evofact --config configs/weibo21_cross_domain.yaml \
 
 ### 对抗演化与 Generator 演化
 
+`adversarial-evolve` 是独立路线，由 [AdversarialBatchRunner](src/evofact/experiments/adversarial_batch_runner.py) 实现。每批先把真实训练 trace 和当前 skills 交给 Generator，挑战样本通过结构检查和独立证据核验后，再由 detector 推理，补充 optimizer 的训练 trace。跨域晋升失败后，Generator 根据已消耗的验证反馈和训练域证据补充挑战。每批默认最多补充 2 轮，由 `--max-supplement-rounds` 控制，首次生成另外计算；达到上限后复用已有挑战继续优化。晋升使用真实跨域新样本和普通 F1 门控，成功后清空本批挑战与失败反馈。
+
+```mermaid
+flowchart TD
+    T["真实训练 batch"] --> I["推理一次"]
+    S["当前 skills"] --> I
+    I --> R["训练 trace"]
+    R --> G["Generator：首次或补充生成"]
+    S --> G
+    G --> V["独立证据核验"]
+    V --> C["通过核验的挑战推理"]
+    R --> O["Optimizer"]
+    C --> O
+    S --> O
+    O --> P["候选"]
+    P --> E["真实跨域新样本验证"]
+    E -->|晋升| N["提交、清空本批上下文、下一批"]
+    N --> S
+    E -->|失败| F["累积基线与候选验证反馈"]
+    F --> O
+    F -->|有上限的补充生成| G
+```
+
+三条命令使用独立的持久化技能库。普通 `evolve` 保持原配置路径；meta 和 adversarial 分别在技能库及输出目录下增加 `meta-evolve/`、`adversarial-evolve/` 子目录，checkpoint、trace、audit 和显式输出文件也在其父目录下增加对应子目录。已带路线目录的路径不会重复追加。新路线从种子库开始，不能恢复其他路线的 checkpoint，旧目录保留。测试某条路线时，在 `test` 或 `report` **之前**加 `--evolution-route meta-evolve` 或 `--evolution-route adversarial-evolve`。不同重复实验仍需不同的实验基础目录；直接使用 Runner API 时，调用方须传入独立 repository。
+
 ```bash
 # 使用标准化样本和已核验事实进行对抗演化
 evofact --config configs/adversarial_llm.yaml \
-  adversarial-evolve \
+  adversarial-evolve --max-attempts-per-batch 5 --max-supplement-rounds 2 \
   --samples data/adversarial/samples.jsonl \
   --facts data/adversarial/facts.jsonl \
   --trace-log outputs/adversarial-evolve-traces.jsonl \
   --output outputs/adversarial-evolve.json
 
-# 检查 generation audit
-evofact generation audit outputs/generation-audit.json
+# 检查批训练路线的生成审计
+evofact generation audit outputs/adversarial-llm/adversarial-evolve/generation-audit.json
 
-# 由 Package Optimizer 根据 audit 提出 generation_agent 候选包
+# 测试独立的对抗技能库
+evofact --config configs/adversarial_llm.yaml --evolution-route adversarial-evolve \
+  test --output outputs/adversarial-test.json
+
+# 由 Package Optimizer 根据旧条目格式 audit 提出 generation_agent 候选包
 evofact --config configs/adversarial_llm.yaml \
   generator-evolve --audit outputs/generation-audit.json --propose-only
 
@@ -471,6 +489,8 @@ evofact --config configs/adversarial_llm.yaml \
 2. 只对真实 meta-train 样本进行 rewriting。
 3. 合并 real meta-train 与审核通过的 generated meta-train。
 4. meta-test、protected validation 和 final-test 始终使用真实数据。
+
+批训练路线中，`generation.batch_size` 控制每轮首次或补充生成的样本上限，`execution.batch_size` 控制真实训练批次，`data.evolution_validation_samples` 控制每次新的验证样本数。它不使用规则归因、聚类或反事实分析。生成响应、核验结果和挑战 trace 分阶段保存到 checkpoint，预算统一计入运行账本。批训练审计格式为 `adversarial_batch_audit_v1`，旧 Generator 演化条目审计保留原格式。
 
 ### 报告
 
@@ -595,7 +615,10 @@ evofact package diff path/to/before path/to/after
 | --- | --- |
 | 命令、数据选择与 checkpoint | [cli.py](src/evofact/cli.py) |
 | 普通训练、直接 optimizer 调用与单次验证 | [ExperimentRunner](src/evofact/experiments/runner.py)：`evolve_once`、`closed_loop`、`closed_loop_batched` |
-| 元学习 episode 与冻结技能库评估 | [MetaEvolutionRunner](src/evofact/experiments/meta_runner.py) |
+| Meta 批训练、失败 trace 反馈与续跑 | [MetaBatchRunner](src/evofact/experiments/meta_batch_runner.py) |
+| 首次与失败补充挑战的对抗批训练 | [AdversarialBatchRunner](src/evofact/experiments/adversarial_batch_runner.py) |
+| 三条演化路线的存储命名空间 | [route_isolation](src/evofact/experiments/route_isolation.py) |
+| 旧消融使用的 episode 辅助代码 | [MetaEvolutionRunner](src/evofact/experiments/meta_runner.py) |
 | Trace 过滤与当前技能库输入 | [optimizer_context.py](src/evofact/evolution/optimizer_context.py)：`build_skillbank_optimizer_context` |
 | Optimizer 响应解析与候选包构建 | [package_optimizer.py](src/evofact/evolution/package_optimizer.py)、[package_candidate.py](src/evofact/evolution/package_candidate.py) |
 | 推理与依赖执行 | [inference.py](src/evofact/runtime/inference.py)、[dag_executor.py](src/evofact/runtime/dag_executor.py) |

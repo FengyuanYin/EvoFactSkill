@@ -425,6 +425,7 @@ class PackageOptimizerAgent:
         audits=(),
         distillation=None,
         prior_proposals=(),
+        feedback=None,
     ) -> OptimizerOutcome:
         packages = tuple(packages)
         bank_mode = target is None
@@ -444,6 +445,7 @@ class PackageOptimizerAgent:
                     max_text_chars=self.config.max_text_chars,
                     max_instructions_chars=self.config.max_instructions_chars,
                     max_total_chars=self.config.max_total_chars,
+                    feedback=feedback,
                 )
                 if bank_mode
                 else build_optimizer_context(

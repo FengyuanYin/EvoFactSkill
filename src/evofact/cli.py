@@ -19,14 +19,13 @@ from evofact.data.leakage import detect_leakage
 from evofact.data.manifests import build_manifest, manifest_json
 from evofact.data.registry import DataRegistry
 from evofact.data.sampling import balanced_domain_sample, select_final_test_samples
-from evofact.experiments.meta_runner import MetaEvolutionRunner, fixture_meta_samples
+from evofact.experiments.meta_runner import fixture_meta_samples
 from evofact.experiments.runner import (
     ExperimentRunner,
     fixture_samples,
     fixture_test_samples,
     fixture_validation_samples,
 )
-from evofact.reporting.meta_report import write_meta_report
 from evofact.reporting.report import skill_evolution_curve, summarize_runs, write_report
 from evofact.reporting.validation_curve import write_validation_curve
 from evofact.runtime.progress import NullProgressSink, ProgressEvent, make_progress_sink
@@ -160,6 +159,11 @@ def build_parser():
     # 全局参数需要放在所选子命令之前。
     parser.add_argument("--config", default="configs/dry_run.yaml")
     parser.add_argument(
+        "--evolution-route",
+        choices=("evolve", "meta-evolve", "adversarial-evolve"),
+        help="Select the isolated bank for test/report; training commands select their own route",
+    )
+    parser.add_argument(
         "--dataset",
         choices=("weibo21", "amtcele", "livefact", "advfake"),
     )
@@ -230,6 +234,8 @@ def build_parser():
         default=None,
     )
     meta_parser.add_argument("--episodes", type=int)
+    meta_parser.add_argument("--validation-domains", help="Comma-separated held-out source domains")
+    meta_parser.add_argument("--max-attempts-per-batch", type=int, default=5)
     meta_parser.add_argument(
         "--strategy",
         choices=("repeated_holdout", "leave_one_domain_out"),
@@ -259,6 +265,14 @@ def build_parser():
     adversarial.add_argument("--facts", help="verified structured evidence facts JSONL")
     adversarial.add_argument("--final-test-domains", default=None)
     adversarial.add_argument("--resume", action="store_true")
+    adversarial.add_argument("--validation-domains", help="Comma-separated held-out source domains")
+    adversarial.add_argument("--max-attempts-per-batch", type=int, default=5)
+    adversarial.add_argument(
+        "--max-supplement-rounds",
+        type=int,
+        default=2,
+        help="Maximum additional generation rounds per batch after validation rejection",
+    )
     adversarial.add_argument("--evaluation-only", action="store_true")
     adversarial.add_argument(
         "--trace-log",
@@ -328,6 +342,22 @@ async def _run_impl(args, progress):
     输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
     root = Path(__file__).resolve().parents[2]
     config = load_config(root / args.config if not Path(args.config).is_absolute() else args.config)
+    from evofact.experiments.route_isolation import evolution_route_config, route_artifact_path
+
+    training_commands = {"evolve", "meta-evolve", "adversarial-evolve"}
+    selected_route = args.command if args.command in training_commands else args.evolution_route
+    if args.command in training_commands and args.evolution_route not in {None, args.command}:
+        raise ValueError("training command and --evolution-route must match")
+    if selected_route:
+        config = evolution_route_config(config, selected_route)
+        if selected_route != "evolve":
+            for argument in ("output", "trace_log"):
+                if getattr(args, argument, None):
+                    setattr(
+                        args,
+                        argument,
+                        str(route_artifact_path(getattr(args, argument), selected_route)),
+                    )
     execution_overrides = {}
     if args.batch_size is not None:
         execution_overrides["batch_size"] = args.batch_size
@@ -419,6 +449,16 @@ async def _run_impl(args, progress):
     if args.command == "generation":
         from evofact.generation.audit_store import GenerationAuditStore
 
+        payload = json.loads(Path(args.path).read_text(encoding="utf-8"))
+        if payload.get("schema_version") == "adversarial_batch_audit_v1":
+            if args.generation_command == "audit":
+                return payload
+            rounds = payload.get("rounds", [])
+            return {
+                "schema_version": payload["schema_version"],
+                "accepted": sum(len(r["verification"]["accepted"]) for r in rounds),
+                "rejected": sum(len(r["verification"]["rejected"]) for r in rounds),
+            }
         payload = GenerationAuditStore(args.path).load_raw()
         if args.generation_command == "audit":
             return payload
@@ -947,7 +987,16 @@ async def _run_impl(args, progress):
             }
         return outcome
     if args.command == "meta-evolve":  # 使用元进化
-        rows = meta_samples()
+        from evofact.experiments.meta_batch_runner import MetaBatchRunner
+
+        rows = all_samples if all_samples is not None else fixture_meta_samples()
+        if all_samples is not None and train_domains and final_test_domains:
+            allowed_domains = set(train_domains) | set(final_test_domains)
+            rows = [s for s in rows if str(s.domain or s.dataset) in allowed_domains]
+        if args.episodes is not None or args.strategy is not None or args.ablation is not None:
+            raise ValueError(
+                "episode strategies and legacy meta-gate ablations do not apply to batch meta-evolve"
+            )
         final_domains = final_test_domains or cli_final_domains or ("outer_holdout",)
         overrides = {}
         if args.episodes is not None:
@@ -976,7 +1025,7 @@ async def _run_impl(args, progress):
         )
         if not trace_log_path.is_absolute():
             trace_log_path = root / trace_log_path
-        outcome = await MetaEvolutionRunner(config, root, repository).run(
+        outcome = await MetaBatchRunner(config, root, repository).run(
             rows,
             final_test_domains=final_domains,
             train_domains=train_domains,
@@ -984,29 +1033,26 @@ async def _run_impl(args, progress):
             evaluation_only=args.evaluation_only,
             progress=progress,
             trace_log_path=trace_log_path,
-        )
-        paths = write_meta_report(root / config.output_dir, outcome)
-        return {
-            "mode": "meta-evolve",
-            "run_id": outcome.run_id,
-            "episodes": len(outcome.episodes),
-            "episode_results": len(outcome.episode_results),
-            "decisions": [asdict(x) for x in outcome.decisions],
-            "committed_snapshots": outcome.committed_snapshots,
-            "mock_results": outcome.mock_results,
-            "data_sampling": data_sampling,
-            "trace_log": str(trace_log_path),
-            "reports": paths,
-        }
-    if args.command == "adversarial-evolve":  # 使用元-对抗进化
-        from evofact.experiments.adversarial_runner import AdversarialEvolutionRunner
-        from evofact.generation.data import fixture_adversarial_data, load_facts, load_samples
-        from evofact.reporting.adversarial_report import write_adversarial_report
-
-        if args.limit:
-            raise ValueError(
-                "adversarial-evolve preserves complete evidence groups; --limit is unsupported"
+            validation_domains=tuple(
+                x.strip() for x in args.validation_domains.split(",") if x.strip()
             )
+            if args.validation_domains
+            else None,
+            max_attempts_per_batch=args.max_attempts_per_batch,
+            train_limit=args.limit or None,
+        )
+        report_path = root / config.output_dir / "meta-batch-report.json"
+        _atomic_json_file(report_path, outcome)
+        outcome.update(
+            data_sampling=data_sampling,
+            trace_log=str(trace_log_path),
+            reports={"json": str(report_path)},
+        )
+        return outcome
+    if args.command == "adversarial-evolve":  # 使用元-对抗进化
+        from evofact.experiments.adversarial_batch_runner import AdversarialBatchRunner
+        from evofact.generation.data import fixture_adversarial_data, load_facts, load_samples
+
         if args.samples:
             if all_samples is not None:
                 raise ValueError("--samples cannot be combined with --dataset")
@@ -1018,6 +1064,11 @@ async def _run_impl(args, progress):
                 raise ValueError("--facts requires --samples or --dataset")
             rows, facts = fixture_adversarial_data()
         final = final_test_domains or cli_final_domains or ("outer_holdout",)
+        if all_samples is not None and train_domains and final_test_domains:
+            allowed_domains = set(train_domains) | set(final_test_domains)
+            rows = [s for s in rows if str(s.domain or s.dataset) in allowed_domains]
+            allowed_ids = {s.sample_id for s in rows}
+            facts = [f for f in facts if f.sample_id in allowed_ids]
         repo = None if args.evaluation_only else SkillRepository(root / config.skill_store)
         trace_log_path = (
             Path(args.trace_log)
@@ -1028,7 +1079,9 @@ async def _run_impl(args, progress):
         )
         if not trace_log_path.is_absolute():
             trace_log_path = root / trace_log_path
-        adversarial_runner = AdversarialEvolutionRunner(config, root, facts, repo)
+        adversarial_runner = AdversarialBatchRunner(
+            config, root, facts, repo, max_supplement_rounds=args.max_supplement_rounds
+        )
         outcome = await adversarial_runner.run(
             rows,
             final_test_domains=final,
@@ -1036,24 +1089,38 @@ async def _run_impl(args, progress):
             evaluation_only=args.evaluation_only,
             progress=progress,
             trace_log_path=trace_log_path,
+            train_domains=train_domains,
+            validation_domains=tuple(
+                x.strip() for x in args.validation_domains.split(",") if x.strip()
+            )
+            if args.validation_domains
+            else None,
+            max_attempts_per_batch=args.max_attempts_per_batch,
+            train_limit=args.limit or None,
         )
-        paths = write_adversarial_report(
-            root / config.output_dir, outcome, adversarial_runner.audit, config.generation
+        report_path = root / config.output_dir / "adversarial-batch-report.json"
+        _atomic_json_file(report_path, outcome)
+        _atomic_json_file(
+            root / config.generation.store_path,
+            {
+                "schema_version": "adversarial_batch_audit_v1",
+                "run_id": outcome["run_id"],
+                "rounds": outcome["generation_rounds"],
+            },
         )
-        return {
-            "mode": args.command,
-            "run_id": outcome.run_id,
-            "mock_results": outcome.mock_results,
-            "episodes": len(outcome.episodes),
-            "proposer": config.generation.proposer,
-            "generator_calls": sum(e["generator_calls"] for e in adversarial_runner.audit.values()),
-            "accepted_samples": sum(
-                e["metrics"]["accepted"] for e in adversarial_runner.audit.values()
+        outcome.update(
+            proposer=config.generation.proposer,
+            generator_calls=sum(
+                r["generator_usage"].get("calls", 0) for r in outcome["generation_rounds"]
             ),
-            "committed_snapshots": outcome.committed_snapshots,
-            "trace_log": str(trace_log_path),
-            "reports": paths,
-        }
+            accepted_samples=outcome["accepted_challenge_samples"],
+            trace_log=str(trace_log_path),
+            reports={
+                "json": str(report_path),
+                "generation_audit": str(root / config.generation.store_path),
+            },
+        )
+        return outcome
     if args.command == "validate":
         train = select(manifest.train_ids, role="train") if manifest else None
         validation = (
