@@ -96,14 +96,20 @@ class GenerationWorkflow:
         budget_manager=None,
         label_contract_registry=None,
         forbidden=(),
+        request=None,
+        system_addendum="",
     ):
-        request = self.generator.build_request(
-            samples,
-            traces,
-            attributions,
-            config=config,
-            episode_id=episode_id,
-            label_contract_registry=label_contract_registry,
+        request = (
+            request
+            if request is not None
+            else self.generator.build_request(
+                samples,
+                traces,
+                attributions,
+                config=config,
+                episode_id=episode_id,
+                label_contract_registry=label_contract_registry,
+            )
         )
         request["generator_package_digest"] = self.package.package_digest
         validate_generation_request(request, forbidden)
@@ -112,6 +118,7 @@ class GenerationWorkflow:
         ).content.decode("utf-8")
         _, system = parse_frontmatter(raw_instructions, required=False)
         system += "\n"
+        system += system_addendum
         references = [
             {"path": path, "content": value}
             for path, value in sorted(self.runtime_skill.resources.items())

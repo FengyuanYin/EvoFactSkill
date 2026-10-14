@@ -22,7 +22,7 @@ EvoFactSkill is a research codebase for cross-domain fact verification with an e
 - **Dependency-aware multi-agent execution.** The Router returns a constrained DAG, allowing independent specialists to run concurrently while preserving required expert-to-expert dependencies.
 - **Dataset-aware decisions.** Versioned label contracts constrain the Judge to the native labels of Weibo21, AMTCele, LiveFact, or AdvFake. `ABSTAIN` is reserved for Runtime failures and is not treated as a dataset label.
 - **Direct trace-driven Skill evolution.** The optimizer receives training traces and the current Skill bank, diagnoses the traces, and selects the package to improve. Changes may cover instructions, manifests, schemas, scripts, and references.
-- **Separate promotion protocols.** Ordinary evolution requires a strict validation macro-F1 improvement; meta evolution applies cross-episode transfer constraints. Both evaluate each baseline and candidate once and retain automated safety checks.
+- **Shared promotion gate.** Ordinary and meta evolution require strict validation macro-F1 improvement. Meta evolution uses held-out domains and feeds rejected validation traces back to the optimizer before retrying on fresh samples. Both retain automated safety checks.
 - **Leakage-safe generation.** Real data is split first. Rewriting-based augmentation is restricted to meta-train; meta-test and final-test remain real-only.
 - **Reproducible resource accounting.** Runs record calls, tokens, cost availability, concurrency, package digests, label-contract digests, manifests, and traces.
 
@@ -72,12 +72,12 @@ Ordinary and meta evolution pass training traces and the current Skill bank dire
 
 | Stage | `evolve` | `meta-evolve` |
 | --- | --- | --- |
-| Training input | Manifest train split, consumed in sequential batches | Source-domain samples split into meta-train/meta-test episodes |
-| Update size | `execution.batch_size` | `evolution.update_interval_samples`; `0` uses the complete meta-train episode |
-| Optimizer input | Current batch traces and the current complete Skill bank | Current meta-train update traces and the episode's frozen Skill bank |
-| Candidate evaluation | Fixed evolution-validation split | The episode's held-out source-domain meta-test samples |
-| Inference passes | Baseline once, candidate once per candidate | Baseline once, candidate once per candidate and episode |
-| Bank update | Accepted candidates committed together at the batch boundary | Decisions committed after cross-episode aggregation |
+| Training input | Manifest train split, consumed in sequential batches | Training domains disjoint from validation and final-test domains |
+| Update size | `execution.batch_size` | `execution.batch_size` |
+| Optimizer input | Current batch traces and the current complete Skill bank | Current batch traces, current bank, and accumulated rejected validation feedback |
+| Candidate evaluation | Fixed evolution-validation split | Fresh samples from held-out validation domains on each attempt |
+| Inference passes | Baseline once, candidate once per candidate | Baseline once, candidate once per attempt |
+| Bank update | Accepted candidates committed together at the batch boundary | Immediately after acceptance; next batch uses the updated bank |
 
 #### Ordinary `evolve`
 
@@ -109,40 +109,29 @@ Ordinary evolution makes one pass over the selected training samples. Each batch
 
 ```mermaid
 flowchart TD
-    A["Source-domain samples"] --> E["Build domain episodes"]
-    E --> R["Episode meta-train updates"]
-    E --> V["Episode held-out meta-test split"]
-    S["Frozen baseline Skill bank"] --> I["Run each meta-train update"]
-    R --> I
-    I --> O["Update traces and frozen Skills<br/>to optimizer once"]
-    O --> C["Collect valid candidates<br/>without intermediate promotion"]
-    C --> P["Evaluate each episode candidate<br/>baseline once and candidate once"]
-    S --> P
-    V --> P
-    P --> X["Finish episodes and group results<br/>by exact candidate fingerprint"]
-    X --> G["Meta transfer gate"]
-    G -->|generalized or specialized| U["Commit accepted Skill bank"]
-    G -->|pareto, rejected, or review_required| K["Retain audit record without activation"]
+    A["Training domains"] --> I["Infer current batch once"]
+    S["Current Skill bank"] --> I
+    I --> O["Train traces and current Skills to optimizer"]
+    O --> C["Candidate"]
+    V["Disjoint validation domains: fresh samples"] --> P["Baseline and candidate each run once"]
+    C --> P
+    P --> G["Ordinary ValidationGate: strict F1 improvement and safety"]
+    G -->|accepted| U["Commit bank immediately; next batch"]
+    U --> S
+    G -->|rejected| T["Accumulate baseline and rejected candidate traces"]
+    T --> O
+    T --> V
+    T --> L["Stop and checkpoint on retry or pool limit"]
     U -. Separate test command .-> F["Evaluate final-test domains"]
 ```
 
-Meta evolution reuses the same direct optimizer path. Within an episode, updates generate proposals without promoting intermediate candidates. The baseline bank remains frozen during episode evaluation. Results are grouped by exact candidate fingerprint: only the same candidate observed in different episodes shares transfer evidence. Distinct rewrites are not pooled as one candidate. Final-test domains are excluded from candidate generation and meta-test evaluation.
+`meta-evolve` runs [MetaBatchRunner](src/evofact/experiments/meta_batch_runner.py). Failed attempts reuse the current batch's training traces and add baseline/candidate validation traces, the rejected package, and gate feedback. Each retry uses previously unseen validation samples. Acceptance commits immediately. Final-test domains never enter optimization or validation. Legacy episodic helpers remain for legacy ablation APIs.
 
 The optimizer receives sanitized traces and current package definitions, including readable UTF-8 file contents. Ground-truth labels and dataset-label governance are filtered; traces retain the model's prediction. `max_text_chars`, `max_instructions_chars`, and `max_total_chars` bound the payload, so oversized trace lists can be shortened. Legacy attribution and distillation output fields remain empty for report/checkpoint compatibility.
 
 ### Promotion and safety
 
-| Rule | Ordinary `evolve` | Meta generalized promotion |
-| --- | --- | --- |
-| Macro-F1 gain | `candidate.macro_f1_all > baseline.macro_f1_all` | Mean episode gain ≥ `meta_learning.min_mean_gain` |
-| Statistical support | Reported, but does not veto promotion | Transfer confidence-interval lower bound > `0` |
-| Valid episodes | Not required | At least `min_valid_episodes` |
-| Coverage / calibration | Reported, but do not veto promotion | Enforce `min_coverage` and `max_calibration_increase` |
-| Negative transfer / worst domain | Do not veto promotion | Optional constraints controlled by `enforce_negative_transfer` and `enforce_worst_domain` |
-| Known costs | Do not veto promotion | Required when `pricing.require_cost_for_promotion` is enabled on a real backend |
-| Cost ratio | Reported only | Reported only |
-
-Meta evolution may accept a domain-specialized candidate even when generalized promotion fails. Specialization requires positive gains on a proper subset of tested domains, enough valid episodes, coverage/calibration constraints, and the additional severe-regression checks in [MetaValidationGate](src/evofact/validation/meta_gate.py). A `pareto` disposition retains the candidate for audit without promoting it.
+Both commands use [ValidationGate](src/evofact/validation/gate.py): candidate `macro_f1_all` must strictly exceed the baseline and pass safety checks. Episode counts, transfer confidence intervals, and generalized/specialized classifications do not participate in `meta-evolve` promotion. Ordinary evolution keeps its existing statistical reports; the batch meta report marks the unused paired test explicitly.
 
 Scripts that pass the automated scanner receive `safe`; having a `scripts/` file alone no longer creates `review_required` or an automatic human-review risk flag. Unsafe paths, prohibited Python imports/calls, syntax errors, invalid script encoding, and missing script entrypoints can produce `blocked`. Blocked candidates cannot be promoted. An explicitly supplied `review_required` gate state still requires review. The scanner is a static rule check; `safe` means it passed those checks.
 
@@ -280,15 +269,15 @@ evofact --config configs/weibo21_cross_domain.yaml \
 evofact --config configs/weibo21_cross_domain.yaml \
   evolve --evaluation-only --output outputs/evolve-evaluation.json
 
-# Cross-domain meta-learning episodes
+# Cross-domain batch meta-learning (validation domains must belong to source domains)
 evofact --config configs/weibo21_cross_domain.yaml \
-  meta-evolve --episodes 4 --strategy leave_one_domain_out \
+  meta-evolve --max-attempts-per-batch 5 \
   --trace-log outputs/weibo21-meta-traces.jsonl \
   --output outputs/meta-evolve.json
 
-# Resume a meta checkpoint in evaluation-only mode without committing the active bank
+# Resume with the same configuration and mode
 evofact --config configs/weibo21_cross_domain.yaml \
-  meta-evolve --resume --evaluation-only \
+  meta-evolve --resume --max-attempts-per-batch 10 \
   --output outputs/meta-evaluation.json
 ```
 
@@ -308,28 +297,19 @@ execution:
 
 A fresh run truncates its selected trace log. `--resume` appends to the checkpoint-recorded log and refuses a missing or different file, preventing a resumed experiment from silently splitting traces across files. An interrupted, uncommitted batch can appear twice after resume; those records are intentionally retained as API-usage audit evidence and are distinguishable by `training_context.sequence` and phase.
 
-`meta-evolve` additionally supports frequent, bounded candidate updates inside each
-meta-training episode. These controls do not alter `test` or its inference path:
+`meta-evolve` uses these batch and validation controls:
 
 ```yaml
-evolution:
-  update_interval_samples: 25
-  max_proposals_per_update: 1
-
+execution:
+  batch_size: 16
+data:
+  evolution_validation_samples: 8
 meta_learning:
-  max_meta_test_samples_per_domain: 10
-  isolate_candidate_budget: true
+  enabled: true
+  checkpoint_path: outputs/meta-experiment/checkpoint.json
 ```
 
-For each leave-one-domain-out episode, the active Package Bank remains frozen while
-the meta-train partition is consumed in 25-sample updates. Each update can emit at
-most one candidate directly from the traces and current skills. Candidates are
-then evaluated on a deterministic, domain-balanced subset of the held-out source
-domain. The true `data.final_test_domains` never enter candidate generation or the
-Meta Gate. Baseline and candidate each run once per evaluation; legacy repeat and
-attribution settings no longer control these runs. Candidate budget isolation gives
-each baseline/candidate comparison its own per-sample allowance while preserving
-the cumulative run-level call, token, and cost budgets.
+Use `--validation-domains domain1,domain2` to reserve source domains; otherwise the final `meta_test_domain_count` source domains in sorted order are reserved. `--limit` limits training samples after domain separation. Every candidate evaluation consumes a fresh full validation chunk. Retry limit (default 5), pool exhaustion, or budget failure stops at the current batch and preserves its checkpoint. Increase `--max-attempts-per-batch` when resuming after a retry limit. Consumed validation samples are never recycled. Use a new checkpoint/store for this protocol; legacy episode checkpoints are incompatible. Resume must retain its original evaluation-only mode. Context limits may trim older feedback. Per-sample validation budgets are isolated while run-level usage accumulates.
 
 The forward pipeline and the training-only Package Optimizer may use different
 OpenAI-compatible endpoints. Weibo21 configurations keep the inexpensive forward
@@ -456,19 +436,48 @@ The same command also accepts `meta-full` with `meta-no-cross-episode-aggregatio
 
 ### Adversarial and generator evolution
 
+`adversarial-evolve` is a separate route implemented by [AdversarialBatchRunner](src/evofact/experiments/adversarial_batch_runner.py). Each training batch first supplies real traces and current skills to a Generator. Structurally valid challenges pass a blind evidence verifier, then detector inference produces additional optimizer traces. A rejected cross-domain validation triggers a supplementary generation round using consumed validation feedback and training-domain evidence. `--max-supplement-rounds` defaults to 2 per batch; the initial round is additional. Once the cap is reached, optimization reuses cached challenges. Every candidate is gated on fresh real cross-domain samples with the same F1 gate as meta evolution. Successful promotion clears the batch's challenges and feedback.
+
+```mermaid
+flowchart TD
+    T["Real training batch"] --> I["Infer once"]
+    S["Current skills"] --> I
+    I --> R["Training traces"]
+    R --> G["Generator: initial or supplementary challenges"]
+    S --> G
+    G --> V["Blind evidence verifier"]
+    V --> C["Infer accepted challenges"]
+    R --> O["Optimizer"]
+    C --> O
+    S --> O
+    O --> P["Candidate"]
+    P --> E["Fresh real cross-domain validation"]
+    E -->|accepted| N["Commit; clear batch context; next batch"]
+    N --> S
+    E -->|rejected| F["Accumulate baseline and candidate feedback"]
+    F --> O
+    F -->|bounded supplements| G
+```
+
+The three commands have separate persistent banks. Ordinary `evolve` keeps its configured paths. Meta and adversarial commands add `meta-evolve/` or `adversarial-evolve/` beneath the configured bank/output directories and beneath each checkpoint, trace, audit, or explicit output file's parent. Namespacing is idempotent. Each new route starts from seeds and cannot resume another route's checkpoint; old unnamespaced runs remain untouched. Use `--evolution-route meta-evolve` or `--evolution-route adversarial-evolve` **before** `test`/`report` to evaluate that route's bank. For independent repeats, also use distinct experiment base directories. Raw runner APIs require the caller to supply separate repositories.
+
 ```bash
 # Adversarial evolution from normalized samples and verified facts
 evofact --config configs/adversarial_llm.yaml \
-  adversarial-evolve \
+  adversarial-evolve --max-attempts-per-batch 5 --max-supplement-rounds 2 \
   --samples data/adversarial/samples.jsonl \
   --facts data/adversarial/facts.jsonl \
   --trace-log outputs/adversarial-evolve-traces.jsonl \
   --output outputs/adversarial-evolve.json
 
-# Inspect a generation audit
-evofact generation audit outputs/generation-audit.json
+# Inspect the batch route's generation audit
+evofact generation audit outputs/adversarial-llm/adversarial-evolve/generation-audit.json
 
-# Let the Package Optimizer propose a generation_agent candidate
+# Test the isolated adversarial bank
+evofact --config configs/adversarial_llm.yaml --evolution-route adversarial-evolve \
+  test --output outputs/adversarial-test.json
+
+# Let the Package Optimizer propose a generation_agent candidate from a legacy entry audit
 evofact --config configs/adversarial_llm.yaml \
   generator-evolve --audit outputs/generation-audit.json --propose-only
 
@@ -487,6 +496,8 @@ Generated examples must preserve source lineage and pass the generation audit. T
 2. Rewrite only real meta-train samples.
 3. Combine real meta-train and accepted generated meta-train samples.
 4. Keep meta-test, protected validation, and final-test real-only.
+
+For the batch route, `generation.batch_size` caps each initial/supplementary response, `execution.batch_size` controls real training batches, and `data.evolution_validation_samples` controls each fresh validation chunk. No rule attribution, clustering, or counterfactual analysis is used. Generator responses, verification results, and challenge traces are checkpointed independently, with shared run-budget accounting. Batch audits use `adversarial_batch_audit_v1`; legacy generator-evolution entry audits retain their existing format.
 
 ### Reports
 
@@ -611,7 +622,10 @@ evofact package diff path/to/before path/to/after
 | --- | --- |
 | Commands, dataset selection, checkpoints | [cli.py](src/evofact/cli.py) |
 | Ordinary training, direct optimizer call, single-pass validation | [ExperimentRunner](src/evofact/experiments/runner.py): `evolve_once`, `closed_loop`, `closed_loop_batched` |
-| Meta episodes and frozen-bank evaluation | [MetaEvolutionRunner](src/evofact/experiments/meta_runner.py) |
+| Batch meta evolution, rejected-trace feedback, and resume | [MetaBatchRunner](src/evofact/experiments/meta_batch_runner.py) |
+| Adversarial batch evolution with initial and failure-driven challenges | [AdversarialBatchRunner](src/evofact/experiments/adversarial_batch_runner.py) |
+| Evolution-route storage namespaces | [route_isolation](src/evofact/experiments/route_isolation.py) |
+| Legacy episodic helpers for ablations | [MetaEvolutionRunner](src/evofact/experiments/meta_runner.py) |
 | Sanitized traces and current Skill bank payload | [optimizer_context.py](src/evofact/evolution/optimizer_context.py): `build_skillbank_optimizer_context` |
 | Optimizer responses and package candidates | [package_optimizer.py](src/evofact/evolution/package_optimizer.py), [package_candidate.py](src/evofact/evolution/package_candidate.py) |
 | Inference and dependency execution | [inference.py](src/evofact/runtime/inference.py), [dag_executor.py](src/evofact/runtime/dag_executor.py) |

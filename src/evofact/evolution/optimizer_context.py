@@ -158,6 +158,7 @@ def build_skillbank_optimizer_context(
     max_text_chars=8000,
     max_instructions_chars=60000,
     max_total_chars=300000,
+    feedback=None,
 ):
     """Supply training traces and the current bank without precomputed diagnoses."""
     skills = []
@@ -173,11 +174,25 @@ def build_skillbank_optimizer_context(
         "skills": skills,
         "traces": [_sanitize(trace, max_text_chars=max_text_chars) for trace in traces],
     }
+    if feedback is not None:
+        context["validation_feedback"] = _sanitize(feedback, max_text_chars=max_text_chars)
     for trace in context["traces"]:
         public = trace.get("sample_public", {})
         for key in list(public):
             if str(key).casefold() in PREDICTION_KEYS:
                 public.pop(key)
+    if feedback is not None:
+        # Keep the latest failed attempt; prune older feedback first.
+        while _context_chars(context) > max_total_chars and len(context["validation_feedback"]) > 1:
+            context["validation_feedback"].pop()
+        if context["validation_feedback"]:
+            latest = context["validation_feedback"][0]
+            while _context_chars(context) > max_total_chars:
+                groups = [latest.get("baseline_traces", []), latest.get("candidate_traces", [])]
+                group = max(groups, key=len)
+                if len(group) <= 1:
+                    break
+                group.pop()
     while _context_chars(context) > max_total_chars and len(context["traces"]) > 1:
         context["traces"].pop()
     if _context_chars(context) > max_total_chars:
