@@ -127,15 +127,28 @@ def proposal_history(
     names = {package.skill_id: package.manifest.name for package in packages}
     judged = list(decisions) if decisions is not None else [None] * len(proposals)
     history = []
+
+    def field(record, name, default=None):
+        return (
+            record.get(name, default)
+            if isinstance(record, dict)
+            else getattr(record, name, default)
+        )
+
     for proposal, decision in zip(proposals, judged):
-        targets = [names.get(item, item) for item in (proposal.target_skill_ids or ())]
-        failures = decision.regression_failures if decision is not None else ()
+        targets = [
+            names.get(item, item) for item in (field(proposal, "target_skill_ids", ()) or ())
+        ]
+        failures = field(decision, "regression_failures", ()) if decision is not None else ()
+        operation = field(proposal, "operation", "")
         history.append(
             {
                 "target": targets[0] if targets else None,
-                "operation": str(getattr(proposal.operation, "value", proposal.operation)),
-                "rationale": str(proposal.rationale)[:400],
-                "disposition": decision.disposition if decision is not None else "pending",
+                "operation": str(getattr(operation, "value", operation)),
+                "rationale": str(field(proposal, "rationale", ""))[:400],
+                "disposition": field(decision, "disposition")
+                if decision is not None
+                else "pending",
                 "failures": [str(item)[:120] for item in failures][:4],
             }
         )
@@ -349,11 +362,16 @@ class ExperimentRunner:
         task_name: str = "run",
         phase: str = "inference",
         isolate_sample_budget: bool = False,
+        on_sample_complete=None,
+        on_sample_error=None,
+        sample_retries: int = 0,
     ):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`strategy`（str，默认 `'utility-aware'`）需符合函数签名约定；`skills`（未显式标注，默认 `None`）需符合函数签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
 
+        if sample_retries < 0:
+            raise ValueError("sample_retries must be non-negative")
         effective_strategy = self.config.routing_strategy if strategy is None else strategy
 
         rows = (
@@ -398,20 +416,38 @@ class ExperimentRunner:
         async def infer_sample(sample):
             contract = self.label_contract_registry.resolve_sample(sample)
             gold = contract.normalize(sample.label)
-            try:
-                trace = await runtime.infer(
-                    sample,
-                    RunBudget(self.config.max_skills_per_item),
-                    budget_sample_id=(
-                        f"{sample.sample_id}:inference:{budget_scope}"
-                        if budget_scope is not None
-                        else None
-                    ),
-                )
-            except BudgetExceeded as exc:
-                # 兜底：单条样本的预算耗尽只降级为 ABSTAIN，不能让整轮实验失败（否则 955 条结果全丢）。
-                trace = _budget_abstention_trace(sample, skill_snapshot, str(exc), contract)
-            return trace, SampleEvaluation(
+            for attempt in range(sample_retries + 1):
+                try:
+                    trace = await runtime.infer(
+                        sample,
+                        RunBudget(self.config.max_skills_per_item),
+                        budget_sample_id=(
+                            f"{sample.sample_id}:inference:{budget_scope}"
+                            + (f":attempt:{attempt}" if sample_retries else "")
+                            if budget_scope is not None
+                            else None
+                        ),
+                    )
+                    if on_sample_error is not None and retryable_runtime_failure(trace):
+                        failure = TimeoutError(
+                            "Inference returned a runtime abstention after a request failure"
+                        )
+                        failure.trace = trace
+                        raise failure
+                    break
+                except BudgetExceeded as exc:
+                    trace = _budget_abstention_trace(sample, skill_snapshot, str(exc), contract)
+                    break
+                except (TimeoutError, OSError) as exc:
+                    if attempt < sample_retries:
+                        continue
+                    if on_sample_error is None:
+                        raise
+                    notified = on_sample_error(sample, exc)
+                    if inspect.isawaitable(notified):
+                        await notified
+                    return None, None
+            evaluation = SampleEvaluation(
                 sample.sample_id,
                 gold,
                 trace.decision.label,
@@ -428,6 +464,11 @@ class ExperimentRunner:
                 trace.usage.cost_status.value,
                 bool(sample.evidence),
             )
+            if on_sample_complete is not None:
+                notified = on_sample_complete(sample, trace, evaluation)
+                if inspect.isawaitable(notified):
+                    await notified
+            return trace, evaluation
 
         def item_done(completed, total):
             if progress is not None:
@@ -440,8 +481,8 @@ class ExperimentRunner:
             concurrency=self.config.execution.max_concurrent_samples,
             on_item_done=item_done,
         )
-        traces = [trace for trace, _ in pairs]
-        evaluations = [evaluation for _, evaluation in pairs]
+        traces = [trace for trace, _ in pairs if trace is not None]
+        evaluations = [evaluation for _, evaluation in pairs if evaluation is not None]
         if self._trace_store is not None:
             for sample_index, trace in enumerate(traces):
                 self._trace_store.append(
@@ -911,6 +952,31 @@ class ExperimentRunner:
             "training_run_id": training_run_id,
             "provenance": provenance or {},
         }
+
+
+def retryable_runtime_failure(trace):
+    """Transport/timeouts are retryable test errors, not finished predictions."""
+    if isinstance(trace, dict):
+        origin = trace.get("decision", {}).get("origin")
+        errors = trace.get("errors", ())
+        reasons = trace.get("routing", {}).get("reasons", {})
+    else:
+        origin = trace.decision.origin
+        errors = trace.errors
+        reasons = trace.routing.reasons
+    if origin != DecisionOrigin.RUNTIME:
+        return False
+    detail = " ".join([*map(str, errors), *map(str, reasons.values())]).casefold()
+    return any(
+        term in detail
+        for term in (
+            "timeout",
+            "timed out",
+            "backendhttperror",
+            "urlerror",
+            "connectionerror",
+        )
+    )
 
 
 def _budget_abstention_trace(sample: Sample, skills, reason: str, contract=None) -> InferenceTrace:

@@ -123,6 +123,30 @@ class BudgetManager:
             },
         }
 
+    def export_reconciled_state(self) -> dict:
+        """Snapshot charged usage while concurrent requests remain in flight.
+
+        Reservations are transient and must never survive a process restart.
+        Unknown usage from interrupted remote calls cannot be reconstructed.
+        """
+
+        def charged(ledger):
+            return BudgetSnapshot(
+                ledger.calls_used,
+                ledger.tokens_used,
+                ledger.cost_used,
+                0,
+                0,
+                Decimal("0"),
+                0,
+                ledger.unavailable_cost_calls,
+            ).model_dump()
+
+        return {
+            "run": charged(self._run),
+            "samples": {key: charged(value) for key, value in sorted(self._samples.items())},
+        }
+
     def restore(self, state: dict, *, allow_forward: bool = False) -> None:
         """Restore reconciled usage before resumed work is dispatched."""
         if self._reservations:

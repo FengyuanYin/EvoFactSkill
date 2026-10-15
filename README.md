@@ -72,10 +72,10 @@ Ordinary and meta evolution pass training traces and the current Skill bank dire
 
 | Stage | `evolve` | `meta-evolve` |
 | --- | --- | --- |
-| Training input | Manifest train split, consumed in sequential batches | Training domains disjoint from validation and final-test domains |
+| Training input | Manifest train split, consumed in sequential batches | Same manifest/selection as ordinary evolve, regrouped into mixed-domain batches with a validation domain reserved |
 | Update size | `execution.batch_size` | `execution.batch_size` |
 | Optimizer input | Current batch traces and the current complete Skill bank | Current batch traces, current bank, and accumulated rejected validation feedback |
-| Candidate evaluation | Fixed evolution-validation split | Fresh samples from held-out validation domains on each attempt |
+| Candidate evaluation | Fixed evolution-validation split | Fresh validation samples from other source domains than the current batch; training samples may be reused |
 | Inference passes | Baseline once, candidate once per candidate | Baseline once, candidate once per attempt |
 | Bank update | Accepted candidates committed together at the batch boundary | Immediately after acceptance; next batch uses the updated bank |
 
@@ -309,7 +309,9 @@ meta_learning:
   checkpoint_path: outputs/meta-experiment/checkpoint.json
 ```
 
-Use `--validation-domains domain1,domain2` to reserve source domains; otherwise the final `meta_test_domain_count` source domains in sorted order are reserved. `--limit` limits training samples after domain separation. Every candidate evaluation consumes a fresh full validation chunk. Retry limit (default 5), pool exhaustion, or budget failure stops at the current batch and preserves its checkpoint. Increase `--max-attempts-per-batch` when resuming after a retry limit. Consumed validation samples are never recycled. Use a new checkpoint/store for this protocol; legacy episode checkpoints are incompatible. Resume must retain its original evaluation-only mode. Context limits may trim older feedback. Per-sample validation budgets are isolated while run-level usage accumulates.
+Batch meta/adversarial commands use the same manifest training split and balanced `--limit` selection as ordinary evolve, then regroup the selected IDs into mixed-domain batches. Every batch includes at least two source domains and leaves at least one source domain absent for cross-domain validation. Each validation chunk comes from other source domains than the current batch; samples used for training remain eligible for validation. Final-test domains are excluded. Omit `--validation-domains`; a global held-out source domain would change the training quotas. Each attempt uses IDs not previously consumed for validation. Retry limit (default 5), pool exhaustion, or budget failure stops at the current batch and preserves its checkpoint. Increase `--max-attempts-per-batch` when resuming after a retry limit. `training_sampling` records IDs, quotas, and batches. With 200 samples and batch size 16, both folds form 13 batches (12 of 16 and one of 8), matching ordinary evolve in batch sizes and count. Fold 1 batches contain 2-3 source domains; Fold 2 batches contain 2-4. Batch composition and order differ from ordinary evolve to reserve cross-domain validation domains. Use a separate store/checkpoint for the new layout; global-heldout and legacy episodic checkpoints are incompatible. Context limits may trim older feedback; validation budgets remain isolated and run-level usage accumulates.
+
+Windows two-fold training, final-test, and resume commands: [ordinary evolve](docs/普通evolve实验启动教程-Windows.md), [meta-evolve](docs/meta-evolve实验启动教程-Windows.md), and [adversarial-evolve](docs/adversarial-evolve实验启动教程-Windows.md).
 
 The forward pipeline and the training-only Package Optimizer may use different
 OpenAI-compatible endpoints. Weibo21 configurations keep the inexpensive forward
@@ -500,6 +502,10 @@ Generated examples must preserve source lineage and pass the generation audit. T
 For the batch route, `generation.batch_size` caps each initial/supplementary response, `execution.batch_size` controls real training batches, and `data.evolution_validation_samples` controls each fresh validation chunk. No rule attribution, clustering, or counterfactual analysis is used. Generator responses, verification results, and challenge traces are checkpointed independently, with shared run-budget accounting. Batch audits use `adversarial_batch_audit_v1`; legacy generator-evolution entry audits retain their existing format.
 
 ### Reports
+
+`test` now persists every completed sample immediately to `<output-stem>.samples.jsonl`, updates a separate summary at `--output`, and writes `<output-stem>.checkpoint.json`. Use the same command with `test --resume` to skip completed samples and retry errors/missing samples. `--records` and `--checkpoint` override the default paths. Without `--output`, the summary defaults to `output_dir/test-summary.json`. Existing results require `--resume` or a new output path; they are never silently overwritten.
+
+Timeout/network errors are retried twice by default (`--sample-retries 2`), then recorded while later samples continue. An incomplete test exits with code 2 and reports metrics for completed samples only. Resume verifies model, bank, ordered samples, label contracts, pricing, and runtime policies, and restores reconciled budget usage. Usage of remote calls interrupted before reconciliation remains unknown. A partially written final journal line is repaired on resume; earlier malformed records are rejected. Historical tests that never persisted their traces cannot be recovered from a progress counter.
 
 ```bash
 evofact --config configs/weibo21_cross_domain.yaml \

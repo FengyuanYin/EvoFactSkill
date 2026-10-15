@@ -409,6 +409,11 @@ class OpenAICompatibleBackend:
                 message = f"HTTP {exc.code} {exc.reason}"
                 if detail:
                     message += f": {detail}"
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Model API request failed (%s): %s", self.model, message
+                )
                 raise BackendHTTPError(message) from None
 
         started = time.perf_counter()

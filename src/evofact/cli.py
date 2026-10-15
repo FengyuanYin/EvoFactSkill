@@ -26,6 +26,7 @@ from evofact.experiments.runner import (
     fixture_test_samples,
     fixture_validation_samples,
 )
+from evofact.local_env import load_local_env
 from evofact.reporting.report import skill_evolution_curve, summarize_runs, write_report
 from evofact.reporting.validation_curve import write_validation_curve
 from evofact.runtime.progress import NullProgressSink, ProgressEvent, make_progress_sink
@@ -208,6 +209,20 @@ def build_parser():
         command = subparsers.add_parser(name)
         command.add_argument("--output", help=output_help)
         command.add_argument("--final-test-domains", default=None)
+        if name == "test":
+            command.add_argument("--resume", action="store_true")
+            command.add_argument(
+                "--records", help="Durable per-sample JSONL; default: <output>.samples.jsonl"
+            )
+            command.add_argument(
+                "--checkpoint", help="Test progress JSON; default: <output>.checkpoint.json"
+            )
+            command.add_argument(
+                "--sample-retries",
+                type=int,
+                default=2,
+                help="Retries per sample on timeout/network errors (default: 2)",
+            )
         if name == "evolve":
             command.add_argument("--evaluation-only", action="store_true")
             command.add_argument("--resume", action="store_true")
@@ -351,7 +366,7 @@ async def _run_impl(args, progress):
     if selected_route:
         config = evolution_route_config(config, selected_route)
         if selected_route != "evolve":
-            for argument in ("output", "trace_log"):
+            for argument in ("output", "trace_log", "records", "checkpoint"):
                 if getattr(args, argument, None):
                     setattr(
                         args,
@@ -793,6 +808,24 @@ async def _run_impl(args, progress):
             )
         if manifest and not samples:
             raise ValueError(f"no samples available for {args.command}")
+        if args.command == "test":
+            from evofact.experiments.test_runner import resumable_test
+
+            return await resumable_test(
+                runner,
+                samples if samples is not None else fixture_samples(),
+                output=args.output or root / config.output_dir / "test-summary.json",
+                records=args.records,
+                checkpoint=args.checkpoint,
+                resume=args.resume,
+                sample_retries=args.sample_retries,
+                progress=progress,
+                metadata={
+                    "manifest_id": manifest.manifest_id if manifest else "fixture",
+                    "skill_bank": selected_skill_bank,
+                    "data_sampling": data_sampling,
+                },
+            )
         traces, result = await runner.run(
             samples,
             progress=progress if args.command == "test" else None,
@@ -1040,8 +1073,10 @@ async def _run_impl(args, progress):
             else None,
             max_attempts_per_batch=args.max_attempts_per_batch,
             train_limit=args.limit or None,
+            match_evolve_training=True,
         )
         report_path = root / config.output_dir / "meta-batch-report.json"
+        data_sampling["train"] = outcome.get("training_sampling")
         _atomic_json_file(report_path, outcome)
         outcome.update(
             data_sampling=data_sampling,
@@ -1097,6 +1132,7 @@ async def _run_impl(args, progress):
             else None,
             max_attempts_per_batch=args.max_attempts_per_batch,
             train_limit=args.limit or None,
+            match_evolve_training=True,
         )
         report_path = root / config.output_dir / "adversarial-batch-report.json"
         _atomic_json_file(report_path, outcome)
@@ -1110,6 +1146,7 @@ async def _run_impl(args, progress):
         )
         outcome.update(
             proposer=config.generation.proposer,
+            data_sampling={**data_sampling, "train": outcome.get("training_sampling")},
             generator_calls=sum(
                 r["generator_usage"].get("calls", 0) for r in outcome["generation_rounds"]
             ),
@@ -1271,7 +1308,11 @@ async def _run(args):
     success = False
     try:
         result = await _run_impl(args, progress)
-        success = True
+        success = not (
+            isinstance(result, dict)
+            and result.get("mode") == "test"
+            and result.get("status") in {"incomplete", "interrupted"}
+        )
         return result
     finally:
         progress.close(success=success)
@@ -1281,6 +1322,7 @@ def main(argv=None):
     """函数作用：作为命令行入口解析参数、运行异步任务并输出 JSON 结果。
     输入要求：`argv`（未显式标注，默认 `None`）需符合函数签名约定。
     输出：返回 `None`；可能按函数职责更新状态、执行断言或产生外部副作用。"""
+    load_local_env(Path(__file__).resolve().parents[2] / ".env")
     args = build_parser().parse_args(argv)
     try:
         value = asyncio.run(_run(args))
@@ -1289,7 +1331,7 @@ def main(argv=None):
             {
                 "cancelled": True,
                 "reason": "keyboard interrupt",
-                "resume": "Use --resume for evolve, meta-evolve, or adversarial-evolve.",
+                "resume": "Use --resume for test, evolve, meta-evolve, or adversarial-evolve.",
             }
         )
         raise SystemExit(130) from None
@@ -1297,8 +1339,12 @@ def main(argv=None):
     # `data manifest` 已按 manifest 文本自行写盘，这里保持其原有的写文件 + 打印行为。
     if output and args.command != "data":
         _emit(value, output=output)
+        if args.command == "test" and value.get("status") == "incomplete":
+            raise SystemExit(2)
         return
     _emit(value)
+    if args.command == "test" and value.get("status") == "incomplete":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

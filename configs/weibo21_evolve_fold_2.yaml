@@ -1,18 +1,18 @@
 seed: 42
 
-output_dir: outputs/weibo21_evolve_fold_2
+output_dir: docs/weibo21_evolve_fold_2
 skill_store: skills/store_weibo21_evolve_fold_2
 
 data:
   dataset: weibo21
   root: datasets/Weibo21
-  evolution_validation_samples: 50
+  evolution_validation_samples: 8
   train_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
   final_test_domains: ["政治", "军事", "科技", "社会生活"]
   excluded_domains: ["无法确定"]
   train_sampling: balanced_by_domain
   final_test_samples_per_domain: 100
-  static_test_pattern: outputs/static/{dataset}-test-{domain}.json
+  static_test_pattern: outputs/static-100-before-pr-review/{dataset}-test-{domain}-100.json
   require_static_test: true
 
 backend: openai-compatible
@@ -28,7 +28,7 @@ optimizer_backend:
   model_env: EVOFACT_OPTIMIZER_MODEL
   base_url_env: EVOFACT_OPTIMIZER_BASE_URL
   api_key_env: EVOFACT_OPTIMIZER_API_KEY
-  provider: openai-compatible
+  provider: deepseek
   pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
   temperature: 1.0
 
@@ -41,7 +41,7 @@ budget:
   max_calls_per_sample: 8
   max_cost_per_sample: 1.0
 
-  max_calls_per_run: 10000
+  max_calls_per_run: 50000
   max_cost_per_run: 100.0
 
   max_sample_concurrency: 4
@@ -61,7 +61,7 @@ execution:
   batch_size: 16
   max_concurrent_samples: 16
   progress: auto
-  trace_log: outputs/weibo21_evolve_fold_2/training-traces.jsonl
+  trace_log: docs/weibo21_evolve_fold_2/training-traces.jsonl
 
 evolution:
   enabled: true

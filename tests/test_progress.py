@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from io import BytesIO, StringIO, TextIOWrapper
 
 from evofact.cli import _emit, main
@@ -61,7 +62,12 @@ def test_progress_off_is_always_silent() -> None:
     assert stream.getvalue() == ""
 
 
-def test_cli_progress_stays_on_stderr_and_stdout_is_json() -> None:
+def test_cli_progress_stays_on_stderr_and_stdout_is_json(tmp_path, monkeypatch) -> None:
+    from evofact.config import load_config
+
+    monkeypatch.setattr(
+        "evofact.cli.load_config", lambda path: replace(load_config(path), output_dir=tmp_path)
+    )
     stdout = StringIO()
     stderr = StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
