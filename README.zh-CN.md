@@ -72,10 +72,10 @@ flowchart LR
 
 | 阶段 | `evolve` | `meta-evolve` |
 | --- | --- | --- |
-| 训练输入 | Manifest 的 train 分区，按顺序分批处理 | 与验证领域、最终测试领域分离的训练领域 |
+| 训练输入 | Manifest 的 train 分区，按顺序分批处理 | 使用相同 manifest 分区及均衡抽样，再混域分批，并为跨域验证预留领域 |
 | 更新粒度 | `execution.batch_size` | `execution.batch_size` |
 | Optimizer 输入 | 当前 batch 的 trace 和当前完整 Skill Bank | 当前 batch 的 trace、当前技能库与累积的失败验证反馈 |
-| 候选评估数据 | 固定的 evolution-validation 分区 | 每次尝试使用验证领域中尚未评估的新样本 |
+| 候选评估数据 | 固定的 evolution-validation 分区 | 当前 batch 其他源领域中尚未用于验证的样本，允许使用训练样本 |
 | 推理次数 | 每个候选的基线、候选各一次 | 每次尝试的基线、候选各一次 |
 | 技能库更新 | batch 边界统一提交通过门控的候选 | 晋升后立即提交，下一批使用新技能库 |
 
@@ -309,7 +309,9 @@ meta_learning:
   checkpoint_path: outputs/meta-experiment/checkpoint.json
 ```
 
-通过 `--validation-domains domain1,domain2` 指定从源领域中留出的验证领域；省略时按名称排序，留出最后 `meta_test_domain_count` 个领域。`--limit` 在领域分离后只限制训练样本。每次候选评估使用一组全新的完整验证样本。达到重试上限（默认 5 次）、验证池耗尽或预算失败时，停止在当前 batch 并保存 checkpoint。重试上限后可增大 `--max-attempts-per-batch` 续跑，已消耗验证样本不循环使用。该协议请使用独立 checkpoint 与技能库，不能恢复旧 episode checkpoint；续跑必须保持原来的只评估或提交模式。上下文过长时会裁剪较旧反馈。验证样本预算隔离，运行总账持续累加。
+Meta/adversarial 批训练使用普通 evolve 的同一 manifest 训练分区和 `--limit` 均衡抽样，再把相同样本混域分批。每批至少包含两个源领域，并留出至少一个本批未出现的源领域用于验证。验证允许使用训练过的样本，最终测试领域始终排除。不要传 `--validation-domains` 固定留出某个源领域，否则会与保持训练配额的要求冲突。每次尝试使用尚未用于验证的样本 ID。达到重试上限（默认 5 次）、验证池耗尽或预算失败时，停止在当前 batch 并保存 checkpoint；可增大 `--max-attempts-per-batch` 续跑。`training_sampling` 保存样本 ID、各域配额和 batch 划分。200 条、batch 上限 16 时，两折均为 13 批（12 批各 16 条，最后 8 条），与普通 evolve 的批次数及大小一致；Fold 1 每批混合 2–3 个源领域，Fold 2 混合 2–4 个。为预留跨域验证领域，具体分批组合及顺序与普通 evolve 不同。新布局使用独立技能库和 checkpoint，不能恢复旧单领域、全局留出领域或 episode checkpoint。上下文过长时会裁剪较旧反馈，验证样本预算隔离、运行总账持续累加。
+
+Windows 两折训练、最终测试及续跑命令见：[普通 evolve](docs/普通evolve实验启动教程-Windows.md)、[meta-evolve](docs/meta-evolve实验启动教程-Windows.md)、[adversarial-evolve](docs/adversarial-evolve实验启动教程-Windows.md)。
 
 推理模型和训练用 optimizer 可以使用不同的 OpenAI-compatible 后端。Weibo21 配置通过独立环境变量指定 optimizer：
 
@@ -493,6 +495,10 @@ evofact --config configs/adversarial_llm.yaml \
 批训练路线中，`generation.batch_size` 控制每轮首次或补充生成的样本上限，`execution.batch_size` 控制真实训练批次，`data.evolution_validation_samples` 控制每次新的验证样本数。它不使用规则归因、聚类或反事实分析。生成响应、核验结果和挑战 trace 分阶段保存到 checkpoint，预算统一计入运行账本。批训练审计格式为 `adversarial_batch_audit_v1`，旧 Generator 演化条目审计保留原格式。
 
 ### 报告
+
+`test` 每完成一条就立即刷盘到 `<输出名>.samples.jsonl`，在 `--output` 指定的位置持续更新独立汇总，并写入 `<输出名>.checkpoint.json`。使用相同命令加 `test --resume`，会跳过已完成样本，只补失败或未完成样本；`--records` 和 `--checkpoint` 可指定独立路径。省略 `--output` 时，汇总默认为 `output_dir/test-summary.json`。已有结果必须续跑或更换输出路径，不会静默覆盖。
+
+单条超时或网络错误默认重试两次（`--sample-retries 2`），仍失败则记录后继续其他样本。未完成的测试退出码为 2，汇总中的指标明确只覆盖已完成样本。续跑核对模型、技能库、样本与顺序、标签契约、定价及运行策略，并恢复已结算预算；中断时尚未结算的远程调用费用无法精确恢复。文件最后一条未写完的 JSONL 可在续跑时修复，较早的完整坏记录会报错。旧评估若从未落盘，无法从进度数字恢复其 trace。
 
 ```bash
 evofact --config configs/weibo21_cross_domain.yaml \

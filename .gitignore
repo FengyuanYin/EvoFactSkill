@@ -12,6 +12,8 @@ dist/
 build/
 *.egg-info/
 .env
+.env.*
+/configs/local/
 outputs/
 data/raw/
 skills/store/
@@ -19,6 +21,9 @@ skills/demse-store/
 !skills/store/.gitkeep
 /learn
 /code-to-course
-/docs
+/docs/*
+!/docs/普通evolve实验启动教程-Windows.md
+!/docs/meta-evolve实验启动教程-Windows.md
+!/docs/adversarial-evolve实验启动教程-Windows.md
 /skills/*
 !/skills/seeds/

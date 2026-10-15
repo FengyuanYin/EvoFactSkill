@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
-from evofact.cli import _allows_unlimited_token_resume, _stable_digest
+from evofact.cli import _allows_unlimited_token_resume, _stable_digest, _stable_value
 from evofact.config import AppConfig, ExecutionConfig
 from evofact.core.models import (
     EvaluationResult,
@@ -17,7 +18,7 @@ from evofact.core.models import (
     StatisticalTestResult,
 )
 from evofact.evaluation.metrics import compute_metrics
-from evofact.experiments.runner import ExperimentRunner, fixture_samples
+from evofact.experiments.runner import ExperimentRunner, fixture_samples, proposal_history
 from evofact.skills.repository import SkillRepository
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -219,7 +220,7 @@ def test_evolve_resume_skips_atomically_completed_batches() -> None:
                 repository=repository,
                 start_batch=1,
                 prior_batch_audit=captured["batch_audit"],
-                prior_state=captured["accumulated"],
+                prior_state=json.loads(json.dumps(_stable_value(captured["accumulated"]))),
                 training_run_id="resume-test",
                 provenance={"identity_digest": "identity"},
             )
@@ -229,3 +230,24 @@ def test_evolve_resume_skips_atomically_completed_batches() -> None:
     assert result["resumed_from_batch"] == 1
     assert [row["batch_index"] for row in result["batches"]] == [1, 2]
     assert len(result["evaluation"].per_sample) == len(rows)
+
+
+def test_proposal_history_accepts_serialized_checkpoint_records():
+    proposal = EvolutionProposal(
+        "proposal", EvolutionOperation.EDIT, "Improve evidence analysis", ("skill",)
+    )
+    evaluation = EvaluationResult((), {})
+    decision = GateDecision(
+        False,
+        "rejected",
+        evaluation,
+        evaluation,
+        StatisticalTestResult("paired", 0, 1, False),
+        ("macro-F1 did not improve",),
+        "rejected",
+    )
+    restored = json.loads(json.dumps(_stable_value([proposal, decision])))
+    assert proposal_history([], [restored[0]], [restored[1]]) == proposal_history(
+        [], [proposal], [decision]
+    )
+    assert proposal_history([], [restored[0]]) == proposal_history([], [proposal])
