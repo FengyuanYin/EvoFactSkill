@@ -33,6 +33,21 @@ ACTIVE_FIELDS = (
 
 def gate_validation_rows(checkpoint: dict) -> list[dict]:
     """Join gate decisions to their training batch through proposal source traces."""
+    if checkpoint.get("schema_version") == "feedback_evolve_checkpoint_v1":
+        # Reuse the existing exporter, with one synthetic source per attempt.
+        attempts = [a for a in checkpoint.get("attempts", []) if "decision" in a]
+        checkpoint = {
+            "batch_audit": [
+                {"batch_index": a["batch"], "sample_ids": [str(i)]} for i, a in enumerate(attempts)
+            ],
+            "accumulated": {
+                "traces": [{"trace_id": str(i), "sample_id": str(i)} for i in range(len(attempts))],
+                "proposals": [
+                    dict(a["proposal"], source_trace_ids=[str(i)]) for i, a in enumerate(attempts)
+                ],
+                "gate_decisions": [a["decision"] for a in attempts],
+            },
+        }
     batches = checkpoint.get("batch_audit", [])
     sample_batch = {
         sample_id: batch["batch_index"]

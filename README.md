@@ -313,6 +313,8 @@ Batch meta/adversarial commands use the same manifest training split and balance
 
 Windows two-fold training, final-test, and resume commands: [ordinary evolve](docs/普通evolve实验启动教程-Windows.md), [meta-evolve](docs/meta-evolve实验启动教程-Windows.md), and [adversarial-evolve](docs/adversarial-evolve实验启动教程-Windows.md).
 
+`feedback-evolve` is a separate training command that keeps ordinary evolution's sample split and adds within-batch validation-trace feedback and retries (default `--max-attempts-per-batch 5`). Each validated attempt consumes fresh validation samples. Its artifacts and skill bank use a `feedback-evolve/` namespace; evaluate that bank with `--evolution-route feedback-evolve test`. The original `evolve` command and `evolve_checkpoint_v1` resume flow remain unchanged. See the [feedback-evolve guide matching the ordinary two-fold tutorial](docs/feedback-evolve实验启动教程-Windows.md).
+
 The forward pipeline and the training-only Package Optimizer may use different
 OpenAI-compatible endpoints. Weibo21 configurations keep the inexpensive forward
 model in the existing top-level fields and resolve the optimizer endpoint from

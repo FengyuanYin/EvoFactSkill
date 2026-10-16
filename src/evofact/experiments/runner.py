@@ -143,6 +143,7 @@ def proposal_history(
         operation = field(proposal, "operation", "")
         history.append(
             {
+                "proposal_id": field(proposal, "proposal_id"),
                 "target": targets[0] if targets else None,
                 "operation": str(getattr(operation, "value", operation)),
                 "rationale": str(field(proposal, "rationale", ""))[:400],
@@ -150,6 +151,21 @@ def proposal_history(
                 if decision is not None
                 else "pending",
                 "failures": [str(item)[:120] for item in failures][:4],
+                "reason": str(field(decision, "reason", ""))[:400],
+                "metrics": {
+                    side: {
+                        metric: value
+                        for metric, value in (
+                            field(field(decision, side + "_result", {}), "aggregate_metrics", {})
+                            or {}
+                        ).items()
+                        if metric
+                        in {"n", "macro_f1_all", "accuracy_all", "coverage", "brier", "mean_cost"}
+                    }
+                    for side in ("baseline", "candidate")
+                }
+                if decision is not None
+                else {},
             }
         )
     return tuple(history[-limit:])
@@ -544,7 +560,9 @@ class ExperimentRunner:
             config=self.config.evolution,
             budget_manager=self._budget_manager(),
         )
-        optimized = await optimizer.propose(None, self.packages, traces=traces)
+        optimized = await optimizer.propose(
+            None, self.packages, traces=traces, prior_proposals=prior_proposals
+        )
         if progress is not None:
             progress.update(
                 ProgressEvent(task_name, "optimizer", 1, 1, "updates", optimized.status)

@@ -161,7 +161,7 @@ def build_parser():
     parser.add_argument("--config", default="configs/dry_run.yaml")
     parser.add_argument(
         "--evolution-route",
-        choices=("evolve", "meta-evolve", "adversarial-evolve"),
+        choices=("evolve", "feedback-evolve", "meta-evolve", "adversarial-evolve"),
         help="Select the isolated bank for test/report; training commands select their own route",
     )
     parser.add_argument(
@@ -205,7 +205,7 @@ def build_parser():
 
     # 无须额外专属参数的命令；统一支持 --output，把结果写文件以避免控制台重定向的编码问题。
     output_help = "把结果 JSON 以 UTF-8 写入该路径，而不是打印到标准输出"
-    for name in ("dry-run", "evolve", "validate", "test", "ablation", "report"):
+    for name in ("dry-run", "evolve", "feedback-evolve", "validate", "test", "ablation", "report"):
         command = subparsers.add_parser(name)
         command.add_argument("--output", help=output_help)
         command.add_argument("--final-test-domains", default=None)
@@ -223,10 +223,12 @@ def build_parser():
                 default=2,
                 help="Retries per sample on timeout/network errors (default: 2)",
             )
-        if name == "evolve":
+        if name in {"evolve", "feedback-evolve"}:
             command.add_argument("--evaluation-only", action="store_true")
             command.add_argument("--resume", action="store_true")
             command.add_argument("--checkpoint")
+            if name == "feedback-evolve":
+                command.add_argument("--max-attempts-per-batch", type=int, default=5)
             command.add_argument(
                 "--trace-log",
                 help="single JSONL file containing every training and validation inference trace",
@@ -359,7 +361,7 @@ async def _run_impl(args, progress):
     config = load_config(root / args.config if not Path(args.config).is_absolute() else args.config)
     from evofact.experiments.route_isolation import evolution_route_config, route_artifact_path
 
-    training_commands = {"evolve", "meta-evolve", "adversarial-evolve"}
+    training_commands = {"evolve", "feedback-evolve", "meta-evolve", "adversarial-evolve"}
     selected_route = args.command if args.command in training_commands else args.evolution_route
     if args.command in training_commands and args.evolution_route not in {None, args.command}:
         raise ValueError("training command and --evolution-route must match")
@@ -391,12 +393,13 @@ async def _run_impl(args, progress):
         "dry-run",
         "test",
         "evolve",
+        "feedback-evolve",
         "validate",
         "report",
         "plan",
-    } and not (args.command == "evolve" and args.evaluation_only):
+    } and not (args.command in {"evolve", "feedback-evolve"} and args.evaluation_only):
         repository = SkillRepository(root / config.skill_store)
-        if args.command == "evolve" and args.skill_bank != "active":
+        if args.command in {"evolve", "feedback-evolve"} and args.skill_bank != "active":
             raise ValueError("evolve must continue from the active Skill bank")
         active_packages = repository.resolve_package_bank(args.skill_bank)
         if active_packages:
@@ -1019,6 +1022,10 @@ async def _run_impl(args, progress):
                 "svg": str(root / config.output_dir / "validation-curve.svg"),
             }
         return outcome
+    if args.command == "feedback-evolve":
+        from evofact.experiments.feedback_evolve_runner import run_cli
+
+        return await run_cli(args, config, root, manifest, select, progress, data_sampling)
     if args.command == "meta-evolve":  # 使用元进化
         from evofact.experiments.meta_batch_runner import MetaBatchRunner
 
@@ -1300,6 +1307,7 @@ async def _run(args):
         "test",
         "report",
         "evolve",
+        "feedback-evolve",
         "meta-evolve",
         "adversarial-evolve",
         "ablation",
@@ -1310,8 +1318,13 @@ async def _run(args):
         result = await _run_impl(args, progress)
         success = not (
             isinstance(result, dict)
-            and result.get("mode") == "test"
-            and result.get("status") in {"incomplete", "interrupted"}
+            and (
+                (
+                    result.get("mode") == "test"
+                    and result.get("status") in {"incomplete", "interrupted"}
+                )
+                or (result.get("mode") == "feedback-evolve" and result.get("status") != "completed")
+            )
         )
         return result
     finally:
@@ -1331,7 +1344,7 @@ def main(argv=None):
             {
                 "cancelled": True,
                 "reason": "keyboard interrupt",
-                "resume": "Use --resume for test, evolve, meta-evolve, or adversarial-evolve.",
+                "resume": "Use --resume for test, evolve, feedback-evolve, meta-evolve, or adversarial-evolve.",
             }
         )
         raise SystemExit(130) from None
@@ -1339,10 +1352,14 @@ def main(argv=None):
     # `data manifest` 已按 manifest 文本自行写盘，这里保持其原有的写文件 + 打印行为。
     if output and args.command != "data":
         _emit(value, output=output)
+        if args.command == "feedback-evolve" and value.get("status") != "completed":
+            raise SystemExit(2)
         if args.command == "test" and value.get("status") == "incomplete":
             raise SystemExit(2)
         return
     _emit(value)
+    if args.command == "feedback-evolve" and value.get("status") != "completed":
+        raise SystemExit(2)
     if args.command == "test" and value.get("status") == "incomplete":
         raise SystemExit(2)
 

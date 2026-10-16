@@ -159,6 +159,7 @@ def build_skillbank_optimizer_context(
     max_instructions_chars=60000,
     max_total_chars=300000,
     feedback=None,
+    prior_proposals=(),
 ):
     """Supply training traces and the current bank without precomputed diagnoses."""
     skills = []
@@ -174,6 +175,11 @@ def build_skillbank_optimizer_context(
         "skills": skills,
         "traces": [_sanitize(trace, max_text_chars=max_text_chars) for trace in traces],
     }
+    if prior_proposals:
+        # Newest first, so context trimming preserves the most recent decisions.
+        context["prior_proposals"] = _sanitize(
+            list(reversed(tuple(prior_proposals)[-12:])), max_text_chars=max_text_chars
+        )
     if feedback is not None:
         context["validation_feedback"] = _sanitize(feedback, max_text_chars=max_text_chars)
     for trace in context["traces"]:
@@ -195,6 +201,8 @@ def build_skillbank_optimizer_context(
                 group.pop()
     while _context_chars(context) > max_total_chars and len(context["traces"]) > 1:
         context["traces"].pop()
+    while _context_chars(context) > max_total_chars and context.get("prior_proposals"):
+        context["prior_proposals"].pop()
     if _context_chars(context) > max_total_chars:
         raise ValueError("current Skill bank and training trace cannot fit max_total_chars")
     return context

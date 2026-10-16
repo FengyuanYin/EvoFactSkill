@@ -313,6 +313,8 @@ Meta/adversarial 批训练使用普通 evolve 的同一 manifest 训练分区和
 
 Windows 两折训练、最终测试及续跑命令见：[普通 evolve](docs/普通evolve实验启动教程-Windows.md)、[meta-evolve](docs/meta-evolve实验启动教程-Windows.md)、[adversarial-evolve](docs/adversarial-evolve实验启动教程-Windows.md)。
 
+`feedback-evolve` 是独立训练命令：沿用普通 evolve 的数据划分，增加批内验证 trace 反馈与重试，默认 `--max-attempts-per-batch 5`，每次验证消耗新的验证样本。其产物和技能库自动保存在 `feedback-evolve/` 子目录，测试时用 `--evolution-route feedback-evolve test` 选择对应技能库。原 `evolve` 的单候选流程与 `evolve_checkpoint_v1` 续跑保持不变。参见 [feedback-evolve 两折教程](docs/feedback-evolve实验启动教程-Windows.md)，参数与原普通两折教程对齐。
+
 推理模型和训练用 optimizer 可以使用不同的 OpenAI-compatible 后端。Weibo21 配置通过独立环境变量指定 optimizer：
 
 ```powershell

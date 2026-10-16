@@ -446,6 +446,7 @@ class PackageOptimizerAgent:
                     max_instructions_chars=self.config.max_instructions_chars,
                     max_total_chars=self.config.max_total_chars,
                     feedback=feedback,
+                    prior_proposals=prior_proposals,
                 )
                 if bank_mode
                 else build_optimizer_context(
