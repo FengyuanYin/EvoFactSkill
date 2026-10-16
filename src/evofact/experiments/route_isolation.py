@@ -12,7 +12,7 @@ def route_artifact_path(path, mode):
 def evolution_route_config(config, mode):
     if mode == "evolve":
         return config
-    if mode not in {"meta-evolve", "adversarial-evolve"}:
+    if mode not in {"feedback-evolve", "meta-evolve", "adversarial-evolve"}:
         raise ValueError("unknown evolution route")
 
     def directory(path):

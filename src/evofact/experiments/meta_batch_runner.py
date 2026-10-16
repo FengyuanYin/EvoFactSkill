@@ -1,6 +1,7 @@
 """Batch-wise cross-domain evolution with rejected-validation trace feedback.
 
-This runner deliberately does not call or modify the ordinary evolution loop.
+The durable retry loop is shared by ordinary, meta, and adversarial evolution;
+each route supplies its own sample planning policy.
 """
 
 from __future__ import annotations
@@ -47,25 +48,20 @@ class MetaBatchRunner(MetaEvolutionRunner):
     def _extra_outcome(self, state):
         return {}
 
-    async def run(
+    def _check_enabled(self):
+        if not self.config.meta_learning.enabled or not self.config.evolution.enabled:
+            raise ValueError("meta_learning.enabled and evolution.enabled must be true")
+
+    def _prepare_plan(
         self,
         samples,
         *,
-        final_test_domains=(),
-        train_domains=None,
-        validation_domains=None,
-        max_attempts_per_batch=5,
-        train_limit=None,
-        resume=False,
-        evaluation_only=False,
-        progress=None,
-        trace_log_path=None,
-        match_evolve_training=False,
+        final_test_domains,
+        train_domains,
+        validation_domains,
+        train_limit,
+        match_evolve_training,
     ):
-        if not self.config.meta_learning.enabled or not self.config.evolution.enabled:
-            raise ValueError("meta_learning.enabled and evolution.enabled must be true")
-        if max_attempts_per_batch < 1 or (train_limit is not None and train_limit < 1):
-            raise ValueError("attempt limit and training limit must be positive")
         source, final = split_source_and_final(samples, final_test_domains, train_domains)
         event_domains = {}
         for sample in samples:
@@ -115,6 +111,40 @@ class MetaBatchRunner(MetaEvolutionRunner):
         random.Random(self.config.seed + 1).shuffle(valid)
         if not train or not valid:
             raise ValueError("meta evolution requires training and validation samples")
+        return source, final, train, valid, batches, heldout, sampling
+
+    def _after_save(self, checkpoint):
+        pass
+
+    def _proposal_history(self, state):
+        return ()
+
+    async def run(
+        self,
+        samples,
+        *,
+        final_test_domains=(),
+        train_domains=None,
+        validation_domains=None,
+        max_attempts_per_batch=5,
+        train_limit=None,
+        resume=False,
+        evaluation_only=False,
+        progress=None,
+        trace_log_path=None,
+        match_evolve_training=False,
+    ):
+        self._check_enabled()
+        if max_attempts_per_batch < 1 or (train_limit is not None and train_limit < 1):
+            raise ValueError("attempt limit and training limit must be positive")
+        source, final, train, valid, batches, heldout, sampling = self._prepare_plan(
+            samples,
+            final_test_domains=final_test_domains,
+            train_domains=train_domains,
+            validation_domains=validation_domains,
+            train_limit=train_limit,
+            match_evolve_training=match_evolve_training,
+        )
         valid_size = self.config.data.evolution_validation_samples
         checkpoint = self.root / self.config.meta_learning.checkpoint_path
         identity = hashlib.sha256(
@@ -160,6 +190,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 "train_traces": None,
                 "feedback": [],
                 "attempts": [],
+                "total_batches": len(batches),
                 "pending": None,
                 "packages": [package_to_dict(p) for p in self.base.packages],
                 "committed_snapshots": [],
@@ -185,6 +216,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
             )
             os.replace(temporary, checkpoint)
+            self._after_save(checkpoint)
 
         def sync_bank(packages):
             self.base.packages = packages
@@ -301,6 +333,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         self.base.packages,
                         traces=optimizer_traces,
                         feedback=list(reversed(state["feedback"])) or None,
+                        prior_proposals=self._proposal_history(state),
                     )
                     candidate = optimized.candidate
                     if candidate is None or (
