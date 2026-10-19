@@ -22,6 +22,9 @@ skills/demse-store/
 /learn
 /code-to-course
 /docs/*
+!/docs/独立均衡验证实验启动教程-Windows.md
+!/docs/optimizer持久记忆与上下文管理.md
+!/docs/adversarial-generator记忆与上下文管理.md
 !/docs/普通evolve实验启动教程-Windows.md
 !/docs/meta-evolve实验启动教程-Windows.md
 !/docs/adversarial-evolve实验启动教程-Windows.md

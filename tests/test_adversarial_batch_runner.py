@@ -8,10 +8,11 @@ from optimizer_stub import EditingOptimizerBackend
 
 from evofact.config import load_config
 from evofact.core.models import Evidence, Sample
+from evofact.evolution.firewall import validate_generation_request
 from evofact.experiments.adversarial_batch_runner import AdversarialBatchRunner
 from evofact.experiments.meta_batch_runner import MetaBatchRunner
 from evofact.experiments.route_isolation import evolution_route_config, route_artifact_path
-from evofact.generation.prompts import VERIFIER_SYSTEM
+from evofact.generation.prompts import KNOWLEDGE_VERIFIER_SYSTEM, VERIFIER_SYSTEM
 from evofact.skills.package_adapter import package_bank_digest
 from evofact.skills.repository import SkillRepository
 
@@ -25,7 +26,7 @@ class Generator:
         self.reject = reject
 
     async def _call(self, system, payload):
-        if system == VERIFIER_SYSTEM:
+        if system in {VERIFIER_SYSTEM, KNOWLEDGE_VERIFIER_SYSTEM}:
             self.verifications.append(deepcopy(payload))
             return {
                 "reviews": [
@@ -139,6 +140,7 @@ def test_initial_supplement_feedback_and_reset(tmp_path, monkeypatch):
     assert len(contexts[0]["traces"]) == 4
     assert len(contexts[1]["traces"]) == 6
     assert len(contexts[2]["traces"]) == 4
+    assert all(context["feedback_enabled"] is True for context in contexts)
     assert contexts[1]["validation_feedback"]
     assert not contexts[2].get("validation_feedback")
     assert backend.requests[1]["validation_feedback"]
@@ -150,6 +152,169 @@ def test_initial_supplement_feedback_and_reset(tmp_path, monkeypatch):
     assert not any(s.startswith("final-") for _, ids in calls for s in ids)
     baseline = [ids for phase, ids in calls if phase == "validation baseline"]
     assert len(set(sum(baseline, []))) == 6
+
+
+def test_generator_overflow_keeps_only_bounded_paired_candidates(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    original = backend._call
+
+    async def oversized(system, payload):
+        response = await original(system, payload)
+        if "examples" in payload:
+            row = deepcopy(response["samples"][-1])
+            decision = deepcopy(response["decisions"][-1])
+            row["sample_id"] += "-overflow"
+            row["text"] += " additional case"
+            decision["sample_id"] = row["sample_id"]
+            response["samples"].append(row)
+            response["decisions"].insert(0, decision)
+        return response
+
+    monkeypatch.setattr(backend, "_call", oversized)
+    result = invoke(runner, samples)
+    assert result["status"] == "completed"
+    assert result["accepted_challenge_samples"] == 6
+    for round_ in result["generation_rounds"]:
+        assert len(round_["response"]["samples"]) == 3  # Preserve raw response for audit.
+        verification = round_["verification"]
+        assert len(verification["accepted"]) == 2
+        assert verification["rejected"] == [
+            {"index": 2, "reason": "generator batch budget exceeded"}
+        ]
+    assert all(len(p["samples"]) == 2 for p in backend.verifications)
+
+
+@pytest.mark.parametrize("malformation", ["count", "duplicate", "top_level"])
+def test_malformed_generator_round_is_rejected_without_stopping_training(
+    tmp_path, monkeypatch, malformation
+):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    original = backend._call
+
+    async def malformed(system, payload):
+        response = await original(system, payload)
+        if "examples" in payload:
+            if malformation == "count":
+                response["decisions"].pop()
+            elif malformation == "duplicate":
+                response["decisions"][1]["sample_id"] = response["decisions"][0]["sample_id"]
+            else:
+                response["extra"] = "not allowed"
+        return response
+
+    monkeypatch.setattr(backend, "_call", malformed)
+    result = invoke(runner, samples)
+    assert result["status"] == "completed"
+    assert result["accepted_challenge_samples"] == 0
+    assert not backend.verifications
+    assert contexts  # Optimization still receives real training traces.
+    assert all(
+        r["verification"]["rejected"][0]["reason"].startswith("invalid generator response:")
+        for r in result["generation_rounds"]
+    )
+
+
+def test_supplement_filters_feedback_overlapping_unused_holdout(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    invoke(runner, samples)
+    heldout = Sample("unused", "fixture", "A shared news statement with exact text.", "REAL")
+    overlap = {"sample_id": "consumed", "sample_public": {"text": heldout.text + " City"}}
+    safe = {"sample_id": "safe", "sample_public": {"text": "Unrelated feedback text."}}
+    state = {
+        "train_traces": [e["trace"] for e in backend.requests[0]["examples"]],
+        "feedback": [
+            {"attempt": 1, "baseline_traces": [overlap, safe], "candidate_traces": [overlap]}
+        ],
+    }
+    before = deepcopy(state)
+    batch = [s for s in samples if s.sample_id in {t["sample_id"] for t in state["train_traces"]}]
+    request = runner._request(state, batch, "filtered", forbidden=[heldout])
+    validate_generation_request(request, [heldout])
+    assert request["feedback_filter"] == {"removed_traces": 2, "removed_entries": 0}
+    feedback = request["validation_feedback"][0]
+    assert feedback["attempt"] == 1
+    assert feedback["baseline_traces"] == [safe]
+    assert feedback["candidate_traces"] == []
+    assert state == before
+    # Construction examples remain subject to the original firewall.
+    with pytest.raises(ValueError, match="leaks held-out sample"):
+        validate_generation_request(request, [batch[0]])
+
+
+def test_endogenous_challenges_without_evidence_reach_optimizer(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    samples = [replace(s, evidence=()) for s in samples]
+    result = invoke(runner, samples)
+    assert result["generation_policy"] == "endogenous-knowledge-v1"
+    assert result["accepted_challenge_samples"] == 6
+    assert all(
+        e["source_sample"]["evidence"] == [] for r in backend.requests for e in r["examples"]
+    )
+    assert any(phase.startswith("adversarial") for phase, _ in calls)
+    assert any(t["sample_id"].startswith("gen-") for c in contexts for t in c["traces"])
+    for payload in backend.verifications:
+        for sample in payload["samples"]:
+            assert sample["evidence"] == []
+            assert sample["source_training_sample"]["gold_label"] in {"REAL", "FAKE"}
+            assert not {"label", "target_label", "reason", "strategy", "decisions"} & set(sample)
+    assert "generation_policy" in runner._identity_extra()
+
+
+def test_endogenous_review_still_rejects_wrong_labels_without_evidence(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch, reject=True)
+    result = invoke(runner, [replace(s, evidence=()) for s in samples])
+    assert backend.verifications
+    assert result["accepted_challenge_samples"] == 0
+    assert not any(phase.startswith("adversarial") for phase, _ in calls)
+    assert all(
+        "knowledge verdict disagrees" in rejection["reason"]
+        for r in result["generation_rounds"]
+        for rejection in r["verification"]["rejected"]
+    )
+
+
+def test_endogenous_review_can_decline_uncertain_labels(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    original = backend._call
+
+    async def uncertain(system, payload):
+        if system == KNOWLEDGE_VERIFIER_SYSTEM:
+            return {
+                "reviews": [
+                    {
+                        "sample_id": s["sample_id"],
+                        "status": "INDETERMINATE",
+                        "predicted_label": None,
+                        "reason": "The transformed factual claim is not known.",
+                    }
+                    for s in payload["samples"]
+                ]
+            }
+        return await original(system, payload)
+
+    monkeypatch.setattr(backend, "_call", uncertain)
+    result = invoke(runner, [replace(s, evidence=()) for s in samples])
+    assert result["accepted_challenge_samples"] == 0
+    assert not any(phase.startswith("adversarial") for phase, _ in calls)
+
+
+def test_evidence_mode_checkpoint_cannot_resume_as_endogenous(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    identity = runner._identity_extra
+
+    def legacy_identity():
+        extra = identity()
+        extra.pop("generation_policy")
+        extra.pop("generation_policy_digest")
+        return extra
+
+    monkeypatch.setattr(runner, "_identity_extra", legacy_identity)
+    invoke(runner, samples)
+    monkeypatch.setattr(runner, "_identity_extra", identity)
+    requests_before = len(backend.requests)
+    with pytest.raises(ValueError, match="incompatible meta batch checkpoint"):
+        invoke(runner, samples, resume=True)
+    assert len(backend.requests) == requests_before
 
 
 def test_supplement_cap_and_cached_traces(tmp_path, monkeypatch):
@@ -168,10 +333,22 @@ def test_supplement_cap_and_cached_traces(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner.base, "run", fail_gate)
     result = invoke(runner, samples, train_limit=2, max_attempts_per_batch=4)
-    assert result["status"] == "attempt_limit" and result["completed_batches"] == 0
+    assert result["status"] == "completed" and result["completed_batches"] == 1
+    assert [b["batch"] for b in result["skipped_batches"]] == [1]
     assert len(backend.requests) == 2
     assert len([c for c in calls if c[0].startswith("adversarial")]) == 2
     assert len(contexts) == 4
+
+
+def test_attempt_limit_resets_adversarial_batch_before_next_batch(tmp_path, monkeypatch):
+    runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
+    result = invoke(runner, samples, max_attempts_per_batch=1)
+    assert result["status"] == "completed" and result["completed_batches"] == 2
+    assert [b["batch"] for b in result["skipped_batches"]] == [1]
+    assert len(backend.requests) == 2
+    assert not backend.requests[1]["validation_feedback"]
+    assert not contexts[1].get("validation_feedback")
+    assert contexts[0]["skills"] == contexts[1]["skills"]
 
 
 def test_resume_after_generation_reuses_response(tmp_path, monkeypatch):
@@ -248,7 +425,7 @@ def test_meta_does_not_generate_even_when_generation_enabled(tmp_path, monkeypat
     meta = MetaBatchRunner(config, ROOT)
     monkeypatch.setattr(meta.base, "_optimizer_backend", EditingOptimizerBackend)
     result = invoke(meta, samples, max_attempts_per_batch=1, train_limit=2)
-    assert result["mode"] == "meta-evolve" and result["status"] == "attempt_limit"
+    assert result["mode"] == "meta-evolve" and result["status"] == "completed"
     assert "generation_rounds" not in result
     assert not backend.requests
 

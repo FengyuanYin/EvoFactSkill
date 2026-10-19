@@ -76,6 +76,7 @@ def test_rejection_feedback_fresh_validation_and_immediate_promotion(tmp_path, m
     assert result["status"] == "completed"
     assert result["completed_batches"] == 2
     assert len(contexts) == 3
+    assert all(context["feedback_enabled"] is True for context in contexts)
     assert "validation_feedback" not in contexts[0]
     feedback = contexts[1]["validation_feedback"][0]
     assert feedback["baseline_traces"] and feedback["candidate_traces"]
@@ -94,12 +95,32 @@ def test_rejection_feedback_fresh_validation_and_immediate_promotion(tmp_path, m
 
 def test_resume_failed_batch_retains_train_and_feedback(tmp_path, monkeypatch):
     runner, contexts, samples, calls = setup_runner(tmp_path, monkeypatch)
-    result = invoke(runner, samples, max_attempts_per_batch=1)
-    assert result["status"] == "attempt_limit" and result["completed_batches"] == 0
+    original = runner._optimizer_traces
+    interrupted = False
+
+    async def pause(*args, **kwargs):
+        nonlocal interrupted
+        if len(contexts) == 1 and not interrupted:
+            interrupted = True
+            raise RuntimeError("pause after rejection")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_optimizer_traces", pause)
+    with pytest.raises(RuntimeError, match="pause after rejection"):
+        invoke(runner, samples)
     result = invoke(runner, samples, resume=True, max_attempts_per_batch=3)
     assert result["status"] == "completed"
     assert len([c for c in calls if c[0] == "train inference"]) == 2
     assert contexts[1]["validation_feedback"]
+
+
+def test_attempt_limit_advances_without_committing_rejected_candidate(tmp_path, monkeypatch):
+    runner, contexts, samples, calls = setup_runner(tmp_path, monkeypatch)
+    result = invoke(runner, samples, max_attempts_per_batch=1)
+    assert result["status"] == "completed" and result["completed_batches"] == 2
+    assert [b["batch"] for b in result["skipped_batches"]] == [1]
+    assert not contexts[1].get("validation_feedback")
+    assert contexts[0]["skills"] == contexts[1]["skills"]
 
 
 def test_resume_mid_validation_does_not_repeat_completed_baseline(tmp_path, monkeypatch):

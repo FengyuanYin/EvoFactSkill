@@ -14,14 +14,25 @@ import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from evofact.core.models import SkillKind, SkillStatus, StatisticalTestResult
+from evofact.config import config_identity
+from evofact.core.models import SampleEvaluation, SkillKind, SkillStatus, StatisticalTestResult
 from evofact.data.domains import data_fingerprint, effective_domain, split_source_and_final
 from evofact.evolution.firewall import validate_generation_request
+from evofact.evolution.optimizer_memory import ManagedOptimizerBackend, remember
 from evofact.evolution.package_optimizer import PackageOptimizerAgent
+from evofact.generation.memory import GeneratorContextFailure
 from evofact.skills.candidates import apply_candidate
 from evofact.skills.package_adapter import package_bank_digest, package_to_skill_spec
 from evofact.skills.package_serializer import package_from_dict, package_to_dict
+from evofact.validation.evaluator import evaluate
 from evofact.validation.gate import ValidationGate
+from evofact.validation.independent import (
+    InferenceIncomplete,
+    discovery_without_pool,
+    guard_failures,
+    independent_pool,
+    independent_rows,
+)
 
 from .meta_runner import MetaEvolutionRunner, _evaluation_from, _proposal_from
 from .meta_sampling import matched_meta_plan
@@ -47,6 +58,9 @@ class MetaBatchRunner(MetaEvolutionRunner):
 
     def _extra_outcome(self, state):
         return {}
+
+    async def _prepare_route_runtime(self, state, save, budget):
+        pass
 
     def _check_enabled(self):
         if not self.config.meta_learning.enabled or not self.config.evolution.enabled:
@@ -119,6 +133,71 @@ class MetaBatchRunner(MetaEvolutionRunner):
     def _proposal_history(self, state):
         return ()
 
+    async def _clean_validation(
+        self, pending, role, rows, skills, save, *, progress, task, phase=None
+    ):
+        """Persist successful samples; retry only runtime failures, never wrong labels."""
+        cache = pending.setdefault(role + "_progress", {"completed": {}, "failures": []})
+
+        def completed(sample, trace, evaluation):
+            if evaluation.decision_origin == "runtime":
+                failed(sample, OSError("Validation runtime abstention or budget exhaustion"))
+                return
+            cache["completed"][sample.sample_id] = {
+                "trace": _json(asdict(trace)),
+                "evaluation": _json(asdict(evaluation)),
+            }
+            save()
+
+        def failed(sample, exc):
+            cache["failures"].append(
+                {
+                    "sample_id": sample.sample_id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "trace": _json(asdict(exc.trace)) if getattr(exc, "trace", None) else None,
+                }
+            )
+            save()
+
+        def runtime_failure(sample, exc, attempt):
+            failed(sample, exc)
+            cache["failures"][-1]["attempt"] = attempt
+            save()
+
+        missing = [s for s in rows if s.sample_id not in cache["completed"]]
+        if missing:
+            await self.base.run(
+                missing,
+                skills=skills,
+                progress=progress,
+                task_name=task,
+                phase=phase or "validation " + role,
+                isolate_sample_budget=True,
+                sample_retries=self.config.independent_validation.sample_retries,
+                strict_runtime_failures=True,
+                on_runtime_failure=runtime_failure,
+                on_sample_complete=completed,
+                on_sample_error=lambda sample, exc: None,
+            )
+        if any(s.sample_id not in cache["completed"] for s in rows):
+            return False
+        ordered = [cache["completed"][s.sample_id] for s in rows]
+        result = evaluate(
+            [
+                SampleEvaluation(
+                    **{
+                        **r["evaluation"],
+                        "allowed_labels": tuple(r["evaluation"]["allowed_labels"]),
+                    }
+                )
+                for r in ordered
+            ]
+        )
+        pending[role] = {"traces": [r["trace"] for r in ordered], "result": _json(asdict(result))}
+        save()
+        return True
+
     async def run(
         self,
         samples,
@@ -145,12 +224,62 @@ class MetaBatchRunner(MetaEvolutionRunner):
             train_limit=train_limit,
             match_evolve_training=match_evolve_training,
         )
+        policy = self.config.independent_validation
+        memory_policy = self.config.optimizer_memory
+        independent = []
+        if policy.enabled:
+            pool_candidates = getattr(self, "independent_validation_samples", None) or valid
+            if any(effective_domain(s) not in source for s in pool_candidates):
+                raise ValueError("independent validation candidates must stay in source domains")
+            independent, _ = independent_pool(
+                pool_candidates,
+                train,
+                [s for s in samples if effective_domain(s) in final],
+                registry=self.base.label_contract_registry,
+                per_domain=policy.samples_per_domain,
+                seed=self.config.seed,
+            )
+            valid = discovery_without_pool(valid, independent)
+            if policy.manifest_path is not None:
+                expected = json.loads(
+                    (self.root / policy.manifest_path).read_text(encoding="utf-8")
+                )
+                actual_pool = [
+                    {
+                        "sample_id": s.sample_id,
+                        "domain": effective_domain(s),
+                        "label": self.base.label_contract_registry.resolve_sample(s).normalize(
+                            s.label
+                        ),
+                    }
+                    for s in independent
+                ]
+                if (
+                    expected["training_sample_ids"] != [s.sample_id for s in train]
+                    or expected["independent_samples"] != actual_pool
+                ):
+                    raise ValueError(
+                        "independent validation manifest does not match the training/data plan"
+                    )
+            if match_evolve_training:
+                for batch in batches:
+                    independent_rows(independent, batch, cross_domain=True)
+            sampling = {
+                **(sampling or {}),
+                "independent_validation": {
+                    "policy": "independent_balanced_source_domains_v1",
+                    "pool_sample_ids": [s.sample_id for s in independent],
+                    "samples_per_domain": policy.samples_per_domain,
+                    "cross_domain_only": match_evolve_training,
+                },
+            }
+            sampling["validation_sample_ids"] = [s.sample_id for s in valid]
         valid_size = self.config.data.evolution_validation_samples
         checkpoint = self.root / self.config.meta_learning.checkpoint_path
         identity = hashlib.sha256(
             json.dumps(
                 {
-                    "config": asdict(self.config),
+                    "config": config_identity(self.config),
                     "data": data_fingerprint(samples),
                     "train": [s.sample_id for s in train],
                     "valid": [s.sample_id for s in valid],
@@ -204,6 +333,28 @@ class MetaBatchRunner(MetaEvolutionRunner):
             state["trace_log"] = (
                 str(Path(trace_log_path).resolve()) if trace_log_path is not None else None
             )
+        if policy.enabled:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            (checkpoint.parent / "independent-validation-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "policy": sampling["independent_validation"],
+                        "samples": [
+                            {
+                                "sample_id": s.sample_id,
+                                "domain": effective_domain(s),
+                                "label": self.base.label_contract_registry.resolve_sample(
+                                    s
+                                ).normalize(s.label),
+                            }
+                            for s in independent
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         budget = self.base._budget_manager()
         if resume and state.get("budget"):
             budget.restore(state["budget"])
@@ -256,26 +407,85 @@ class MetaBatchRunner(MetaEvolutionRunner):
         if trace_log_path is not None:
             self.base.enable_trace_logging(trace_log_path, run_id=state["run_id"], resume=resume)
         total = len(batches)
+        # Older checkpoints stopped at attempt_limit; resume them with the same
+        # schema and advance the exhausted batch without changing the active bank.
+        state.setdefault("skipped_batches", [])
         state["status"] = "running"
         save()
         try:
-            while state["completed_batches"] < total:
+            if memory_policy.enabled:
+                try:
+                    await ManagedOptimizerBackend(
+                        self.base._optimizer_backend(), memory_policy, state, save, budget=budget
+                    ).capabilities()
+                except ValueError as exc:
+                    state["status"] = "optimizer_context_failure"
+                    state["optimizer_context_error"] = str(exc)
+            if state["status"] == "running":
+                try:
+                    await self._prepare_route_runtime(state, save, budget)
+                except GeneratorContextFailure as exc:
+                    state["status"] = "generator_context_failure"
+                    state["generator_context_error"] = str(exc)
+            while state["status"] == "running" and state["completed_batches"] < total:
                 index = state["completed_batches"]
                 batch = batches[index]
                 task = f"{self.mode} batch {index + 1}/{total}"
                 if state["train_traces"] is None:
-                    traces, _ = await self.base.run(
-                        batch,
-                        progress=progress,
-                        task_name=task,
-                        phase="train inference",
-                    )
-                    state["train_traces"] = _json([asdict(t) for t in traces])
-                    save()
+                    if policy.enabled:
+                        inference = state.setdefault("training_inference", {})
+                        clean = await self._clean_validation(
+                            inference,
+                            "training",
+                            batch,
+                            self.base.skills,
+                            save,
+                            progress=progress,
+                            task=task,
+                            phase="train inference",
+                        )
+                        if not clean:
+                            state["status"] = "training_runtime_failure"
+                            break
+                        state["train_traces"] = inference["training"]["traces"]
+                        state.setdefault("training_runtime_failures", []).append(
+                            {
+                                "batch": index + 1,
+                                "failures": inference["training_progress"]["failures"],
+                            }
+                        )
+                        state.pop("training_inference")
+                        save()
+                    else:
+                        traces, _ = await self.base.run(
+                            batch,
+                            progress=progress,
+                            task_name=task,
+                            phase="train inference",
+                        )
+                        state["train_traces"] = _json([asdict(t) for t in traces])
+                        save()
                 if state["pending"] is None:
                     if state["attempt"] >= max_attempts_per_batch:
-                        state["status"] = "attempt_limit"
-                        break
+                        state["skipped_batches"].append(
+                            {
+                                "batch": index + 1,
+                                "attempts": state["attempt"],
+                                "reason": "attempt_limit",
+                                "bank_digest": package_bank_digest(self.base.packages),
+                            }
+                        )
+                        state["completed_batches"] += 1
+                        self._reset_batch(state)
+                        state.update(
+                            pending=None,
+                            train_traces=None,
+                            feedback=[],
+                            attempt=0,
+                            commit_intent=None,
+                        )
+                        save()
+                        continue
                     if match_evolve_training:
                         used = set(state["used_validation_ids"])
                         batch_domains = {effective_domain(s) for s in batch}
@@ -298,17 +508,22 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     if len(available) < valid_size:
                         state["status"] = "validation_pool_exhausted"
                         break
-                    forbidden = forbidden_validation + [
-                        s for s in samples if effective_domain(s) in final
-                    ]
-                    optimizer_traces = await self._optimizer_traces(
-                        state,
-                        batch,
-                        forbidden,
-                        save,
-                        progress=progress,
-                        task=task,
+                    forbidden = (
+                        independent
+                        + forbidden_validation
+                        + [s for s in samples if effective_domain(s) in final]
                     )
+                    try:
+                        optimizer_traces = await self._optimizer_traces(
+                            state, batch, forbidden, save, progress=progress, task=task
+                        )
+                    except GeneratorContextFailure as exc:
+                        state["status"] = "generator_context_failure"
+                        state["generator_context_error"] = str(exc)
+                        break
+                    except InferenceIncomplete:
+                        state["status"] = "challenge_runtime_failure"
+                        break
                     optimizer_packages = [
                         p
                         for p in self.base.packages
@@ -319,13 +534,19 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         raise ValueError(
                             "optimizer Package must resolve to exactly one META Package"
                         )
+                    backend = self.base._optimizer_backend()
+                    if memory_policy.enabled:
+                        backend = ManagedOptimizerBackend(
+                            backend, memory_policy, state, save, budget=budget, forbidden=forbidden
+                        )
                     optimizer = PackageOptimizerAgent(
-                        backend=self.base._optimizer_backend(),
+                        backend=backend,
                         optimizer_package=optimizer_packages[0],
                         config=self.config.evolution,
-                        budget_manager=budget,
+                        budget_manager=None if memory_policy.enabled else budget,
                     )
-                    state["attempt"] += 1
+                    if not (memory_policy.enabled and state.get("optimizer_request")):
+                        state["attempt"] += 1
                     save()
                     # Most recent rejected attempt gets context priority over older feedback.
                     optimized = await optimizer.propose(
@@ -334,7 +555,21 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         traces=optimizer_traces,
                         feedback=list(reversed(state["feedback"])) or None,
                         prior_proposals=self._proposal_history(state),
+                        feedback_enabled=True,
                     )
+                    if memory_policy.enabled:
+                        request = state.get("optimizer_request")
+                        if optimized.reason == "call:OptimizerContextFailure":
+                            state["status"] = "optimizer_context_failure"
+                            save()
+                            break
+                        if request:
+                            request["outcome"] = {
+                                "status": optimized.status,
+                                "reason": optimized.reason,
+                            }
+                            state.setdefault("optimizer_requests", []).append(request)
+                            state.pop("optimizer_request", None)
                     candidate = optimized.candidate
                     if candidate is None or (
                         candidate.base is None and not self.config.evolution.discovery
@@ -347,6 +582,8 @@ class MetaBatchRunner(MetaEvolutionRunner):
                                 "reason": optimized.reason,
                             }
                         )
+                        if memory_policy.enabled:
+                            remember(state, state["attempts"][-1], training=state["train_traces"])
                         save()
                         continue
                     if candidate.base is not None and self.config.evolution.scope == "instructions":
@@ -374,9 +611,11 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         cluster_id=task,
                         source_trace_ids=tuple(t["trace_id"] for t in optimizer_traces),
                     )
-                    forbidden = forbidden_validation + [
-                        s for s in samples if effective_domain(s) in final
-                    ]
+                    forbidden = (
+                        independent
+                        + forbidden_validation
+                        + [s for s in samples if effective_domain(s) in final]
+                    )
                     validate_generation_request(asdict(proposal), forbidden)
                     start = state["validation_cursor"]
                     state["pending"] = {
@@ -412,6 +651,14 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     ("candidate", candidate_skills),
                 ):
                     if pending[role] is None:
+                        if policy.enabled:
+                            clean = await self._clean_validation(
+                                pending, role, rows, skills, save, progress=progress, task=task
+                            )
+                            if not clean:
+                                state["status"] = "validation_runtime_failure"
+                                break
+                            continue
                         traces, result = await self.base.run(
                             rows,
                             skills=skills,
@@ -425,12 +672,58 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             "result": _json(asdict(result)),
                         }
                         save()
+                if state["status"] == "validation_runtime_failure":
+                    break
                 decision = ValidationGate(self.config.gate).decide(
                     _evaluation_from(pending["baseline"]["result"]),
                     _evaluation_from(pending["candidate"]["result"]),
                     StatisticalTestResult("not_used_for_promotion", 0, 1, False),
                     safety=pending["safety"],
                 )
+                if policy.enabled and decision.accepted:
+                    guard_rows = independent_rows(
+                        independent,
+                        batch,
+                        cross_domain=match_evolve_training,
+                        per_domain=policy.evaluation_samples_per_domain,
+                        registry=self.base.label_contract_registry,
+                        seed=self.config.seed + pending["validation_start"],
+                    )
+                    pending.setdefault("independent_sample_ids", [s.sample_id for s in guard_rows])
+                    by_id = {s.sample_id: s for s in independent}
+                    guard_rows = [by_id[sid] for sid in pending["independent_sample_ids"]]
+                    for role, skills in (
+                        ("independent_baseline", self.base.skills),
+                        ("independent_candidate", candidate_skills),
+                    ):
+                        if pending.get(role) is None:
+                            clean = await self._clean_validation(
+                                pending,
+                                role,
+                                guard_rows,
+                                skills,
+                                save,
+                                progress=progress,
+                                task=task,
+                            )
+                            if not clean:
+                                state["status"] = "validation_runtime_failure"
+                                break
+                    if state["status"] == "validation_runtime_failure":
+                        break
+                    failures = guard_failures(
+                        _evaluation_from(pending["independent_baseline"]["result"]),
+                        _evaluation_from(pending["independent_candidate"]["result"]),
+                        policy,
+                    )
+                    if failures:
+                        decision = replace(
+                            decision,
+                            accepted=False,
+                            disposition="rejected",
+                            regression_failures=tuple(failures),
+                            reason="; ".join(failures),
+                        )
                 audit = {
                     "batch": index + 1,
                     "attempt": state["attempt"],
@@ -446,7 +739,19 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         else {}
                     ),
                 }
+                if policy.enabled:
+                    audit["runtime_failures"] = {
+                        k: v["failures"] for k, v in pending.items() if k.endswith("_progress")
+                    }
+                    if pending.get("independent_baseline"):
+                        audit["independent_validation"] = {
+                            "sample_ids": pending["independent_sample_ids"],
+                            "baseline": pending["independent_baseline"]["result"],
+                            "candidate": pending["independent_candidate"]["result"],
+                        }
                 state["attempts"].append(audit)
+                if memory_policy.enabled:
+                    remember(state, audit, pending=pending, training=state["train_traces"])
                 if not decision.accepted:
                     state["feedback"].append(
                         {
@@ -511,8 +816,20 @@ class MetaBatchRunner(MetaEvolutionRunner):
             ),
             "validation_samples_used": state["validation_cursor"],
             "attempts": state["attempts"],
+            "skipped_batches": state["skipped_batches"],
             "committed_snapshots": state["committed_snapshots"],
             "checkpoint": str(checkpoint),
             "mock_results": self.config.backend == "mock",
+            **(
+                {
+                    "optimizer_memory": {
+                        "records": len(state.get("optimizer_memories", [])),
+                        "requests": len(state.get("optimizer_requests", [])),
+                        "error": state.get("optimizer_context_error"),
+                    }
+                }
+                if memory_policy.enabled
+                else {}
+            ),
             **self._extra_outcome(state),
         }

@@ -1,0 +1,121 @@
+seed: 42
+
+output_dir: docs/weibo21_adversarial_knowledge_fold_2/adversarial-evolve
+skill_store: skills/store_weibo21_adversarial_knowledge_fold_2/adversarial-evolve
+
+data:
+  dataset: weibo21
+  root: datasets/Weibo21
+  evolution_validation_samples: 8
+  train_domains: ["财经商业", "教育考试", "文体娱乐", "医药健康", "灾难事故"]
+  final_test_domains: ["政治", "军事", "科技", "社会生活"]
+  excluded_domains: ["无法确定"]
+  train_sampling: balanced_by_domain
+  final_test_samples_per_domain: 100
+  static_test_pattern: outputs/static-100-before-pr-review/{dataset}-test-{domain}-100.json
+  require_static_test: true
+
+backend: openai-compatible
+model: deepseek-flash
+base_url: https://api.deepseek.com/v1
+api_key_env: DEEPSEEK_API_KEY
+routing_strategy: llm
+max_skills_per_item: 3
+
+optimizer_backend:
+  enabled: true
+  backend: openai-compatible
+  model_env: EVOFACT_OPTIMIZER_MODEL
+  base_url_env: EVOFACT_OPTIMIZER_BASE_URL
+  api_key_env: EVOFACT_OPTIMIZER_API_KEY
+  provider: deepseek
+  pricing_table_path_env: EVOFACT_OPTIMIZER_PRICING_TABLE
+  temperature: 1.0
+
+pricing:
+  provider: deepseek
+  table_path: pricing/deepseek-2026-09-18-peak.json
+  require_cost_for_promotion: true
+
+budget:
+  max_calls_per_sample: 8
+  max_cost_per_sample: 1.0
+
+  max_calls_per_run: 50000
+  max_cost_per_run: 100.0
+
+  max_sample_concurrency: 4
+  max_global_concurrency: 8
+
+  judge_reserved_calls: 1
+  judge_reserved_tokens: 4000
+  judge_reserved_cost: 0.10
+
+dag:
+  max_nodes: 8
+  max_depth: 4
+  node_timeout_ms: 180000
+  sample_timeout_ms: 600000
+
+execution:
+  batch_size: 16
+  max_concurrent_samples: 16
+  progress: auto
+  trace_log: docs/weibo21_adversarial_knowledge_fold_2/adversarial-evolve/training-traces.jsonl
+
+evolution:
+  enabled: true
+  proposer: llm
+  scope: package
+  discovery: true
+  fallback_to_rule: true
+  optimizer_skill: skill_optimizer
+  max_reports: 12
+  max_skills: 12
+  max_text_chars: 8000
+  max_instructions_chars: 60000
+  max_total_chars: 300000
+  update_interval_samples: 25
+  max_proposals_per_update: 1
+  max_attribution_samples_per_update: 8
+  max_counterfactuals_per_sample: 1
+
+gate:
+  repeats: 1
+  min_macro_f1_gain: 0.01
+  min_coverage: 0.8
+  max_protected_domain_drop: 0.02
+  alpha: 0.05
+  max_cost_ratio: 1.5
+
+meta_learning:
+  enabled: true
+  strategy: leave_one_domain_out
+  episodes: 5
+  meta_test_domain_count: 1
+  min_source_domains: 3
+  min_valid_episodes: 3
+  min_mean_gain: 0.0
+  max_negative_transfer_rate: 0.25
+  max_worst_domain_drop: 0.02
+  min_coverage: 0.8
+  max_cost_ratio: 1.5
+  max_calibration_increase: 0.05
+  confidence_level: 0.95
+  allow_specialization: true
+  aggregate_across_episodes: true
+  enforce_negative_transfer: true
+  enforce_worst_domain: true
+  evaluation_repeats: 1
+  max_meta_test_samples_per_domain: 50
+  isolate_candidate_budget: true
+  checkpoint_path: docs/weibo21_adversarial_knowledge_fold_2/adversarial-evolve/train-checkpoint.json
+
+generation:
+  enabled: true
+  proposer: llm
+  use_generated_in_training: true
+  batch_size: 4
+  max_trace_examples: 16
+  max_text_chars: 6000
+  store_path: docs/weibo21_adversarial_knowledge_fold_2/adversarial-evolve/generation-audit.json

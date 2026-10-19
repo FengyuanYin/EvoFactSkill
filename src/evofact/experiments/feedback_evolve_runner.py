@@ -28,6 +28,7 @@ class FeedbackEvolveRunner(MetaBatchRunner):
         super().__init__(config, project_root, repository)
         self.provenance = provenance or {}
         self.validation_samples = []
+        self.independent_validation_samples = []
 
     def _check_enabled(self):
         if not self.config.evolution.enabled:
@@ -38,6 +39,15 @@ class FeedbackEvolveRunner(MetaBatchRunner):
             "provenance": self.provenance,
             "model_identity": self.base.model_identity(),
             "validation_data": data_fingerprint(self.validation_samples),
+            **(
+                {
+                    "independent_validation_data": data_fingerprint(
+                        self.independent_validation_samples
+                    )
+                }
+                if self.config.independent_validation.enabled
+                else {}
+            ),
         }
 
     def _prepare_plan(self, samples, **kwargs):
@@ -65,18 +75,35 @@ class FeedbackEvolveRunner(MetaBatchRunner):
         return source, (), train, valid, batches, (), None
 
     def _proposal_history(self, state):
-        attempts = [a for a in state["attempts"] if "decision" in a]
-        return proposal_history(
-            self.base.packages,
-            [a["proposal"] for a in attempts],
-            [a["decision"] for a in attempts],
-        )
+        history = []
+        for attempt in state["attempts"]:
+            if "decision" in attempt:
+                history.extend(
+                    proposal_history(
+                        self.base.packages, [attempt["proposal"]], [attempt["decision"]]
+                    )
+                )
+            else:
+                history.append(
+                    {
+                        "batch": attempt["batch"],
+                        "attempt": attempt["attempt"],
+                        "status": attempt["status"],
+                        "reason": attempt.get("reason", ""),
+                    }
+                )
+        return tuple(history[-12:])
 
     def _after_save(self, checkpoint):
         write_validation_curve(checkpoint, self.root / self.config.output_dir)
 
-    async def run(self, samples, validation_samples, **kwargs):
+    async def run(
+        self, samples, validation_samples, *, independent_validation_samples=None, **kwargs
+    ):
         self.validation_samples = list(validation_samples)
+        self.independent_validation_samples = list(
+            independent_validation_samples or validation_samples
+        )
         outcome = await super().run(samples, **kwargs)
         judged = [a for a in outcome["attempts"] if "decision" in a]
         outcome.update(
@@ -154,6 +181,11 @@ async def run_cli(args, config, root, manifest, select, progress, data_sampling)
         outcome = await runner.run(
             train,
             validation,
+            independent_validation_samples=(
+                select(manifest.evolution_validation_ids + manifest.protected_validation_ids)
+                if effective_config.independent_validation.enabled and manifest
+                else None
+            ),
             max_attempts_per_batch=args.max_attempts_per_batch,
             resume=args.resume,
             evaluation_only=args.evaluation_only,

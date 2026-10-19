@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -23,8 +22,8 @@ def _redacted(key: object) -> bool:
 
 
 def _clip(text: object, limit: int) -> str:
-    value = str(text)
-    return value if len(value) <= limit else value[: max(limit - 3, 0)] + "..."
+    # Keep the legacy argument for callers; optimizer text is no longer truncated.
+    return str(text)
 
 
 def _sanitize(value: Any, *, max_text_chars: int) -> Any:
@@ -46,7 +45,7 @@ def _sanitize(value: Any, *, max_text_chars: int) -> Any:
     if isinstance(value, str):
         if Path(value).is_absolute():
             return "<redacted-path>"
-        return value[:max_text_chars]
+        return value
     return value
 
 
@@ -98,10 +97,6 @@ def _trace_view(trace: Any, *, max_text_chars: int) -> dict[str, Any]:
     }
 
 
-def _context_chars(context: dict[str, Any]) -> int:
-    return len(json.dumps(context, ensure_ascii=False, default=str))
-
-
 def build_optimizer_context(
     *,
     target,
@@ -115,7 +110,7 @@ def build_optimizer_context(
     max_text_chars: int = 8000,
     max_total_chars: int = 300000,
 ) -> dict[str, Any]:
-    """Build the optimizer prompt payload: the target package plus the evidence for it."""
+    """Build sanitized context without character caps; max_*_chars are legacy arguments."""
     context: dict[str, Any] = {
         "target": _sanitize(target, max_text_chars=max_text_chars),
         "reports": _sanitize(tuple(reports)[:max_reports], max_text_chars=max_text_chars),
@@ -133,21 +128,6 @@ def build_optimizer_context(
     if audits:
         context["generation_audits"] = _sanitize(tuple(audits)[:50], max_text_chars=max_text_chars)
 
-    # Drop the least load-bearing evidence first; the target Package is never trimmed.
-    while _context_chars(context) > max_total_chars:
-        if context["traces"]:
-            context["traces"].pop()
-        elif context["reports"]:
-            context["reports"].pop()
-        elif context.get("prior_proposals"):
-            context["prior_proposals"].pop()
-        elif context.get("generation_audits"):
-            context.pop("generation_audits")
-        elif context.get("distillation"):
-            context.pop("distillation")
-        else:
-            raise ValueError("optimizer context cannot fit max_total_chars")
-
     return context
 
 
@@ -160,8 +140,12 @@ def build_skillbank_optimizer_context(
     max_total_chars=300000,
     feedback=None,
     prior_proposals=(),
+    feedback_enabled=False,
 ):
-    """Supply training traces and the current bank without precomputed diagnoses."""
+    """Supply sanitized bank/traces/feedback without character truncation or pruning.
+
+    max_*_chars remain accepted for existing configurations and callers.
+    """
     skills = []
     for package in packages:
         view = asdict(package)
@@ -175,8 +159,10 @@ def build_skillbank_optimizer_context(
         "skills": skills,
         "traces": [_sanitize(trace, max_text_chars=max_text_chars) for trace in traces],
     }
+    if feedback_enabled:
+        context["feedback_enabled"] = True
     if prior_proposals:
-        # Newest first, so context trimming preserves the most recent decisions.
+        # Retain the existing history count and newest-first presentation.
         context["prior_proposals"] = _sanitize(
             list(reversed(tuple(prior_proposals)[-12:])), max_text_chars=max_text_chars
         )
@@ -187,24 +173,6 @@ def build_skillbank_optimizer_context(
         for key in list(public):
             if str(key).casefold() in PREDICTION_KEYS:
                 public.pop(key)
-    if feedback is not None:
-        # Keep the latest failed attempt; prune older feedback first.
-        while _context_chars(context) > max_total_chars and len(context["validation_feedback"]) > 1:
-            context["validation_feedback"].pop()
-        if context["validation_feedback"]:
-            latest = context["validation_feedback"][0]
-            while _context_chars(context) > max_total_chars:
-                groups = [latest.get("baseline_traces", []), latest.get("candidate_traces", [])]
-                group = max(groups, key=len)
-                if len(group) <= 1:
-                    break
-                group.pop()
-    while _context_chars(context) > max_total_chars and len(context["traces"]) > 1:
-        context["traces"].pop()
-    while _context_chars(context) > max_total_chars and context.get("prior_proposals"):
-        context["prior_proposals"].pop()
-    if _context_chars(context) > max_total_chars:
-        raise ValueError("current Skill bank and training trace cannot fit max_total_chars")
     return context
 
 

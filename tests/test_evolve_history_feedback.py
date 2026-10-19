@@ -56,7 +56,7 @@ def test_validation_history_reaches_next_optimizer_after_serialization(monkeypat
     assert "gold" not in json.dumps(contexts[1])
 
 
-def test_history_is_bounded_sanitized_and_keeps_latest_when_context_is_full():
+def test_history_keeps_count_bound_and_sanitization_without_character_pruning():
     histories = [
         {"proposal_id": str(i), "reason": "x" * 200, "gold": "FAKE", "api_key": "secret"}
         for i in range(20)
@@ -72,5 +72,4 @@ def test_history_is_bounded_sanitized_and_keeps_latest_when_context_is_full():
         prior_proposals=histories,
         max_total_chars=len(json.dumps(context, ensure_ascii=False)) - 300,
     )
-    assert 0 < len(reduced["prior_proposals"]) < 12
-    assert reduced["prior_proposals"][0]["proposal_id"] == "19"
+    assert reduced == context

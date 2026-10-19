@@ -146,8 +146,22 @@ def test_matched_routes_use_cross_domain_validation_and_allow_training_overlap(
         match_evolve_training=True,
     )
     if resume_after_failure:
-        stopped = asyncio.run(runner.run(rows, max_attempts_per_batch=1, **options))
-        assert stopped["status"] == "attempt_limit" and stopped["completed_batches"] == 0
+        original_save = runner._after_save
+        interrupted = False
+
+        def pause_after_rejection(checkpoint):
+            nonlocal interrupted
+            original_save(checkpoint)
+            import json
+
+            state = json.loads(checkpoint.read_text(encoding="utf-8"))
+            if state.get("feedback") and not state.get("pending") and not interrupted:
+                interrupted = True
+                raise RuntimeError("pause after rejection")
+
+        monkeypatch.setattr(runner, "_after_save", pause_after_rejection)
+        with pytest.raises(RuntimeError, match="pause after rejection"):
+            asyncio.run(runner.run(rows, max_attempts_per_batch=2, **options))
         result = asyncio.run(runner.run(rows, resume=True, max_attempts_per_batch=2, **options))
     else:
         result = asyncio.run(runner.run(rows, **options))

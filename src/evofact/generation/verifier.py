@@ -12,7 +12,7 @@ from evofact.data.label_registry import LabelContractRegistry, fixture_binary_co
 from evofact.runtime.backend import call_json_with_usage
 
 from .generator import json_value
-from .prompts import STRATEGIES, VERIFIER_SYSTEM
+from .prompts import KNOWLEDGE_VERIFIER_SYSTEM, STRATEGIES, VERIFIER_SYSTEM
 
 SAMPLE_FIELDS = set(Sample.__dataclass_fields__)
 DECISION_REQUIRED_FIELDS = {
@@ -47,6 +47,11 @@ def normalized(text):
 
 
 class ChallengeVerifier:
+    def __init__(self, *, mode="evidence"):
+        if mode not in {"evidence", "knowledge"}:
+            raise ValueError("unknown challenge verification mode")
+        self.mode = mode
+
     def validate(
         self,
         response,
@@ -148,7 +153,9 @@ class ChallengeVerifier:
                     raise ValueError("decision target_label does not match generated label")
                 if row["metadata"] != {}:
                     raise ValueError("invalid label or audit metadata leak")
-                if not row["evidence"] or any(not e["text"].strip() for e in row["evidence"]):
+                if self.mode == "evidence" and (
+                    not row["evidence"] or any(not e["text"].strip() for e in row["evidence"])
+                ):
                     raise ValueError("no source evidence for independent verification")
                 text = row["text"]
                 if (
@@ -195,6 +202,7 @@ class ChallengeVerifier:
         budget_manager=None,
         budget_sample_id="verifier",
         label_contract_registry: LabelContractRegistry | None = None,
+        construction_request=None,
     ):
         """函数作用：使用看不到生成标签的独立审核模型核对样本正文与证据是否一致。
         输入要求：`self` 应为已初始化的 `ChallengeVerifier` 实例；`samples`（未显式标注）需符合函数签名约定；`backend`（未显式标注）需符合函数签名约定。
@@ -204,6 +212,20 @@ class ChallengeVerifier:
         registry = label_contract_registry or LabelContractRegistry((fixture_binary_contract(),))
         # Blind review excludes generated labels, decisions and trace outcomes.
         payload_rows = []
+        construction_sources = {}
+        if self.mode == "knowledge":
+            if construction_request is None:
+                raise ValueError("knowledge verification requires source training context")
+            examples = {
+                e["source_sample"]["sample_id"]: e["source_sample"]
+                for e in construction_request["examples"]
+            }
+            sample_ids = {sample.sample_id for sample in samples}
+            construction_sources = {
+                d["sample_id"]: examples[d["source_sample_id"]]
+                for d in construction_request["decisions"]
+                if d["sample_id"] in sample_ids
+            }
         for sample in samples:
             row = {
                 "sample_id": sample.sample_id,
@@ -213,8 +235,15 @@ class ChallengeVerifier:
             contract = registry.resolve_sample(sample)
             if contract.dataset_id != "fixture":
                 row["label_contract"] = contract.prompt_view()
+            if self.mode == "knowledge":
+                source = construction_sources[sample.sample_id]
+                row["source_training_sample"] = {
+                    "text": source["text"],
+                    "gold_label": contract.normalize(source["label"]),
+                }
             payload_rows.append(row)
         payload = {"samples": payload_rows}
+        system = KNOWLEDGE_VERIFIER_SYSTEM if self.mode == "knowledge" else VERIFIER_SYSTEM
         reservation = None
         try:
             if budget_manager is not None:
@@ -224,15 +253,13 @@ class ChallengeVerifier:
                         BudgetRequest(calls=1, tokens=3000, purpose="frozen_verifier"),
                     )
                     response, usage = await asyncio.wait_for(
-                        call_json_with_usage(backend, VERIFIER_SYSTEM, json_value(payload)),
+                        call_json_with_usage(backend, system, json_value(payload)),
                         budget_manager.limits.call_timeout_ms / 1000,
                     )
                 await budget_manager.reconcile(reservation, usage)
                 reservation = None
             else:
-                response, usage = await call_json_with_usage(
-                    backend, VERIFIER_SYSTEM, json_value(payload)
-                )
+                response, usage = await call_json_with_usage(backend, system, json_value(payload))
         finally:
             if reservation is not None:
                 await budget_manager.release(reservation)
@@ -286,7 +313,7 @@ class ChallengeVerifier:
                 predicted,
                 status == VerificationStatus.CLASSIFIED and predicted == sample.label,
                 reason,
-                "frozen-verifier-v2",
+                "knowledge-verifier-v1" if self.mode == "knowledge" else "frozen-verifier-v2",
                 contract.digest,
             )
         if set(by_id) != {s.sample_id for s in samples}:
@@ -300,7 +327,11 @@ class ChallengeVerifier:
                 rejected.append(
                     {
                         "sample_id": sample.sample_id,
-                        "reason": "independent evidence verdict disagrees or is UNKNOWN",
+                        "reason": (
+                            "independent knowledge verdict disagrees or is UNKNOWN"
+                            if self.mode == "knowledge"
+                            else "independent evidence verdict disagrees or is UNKNOWN"
+                        ),
                         "review": review.model_dump(),
                     }
                 )

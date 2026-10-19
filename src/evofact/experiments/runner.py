@@ -33,7 +33,7 @@ from evofact.runtime.batching import ordered_batched_map
 from evofact.runtime.budget import BudgetExceeded, BudgetManager
 from evofact.runtime.inference import InferenceRuntime
 from evofact.runtime.mock_backend import MockBackend
-from evofact.runtime.openai_backend import OpenAICompatibleBackend
+from evofact.runtime.openai_backend import BackendHTTPError, OpenAICompatibleBackend
 from evofact.runtime.progress import ProgressEvent, ProgressSink
 from evofact.runtime.trace_store import TraceStore
 from evofact.security.scanner import scan_resources
@@ -381,6 +381,8 @@ class ExperimentRunner:
         on_sample_complete=None,
         on_sample_error=None,
         sample_retries: int = 0,
+        strict_runtime_failures: bool = False,
+        on_runtime_failure=None,
     ):
         """函数作用：执行当前对象负责的主运行流程，并汇总本轮结果。
         输入要求：`self` 应为已初始化的 `ExperimentRunner` 实例；`samples`（list[Sample] | None，默认 `None`）需符合函数签名约定；`strategy`（str，默认 `'utility-aware'`）需符合函数签名约定；`skills`（未显式标注，默认 `None`）需符合函数签名约定。
@@ -444,6 +446,12 @@ class ExperimentRunner:
                             else None
                         ),
                     )
+                    if strict_runtime_failures and (
+                        trace.decision.origin == DecisionOrigin.RUNTIME or trace.errors
+                    ):
+                        failure = OSError("Validation inference ended in runtime abstention")
+                        failure.trace = trace
+                        raise failure
                     if on_sample_error is not None and retryable_runtime_failure(trace):
                         failure = TimeoutError(
                             "Inference returned a runtime abstention after a request failure"
@@ -454,7 +462,13 @@ class ExperimentRunner:
                 except BudgetExceeded as exc:
                     trace = _budget_abstention_trace(sample, skill_snapshot, str(exc), contract)
                     break
-                except (TimeoutError, OSError) as exc:
+                except (TimeoutError, OSError, BackendHTTPError, ValueError) as exc:
+                    if not strict_runtime_failures and not isinstance(exc, (TimeoutError, OSError)):
+                        raise
+                    if strict_runtime_failures and on_runtime_failure is not None:
+                        notified = on_runtime_failure(sample, exc, attempt + 1)
+                        if inspect.isawaitable(notified):
+                            await notified
                     if attempt < sample_retries:
                         continue
                     if on_sample_error is None:

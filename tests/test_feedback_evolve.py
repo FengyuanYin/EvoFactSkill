@@ -71,6 +71,7 @@ def test_feedback_retry_fresh_validation_and_cross_batch_history(tmp_path, monke
     assert outcome["status"] == "completed"
     assert outcome["completed_batches"] == 2
     assert len(contexts) == 3
+    assert all(context["feedback_enabled"] is True for context in contexts)
     feedback = contexts[1]["validation_feedback"][0]
     assert feedback["gate"]["accepted"] is False
     assert feedback["baseline_traces"] and feedback["candidate_traces"]
@@ -86,13 +87,73 @@ def test_feedback_retry_fresh_validation_and_cross_batch_history(tmp_path, monke
     assert (tmp_path / "output/validation-curve.csv").read_text().count("package-") == 3
 
 
-def test_attempt_limit_checkpoint_resume_keeps_feedback_and_cached_train(tmp_path, monkeypatch):
+def test_attempt_limit_advances_without_promotion_and_resume_does_not_repeat(tmp_path, monkeypatch):
     runner, train, valid, contexts, calls = setup(tmp_path, monkeypatch)
     first = invoke(runner, train, valid, max_attempts_per_batch=1)
-    assert first["status"] == "attempt_limit" and first["completed_batches"] == 0
+    assert first["status"] == "completed" and first["completed_batches"] == 2
+    assert [b["batch"] for b in first["skipped_batches"]] == [1]
+    assert first["skipped_batches"][0]["reason"] == "attempt_limit"
     second = invoke(runner, train, valid, max_attempts_per_batch=3, resume=True)
     assert second["status"] == "completed"
-    assert contexts[1]["validation_feedback"]
+    assert not contexts[1].get("validation_feedback")
+    assert len(contexts) == 2
+    assert contexts[0]["skills"] == contexts[1]["skills"]
+    assert len([c for c in calls if c[0] == "train inference"]) == 2
+
+
+def test_no_change_rationale_is_saved_and_sent_to_next_attempt(tmp_path, monkeypatch):
+    from evofact.runtime.backend import BackendResult
+
+    runner, train, valid, contexts, _ = setup(tmp_path, monkeypatch)
+    original_bank = [p.package_digest for p in runner.base.packages]
+
+    class NoChange(EditingOptimizerBackend):
+        async def optimize_package(self, context, skill):
+            contexts.append(context)
+            return BackendResult(
+                {
+                    "action": "no_change",
+                    "rationale": "Routing and reports show no supported defect.",
+                }
+            )
+
+    monkeypatch.setattr(runner.base, "_optimizer_backend", NoChange)
+    result = invoke(runner, train, valid, max_attempts_per_batch=2)
+    assert result["status"] == "completed"
+    assert [b["batch"] for b in result["skipped_batches"]] == [1, 2]
+    assert len(contexts) == 4
+    assert [p.package_digest for p in runner.base.packages] == original_bank
+    assert result["attempts"][0]["reason"] == "Routing and reports show no supported defect."
+    prior = contexts[1]["prior_proposals"][0]
+    assert prior["status"] == "no_change"
+    assert prior["reason"] == result["attempts"][0]["reason"]
+
+
+def test_resume_old_attempt_limit_checkpoint_skips_exhausted_batch(tmp_path, monkeypatch):
+    runner, train, valid, contexts, calls = setup(tmp_path, monkeypatch)
+    original = runner._after_save
+    interrupted = False
+
+    def save(checkpoint):
+        nonlocal interrupted
+        original(checkpoint)
+        state = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if state.get("feedback") and not state.get("pending") and not interrupted:
+            interrupted = True
+            raise RuntimeError("pause after rejection")
+
+    monkeypatch.setattr(runner, "_after_save", save)
+    with pytest.raises(RuntimeError, match="pause after rejection"):
+        invoke(runner, train, valid, max_attempts_per_batch=1)
+    checkpoint = tmp_path / "checkpoint.json"
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    state["status"] = "attempt_limit"
+    state.pop("skipped_batches", None)
+    checkpoint.write_text(json.dumps(state), encoding="utf-8")
+    outcome = invoke(runner, train, valid, resume=True, max_attempts_per_batch=1)
+    assert outcome["status"] == "completed"
+    assert [b["batch"] for b in outcome["skipped_batches"]] == [1]
+    assert len(contexts) == 2
     assert len([c for c in calls if c[0] == "train inference"]) == 2
 
 

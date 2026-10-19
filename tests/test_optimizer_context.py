@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,10 @@ import pytest
 from evofact.config import EvolutionConfig
 from evofact.core.models import AttributionReport, ErrorType, EvolutionOperation, EvolutionProposal
 from evofact.core.package_models import SkillPackage
-from evofact.evolution.optimizer_context import build_optimizer_context
+from evofact.evolution.optimizer_context import (
+    build_optimizer_context,
+    build_skillbank_optimizer_context,
+)
 from evofact.evolution.package_optimizer import PackageOptimizerAgent
 from evofact.experiments.runner import (
     ExperimentRunner,
@@ -114,15 +118,79 @@ def test_context_carries_distillation_and_prior_proposals() -> None:
     assert "generation_audits" not in context
 
 
-def test_context_trims_evidence_to_fit_the_total_budget() -> None:
+def test_context_preserves_text_and_evidence_despite_legacy_character_limits() -> None:
     package = load_package(PROJECT_ROOT / "skills" / "seeds" / "source_credibility")
-    traces = [_trace(trace_id=f"t{index}") for index in range(12)]
-    full = build_optimizer_context(target=package, traces=traces)
-    trimmed = build_optimizer_context(target=package, traces=traces, max_total_chars=5000)
+    text = "long claim " * 10000
+    traces = [_trace(trace_id=f"t{index}", sample_public={"text": text}) for index in range(12)]
+    context = build_optimizer_context(
+        target=package,
+        traces=traces,
+        reports=[_report(evidence=(text,))],
+        distillation={"lessons": [text]},
+        prior_proposals=[{"rationale": text}],
+        audits=[{"reason": text}],
+        max_text_chars=8,
+        max_total_chars=5000,
+    )
+    assert len(context["traces"]) == 12
+    assert all(t["sample"]["text"] == text for t in context["traces"])
+    assert context["reports"][0]["evidence"] == [text]
+    assert context["distillation"]["lessons"] == [text]
+    assert context["prior_proposals"][0]["rationale"] == text
+    assert context["generation_audits"][0]["reason"] == text
 
-    assert len(full["traces"]) == 12
-    assert len(trimmed["traces"]) < 12
-    assert len(json.dumps(trimmed, ensure_ascii=False)) <= 5000
+
+def test_bank_context_preserves_large_skills_traces_and_all_batch_feedback() -> None:
+    package = load_package(PROJECT_ROOT / "skills" / "seeds" / "source_credibility")
+    instructions = "complete skill instructions " * 3000
+    package = replace(
+        package,
+        package_digest="",
+        files=tuple(
+            replace(
+                f,
+                content=instructions.encode(),
+                digest=hashlib.sha256(instructions.encode()).hexdigest(),
+            )
+            if f.path == "SKILL.md"
+            else f
+            for f in package.files
+        ),
+    )
+    text = "complete training reasoning " * 4000
+    trace = {
+        "sample_public": {"text": text, "label": "FAKE", "gold": "FAKE"},
+        "decision": {"label": "REAL", "rationale": text},
+    }
+    feedback = [
+        {"baseline_traces": [trace] * 3, "candidate_traces": [trace] * 3, "reason": text}
+        for _ in range(3)
+    ]
+    context = build_skillbank_optimizer_context(
+        packages=[package],
+        traces=[trace] * 4,
+        feedback=feedback,
+        prior_proposals=[{"rationale": text}] * 3,
+        feedback_enabled=True,
+        max_text_chars=8,
+        max_instructions_chars=8,
+        max_total_chars=8,
+    )
+    assert len(json.dumps(context)) > 300000
+    assert (
+        next(f for f in context["skills"][0]["files"] if f["path"] == "SKILL.md")["content"]
+        == instructions
+    )
+    assert len(context["traces"]) == 4
+    assert all(t["sample_public"] == {"text": text} for t in context["traces"])
+    assert context["traces"][0]["decision"]["label"] == "REAL"
+    assert len(context["validation_feedback"]) == 3
+    assert all(
+        len(f[role]) == 3
+        for f in context["validation_feedback"]
+        for role in ("baseline_traces", "candidate_traces")
+    )
+    assert len(context["prior_proposals"]) == 3
 
 
 def test_target_ranking_prefers_the_measured_culprit() -> None:
