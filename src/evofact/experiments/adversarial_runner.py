@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from evofact.attribution.rules import attribute_trace
+from evofact.config import config_identity
 from evofact.core.budget_models import CostStatus, UsageDetails
 from evofact.core.generation_models import (
     GeneratedSample,
@@ -154,7 +155,7 @@ class AdversarialEvolutionRunner(MetaEvolutionRunner):
         return fingerprint(
             {
                 "schema": "generation_workflow_v4",
-                "config": asdict(self.config),
+                "config": config_identity(self.config),
                 "generator_package_digest": self.generator_package.package_digest,
                 "verifier_system": VERIFIER_SYSTEM,
                 "facts": sorted((asdict(f) for f in self.facts), key=lambda f: f["fact_id"]),

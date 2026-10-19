@@ -121,7 +121,8 @@ flowchart TD
     G -->|rejected| T["Accumulate baseline and rejected candidate traces"]
     T --> O
     T --> V
-    T --> L["Stop and checkpoint on retry or pool limit"]
+    T --> N["Retry limit: keep bank; advance to next batch"]
+    T --> L["Pool exhausted: stop and checkpoint"]
     U -. Separate test command .-> F["Evaluate final-test domains"]
 ```
 
@@ -309,7 +310,7 @@ meta_learning:
   checkpoint_path: outputs/meta-experiment/checkpoint.json
 ```
 
-Batch meta/adversarial commands use the same manifest training split and balanced `--limit` selection as ordinary evolve, then regroup the selected IDs into mixed-domain batches. Every batch includes at least two source domains and leaves at least one source domain absent for cross-domain validation. Each validation chunk comes from other source domains than the current batch; samples used for training remain eligible for validation. Final-test domains are excluded. Omit `--validation-domains`; a global held-out source domain would change the training quotas. Each attempt uses IDs not previously consumed for validation. Retry limit (default 5), pool exhaustion, or budget failure stops at the current batch and preserves its checkpoint. Increase `--max-attempts-per-batch` when resuming after a retry limit. `training_sampling` records IDs, quotas, and batches. With 200 samples and batch size 16, both folds form 13 batches (12 of 16 and one of 8), matching ordinary evolve in batch sizes and count. Fold 1 batches contain 2-3 source domains; Fold 2 batches contain 2-4. Batch composition and order differ from ordinary evolve to reserve cross-domain validation domains. Use a separate store/checkpoint for the new layout; global-heldout and legacy episodic checkpoints are incompatible. Context limits may trim older feedback; validation budgets remain isolated and run-level usage accumulates.
+Batch meta/adversarial commands use the same manifest training split and balanced `--limit` selection as ordinary evolve, then regroup the selected IDs into mixed-domain batches. Every batch includes at least two source domains and leaves at least one source domain absent for cross-domain validation. Each validation chunk comes from other source domains than the current batch; samples used for training remain eligible for validation. Final-test domains are excluded. Omit `--validation-domains`; a global held-out source domain would change the training quotas. Each attempt uses IDs not previously consumed for validation. At the retry limit (default 5), keep the current bank, record the batch in `skipped_batches`, and continue to the next batch. Pool exhaustion or budget failure still stops and preserves the checkpoint. Legacy `attempt_limit` checkpoints resume by advancing the exhausted batch without increasing the limit. `training_sampling` records IDs, quotas, and batches. With 200 samples and batch size 16, both folds form 13 batches (12 of 16 and one of 8), matching ordinary evolve in batch sizes and count. Fold 1 batches contain 2-3 source domains; Fold 2 batches contain 2-4. Batch composition and order differ from ordinary evolve to reserve cross-domain validation domains. Use a separate store/checkpoint for the new layout; global-heldout and legacy episodic checkpoints are incompatible. Context limits may trim older feedback; validation budgets remain isolated and run-level usage accumulates.
 
 Windows two-fold training, final-test, and resume commands: [ordinary evolve](docs/普通evolve实验启动教程-Windows.md), [meta-evolve](docs/meta-evolve实验启动教程-Windows.md), and [adversarial-evolve](docs/adversarial-evolve实验启动教程-Windows.md).
 
@@ -502,6 +503,8 @@ Generated examples must preserve source lineage and pass the generation audit. T
 4. Keep meta-test, protected validation, and final-test real-only.
 
 For the batch route, `generation.batch_size` caps each initial/supplementary response, `execution.batch_size` controls real training batches, and `data.evolution_validation_samples` controls each fresh validation chunk. No rule attribution, clustering, or counterfactual analysis is used. Generator responses, verification results, and challenge traces are checkpointed independently, with shared run-budget accounting. Batch audits use `adversarial_batch_audit_v1`; legacy generator-evolution entry audits retain their existing format.
+
+`adversarial-evolve` uses `endogenous-knowledge-v1`: challenges are constructed from labeled training examples, traces, and model knowledge; external evidence is optional. A separate review call sees the source text and gold label, but not the generated target label or rationale. It uses model knowledge to classify the challenge; disagreement or uncertainty rejects the sample. This is model-based label checking, not external fact verification. The generation policy is part of checkpoint identity, so evidence-only checkpoints require a separate new run. The Weibo21 tutorial uses isolated `weibo21_adversarial_knowledge_fold_*` configs and stores. Legacy generation and generator-evolution workflows retain their evidence-based verifier.
 
 ### Reports
 

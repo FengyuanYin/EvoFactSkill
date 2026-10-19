@@ -363,6 +363,10 @@ async def _run_impl(args, progress):
 
     training_commands = {"evolve", "feedback-evolve", "meta-evolve", "adversarial-evolve"}
     selected_route = args.command if args.command in training_commands else args.evolution_route
+    if args.command == "evolve" and config.independent_validation.enabled:
+        raise ValueError(
+            "independent validation is supported by feedback-evolve, meta-evolve and adversarial-evolve; ordinary evolve is unchanged"
+        )
     if args.command in training_commands and args.evolution_route not in {None, args.command}:
         raise ValueError("training command and --evolution-route must match")
     if selected_route:
@@ -1324,6 +1328,14 @@ async def _run(args):
                     and result.get("status") in {"incomplete", "interrupted"}
                 )
                 or (result.get("mode") == "feedback-evolve" and result.get("status") != "completed")
+                or result.get("status")
+                in {
+                    "training_runtime_failure",
+                    "validation_runtime_failure",
+                    "challenge_runtime_failure",
+                    "optimizer_context_failure",
+                    "generator_context_failure",
+                }
             )
         )
         return result
@@ -1352,12 +1364,28 @@ def main(argv=None):
     # `data manifest` 已按 manifest 文本自行写盘，这里保持其原有的写文件 + 打印行为。
     if output and args.command != "data":
         _emit(value, output=output)
+        if isinstance(value, dict) and value.get("status") in {
+            "training_runtime_failure",
+            "validation_runtime_failure",
+            "challenge_runtime_failure",
+            "optimizer_context_failure",
+            "generator_context_failure",
+        }:
+            raise SystemExit(2)
         if args.command == "feedback-evolve" and value.get("status") != "completed":
             raise SystemExit(2)
         if args.command == "test" and value.get("status") == "incomplete":
             raise SystemExit(2)
         return
     _emit(value)
+    if isinstance(value, dict) and value.get("status") in {
+        "training_runtime_failure",
+        "validation_runtime_failure",
+        "challenge_runtime_failure",
+        "optimizer_context_failure",
+        "generator_context_failure",
+    }:
+        raise SystemExit(2)
     if args.command == "feedback-evolve" and value.get("status") != "completed":
         raise SystemExit(2)
     if args.command == "test" and value.get("status") == "incomplete":

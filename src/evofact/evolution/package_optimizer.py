@@ -426,6 +426,7 @@ class PackageOptimizerAgent:
         distillation=None,
         prior_proposals=(),
         feedback=None,
+        feedback_enabled=False,
     ) -> OptimizerOutcome:
         packages = tuple(packages)
         bank_mode = target is None
@@ -447,6 +448,7 @@ class PackageOptimizerAgent:
                     max_total_chars=self.config.max_total_chars,
                     feedback=feedback,
                     prior_proposals=prior_proposals,
+                    feedback_enabled=feedback_enabled,
                 )
                 if bank_mode
                 else build_optimizer_context(
@@ -484,7 +486,9 @@ class PackageOptimizerAgent:
                     result = await self.backend.optimize_package(context, self.optimizer_skill)
             except Exception as exc:
                 # One flaky optimizer call must not abort a multi-batch run.
-                LOGGER.warning("Optimizer call failed for %s: %s", target_id, exc)
+                LOGGER.warning(
+                    "Optimizer call failed for %s (%s): %s", target_id, type(exc).__name__, exc
+                )
                 return failed(f"call:{type(exc).__name__}")
             if reservation is not None:
                 await self.budget_manager.reconcile(reservation, _usage_details(result))
@@ -493,7 +497,9 @@ class PackageOptimizerAgent:
                 proposal = parse_package_optimizer_response(result.value, tuple(packages))
                 if proposal is None:
                     self.skips["no_change"] += 1
-                    return OptimizerOutcome("no_change")
+                    return OptimizerOutcome(
+                        "no_change", reason=str(result.value.get("rationale") or "")[:2000]
+                    )
                 if isinstance(proposal, SkillPackageAddition):
                     return OptimizerOutcome(
                         "candidate", candidate=build_package_addition_candidate(proposal)

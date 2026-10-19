@@ -98,6 +98,7 @@ class GenerationWorkflow:
         forbidden=(),
         request=None,
         system_addendum="",
+        request_executor=None,
     ):
         request = (
             request
@@ -151,7 +152,14 @@ class GenerationWorkflow:
             )
         reservation = None
         try:
-            if budget_manager is not None:
+            if request_executor is not None:
+                response, usage, effective = await request_executor(system, payload)
+                request = {
+                    k: v
+                    for k, v in effective.items()
+                    if k not in {"workflow_references", "workflow_template"}
+                }
+            elif budget_manager is not None:
                 async with budget_manager.concurrency(episode_id):
                     reservation = await budget_manager.reserve(
                         episode_id,

@@ -121,7 +121,8 @@ flowchart TD
     G -->|失败| T["累积基线与失败候选的验证 trace"]
     T --> O
     T --> V
-    T --> L["达到重试或样本池上限：保存并停止"]
+    T --> N["达到尝试上限：保留技能库，进入下一批"]
+    T --> L["验证样本池耗尽：保存并停止"]
     U -. 独立 test 命令 .-> F["评估最终测试领域"]
 ```
 
@@ -309,7 +310,7 @@ meta_learning:
   checkpoint_path: outputs/meta-experiment/checkpoint.json
 ```
 
-Meta/adversarial 批训练使用普通 evolve 的同一 manifest 训练分区和 `--limit` 均衡抽样，再把相同样本混域分批。每批至少包含两个源领域，并留出至少一个本批未出现的源领域用于验证。验证允许使用训练过的样本，最终测试领域始终排除。不要传 `--validation-domains` 固定留出某个源领域，否则会与保持训练配额的要求冲突。每次尝试使用尚未用于验证的样本 ID。达到重试上限（默认 5 次）、验证池耗尽或预算失败时，停止在当前 batch 并保存 checkpoint；可增大 `--max-attempts-per-batch` 续跑。`training_sampling` 保存样本 ID、各域配额和 batch 划分。200 条、batch 上限 16 时，两折均为 13 批（12 批各 16 条，最后 8 条），与普通 evolve 的批次数及大小一致；Fold 1 每批混合 2–3 个源领域，Fold 2 混合 2–4 个。为预留跨域验证领域，具体分批组合及顺序与普通 evolve 不同。新布局使用独立技能库和 checkpoint，不能恢复旧单领域、全局留出领域或 episode checkpoint。上下文过长时会裁剪较旧反馈，验证样本预算隔离、运行总账持续累加。
+Meta/adversarial 批训练使用普通 evolve 的同一 manifest 训练分区和 `--limit` 均衡抽样，再把相同样本混域分批。每批至少包含两个源领域，并留出至少一个本批未出现的源领域用于验证。验证允许使用训练过的样本，最终测试领域始终排除。不要传 `--validation-domains` 固定留出某个源领域，否则会与保持训练配额的要求冲突。每次尝试使用尚未用于验证的样本 ID。达到尝试上限（默认 5 次）后，保留当前技能库并在 `skipped_batches` 中记录无晋升批次，自动进入下一批。验证池耗尽或预算异常仍保留断点。旧的 `attempt_limit` 断点可使用原上限续跑，自动推进已用尽次数的批次。 `training_sampling` 保存样本 ID、各域配额和 batch 划分。200 条、batch 上限 16 时，两折均为 13 批（12 批各 16 条，最后 8 条），与普通 evolve 的批次数及大小一致；Fold 1 每批混合 2–3 个源领域，Fold 2 混合 2–4 个。为预留跨域验证领域，具体分批组合及顺序与普通 evolve 不同。新布局使用独立技能库和 checkpoint，不能恢复旧单领域、全局留出领域或 episode checkpoint。上下文过长时会裁剪较旧反馈，验证样本预算隔离、运行总账持续累加。
 
 Windows 两折训练、最终测试及续跑命令见：[普通 evolve](docs/普通evolve实验启动教程-Windows.md)、[meta-evolve](docs/meta-evolve实验启动教程-Windows.md)、[adversarial-evolve](docs/adversarial-evolve实验启动教程-Windows.md)。
 
@@ -495,6 +496,8 @@ evofact --config configs/adversarial_llm.yaml \
 4. meta-test、protected validation 和 final-test 始终使用真实数据。
 
 批训练路线中，`generation.batch_size` 控制每轮首次或补充生成的样本上限，`execution.batch_size` 控制真实训练批次，`data.evolution_validation_samples` 控制每次新的验证样本数。它不使用规则归因、聚类或反事实分析。生成响应、核验结果和挑战 trace 分阶段保存到 checkpoint，预算统一计入运行账本。批训练审计格式为 `adversarial_batch_audit_v1`，旧 Generator 演化条目审计保留原格式。
+
+`adversarial-evolve` 使用 `endogenous-knowledge-v1`：基于带真实标签的训练样本、trace 和模型内源知识构造挑战，不要求外部 evidence。独立复核调用可以看到源训练文本及真实标签，但看不到生成器的目标标签和理由；根据模型知识判断挑战，分歧或无法确定时拒绝。这属于模型标签复核，不是外部事实核查。生成策略纳入断点身份，因此旧证据模式的断点不能直接恢复到新策略；Weibo21 教程使用独立的 `weibo21_adversarial_knowledge_fold_*` 配置和技能库。旧生成工作流及 Generator 自进化工作流继续使用原证据核验器。
 
 ### 报告
 

@@ -2,12 +2,90 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from evofact.generation.models import GenerationConfig
+
+
+@dataclass(frozen=True)
+class OptimizerMemoryConfig:
+    section: ClassVar[str] = "optimizer_memory"
+    enabled: bool = False
+    context_window: int | None = None
+    reserved_output_tokens: int = 8192
+    safety_fraction: float = 0.1
+    max_overflow_retries: int = 2
+    tokenizer_encoding: str | None = None
+
+    def __post_init__(self):
+        name = self.section
+        if type(self.enabled) is not bool:
+            raise ValueError(f"{name}.enabled must be boolean")
+        if self.context_window is not None and (
+            type(self.context_window) is not int or self.context_window < 1
+        ):
+            raise ValueError(f"{name}.context_window must be positive or null")
+        if type(self.reserved_output_tokens) is not int or self.reserved_output_tokens < 1:
+            raise ValueError(f"{name}.reserved_output_tokens must be positive")
+        if not 0 < self.safety_fraction < 1:
+            raise ValueError(f"{name}.safety_fraction must be between 0 and 1")
+        if type(self.max_overflow_retries) is not int or self.max_overflow_retries < 0:
+            raise ValueError(f"{name}.max_overflow_retries must be non-negative")
+
+
+@dataclass(frozen=True)
+class GeneratorMemoryConfig(OptimizerMemoryConfig):
+    section: ClassVar[str] = "generator_memory"
+
+
+@dataclass(frozen=True)
+class IndependentValidationConfig:
+    enabled: bool = False
+    manifest_path: Path | None = None
+    samples_per_domain: int = 32
+    evaluation_samples_per_domain: int | None = None
+    max_positive_recall_drop: float = 0.0
+    max_domain_f1_drop: float = 0.05
+    sample_retries: int = 2
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError("independent_validation.enabled must be boolean")
+        if (
+            type(self.samples_per_domain) is not int
+            or self.samples_per_domain < 2
+            or self.samples_per_domain % 2
+        ):
+            raise ValueError("independent validation requires an even samples_per_domain >= 2")
+        size = self.evaluation_samples_per_domain
+        if size is not None and (
+            type(size) is not int or size < 2 or size % 2 or size > self.samples_per_domain
+        ):
+            raise ValueError(
+                "evaluation_samples_per_domain must be even, >= 2 and <= samples_per_domain"
+            )
+        if not 0 <= self.max_positive_recall_drop <= 1 or not 0 <= self.max_domain_f1_drop <= 1:
+            raise ValueError("invalid independent validation regression tolerance")
+        if type(self.sample_retries) is not int or self.sample_retries < 0:
+            raise ValueError("independent validation sample_retries must be non-negative")
+
+
+def config_identity(config):
+    """Preserve legacy checkpoint identity when the new policy is disabled."""
+    payload = asdict(config)
+    if not config.optimizer_memory.enabled:
+        payload.pop("optimizer_memory", None)
+    if not config.generator_memory.enabled:
+        payload.pop("generator_memory", None)
+    if not config.independent_validation.enabled:
+        payload.pop("independent_validation", None)
+    elif config.independent_validation.evaluation_samples_per_domain is None:
+        # Old enabled checkpoints evaluated the complete eligible pool.
+        payload["independent_validation"].pop("evaluation_samples_per_domain", None)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -240,10 +318,13 @@ class EvolutionConfig:
 
     max_skills: int = 12
 
+    # Legacy optimizer character settings: accepted for config/checkpoint compatibility;
+    # optimizer contexts no longer truncate strings or prune by total characters.
     max_text_chars: int = 8000
 
     max_instructions_chars: int = 60000
 
+    # Still bounds adversarial generator requests, independently of optimizer context.
     max_total_chars: int = 300000
 
     # Number of meta-train samples consumed before requesting another candidate.
@@ -366,6 +447,11 @@ class AppConfig:  # runner 配置
     pricing: PricingConfig = field(default_factory=PricingConfig)
     optimizer_backend: OptimizerBackendConfig = field(default_factory=OptimizerBackendConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    independent_validation: IndependentValidationConfig = field(
+        default_factory=IndependentValidationConfig
+    )
+    optimizer_memory: OptimizerMemoryConfig = field(default_factory=OptimizerMemoryConfig)
+    generator_memory: GeneratorMemoryConfig = field(default_factory=GeneratorMemoryConfig)
 
     def __post_init__(self) -> None:
         """函数作用：在 `AppConfig` 数据类初始化后检查字段之间的业务约束。
@@ -459,6 +545,12 @@ def load_config(path: str | Path) -> AppConfig:
             data_raw[key] = tuple(str(item).strip() for item in value if str(item).strip())
     data = DataConfig(**data_raw)
     gate = GateConfig(**raw.pop("gate", {}))
+    independent_raw = raw.pop("independent_validation", {})
+    if independent_raw.get("manifest_path") is not None:
+        independent_raw["manifest_path"] = Path(independent_raw["manifest_path"])
+    independent_validation = IndependentValidationConfig(**independent_raw)
+    optimizer_memory = OptimizerMemoryConfig(**raw.pop("optimizer_memory", {}))
+    generator_memory = GeneratorMemoryConfig(**raw.pop("generator_memory", {}))
     evolution_raw = raw.pop("evolution", {})
     evolution = EvolutionConfig(**evolution_raw)
     generation_raw = raw.pop("generation", {})
@@ -494,6 +586,9 @@ def load_config(path: str | Path) -> AppConfig:
             raw[key] = Path(raw[key])
     raw["dataset_roots"] = {k: Path(v) for k, v in raw.get("dataset_roots", {}).items()}
     return AppConfig(
+        generator_memory=generator_memory,
+        optimizer_memory=optimizer_memory,
+        independent_validation=independent_validation,
         gate=gate,
         meta_learning=meta_learning,
         generation=generation,

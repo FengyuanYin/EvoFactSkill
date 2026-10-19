@@ -22,7 +22,11 @@ from evofact.experiments.runner import ExperimentRunner, _gold
 from evofact.generation.data import fixture_adversarial_data, load_samples, validate_fact_links
 from evofact.generation.generator import ChallengeGenerator
 from evofact.generation.models import GenerationConfig
-from evofact.generation.prompts import GENERATOR_SYSTEM, VERIFIER_SYSTEM
+from evofact.generation.prompts import (
+    GENERATOR_SYSTEM,
+    KNOWLEDGE_VERIFIER_SYSTEM,
+    VERIFIER_SYSTEM,
+)
 from evofact.generation.split import split_construction_probe
 from evofact.generation.verifier import ChallengeVerifier
 from evofact.generation.workflow import GenerationWorkflow
@@ -46,7 +50,7 @@ class FakeJSONBackend:
         输入要求：`self` 应为已初始化的 `FakeJSONBackend` 实例；`system`（未显式标注）需符合函数签名约定；`payload`（未显式标注）需符合函数签名约定。
         输出：异步返回函数计算得到的结果对象；具体结构由当前实现及调用方协议约定。"""
         self.calls.append((system, deepcopy(payload)))
-        if system == VERIFIER_SYSTEM:
+        if system in {VERIFIER_SYSTEM, KNOWLEDGE_VERIFIER_SYSTEM}:
             return {
                 "reviews": [
                     {

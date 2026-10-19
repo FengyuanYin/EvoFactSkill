@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from evofact.config import AppConfig
+from evofact.config import AppConfig, config_identity
 from evofact.core.models import (
     EpisodeEvaluation,
     EvaluationResult,
@@ -754,7 +754,7 @@ class MetaEvolutionRunner:
         """函数作用：计算当前运行配置的稳定标识 `_config_fingerprint` 所表示的数据，供当前模块后续流程使用。
         输入要求：`self` 应为已初始化的 `MetaEvolutionRunner` 实例；无其他显式输入。
         输出：返回 `str` 类型结果；校验或下游调用失败时异常向上传递。"""
-        payload = json.dumps(asdict(self.config), sort_keys=True, default=str)
+        payload = json.dumps(config_identity(self.config), sort_keys=True, default=str)
         return hashlib.sha256(payload.encode()).hexdigest()
 
 

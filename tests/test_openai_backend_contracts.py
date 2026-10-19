@@ -55,6 +55,45 @@ def _skill(name: str):
     )
 
 
+@pytest.mark.parametrize("feedback_enabled", [False, True])
+@pytest.mark.parametrize("has_feedback", [False, True])
+def test_optimizer_prompt_explains_feedback_actions_and_manifest_patch_contract(
+    monkeypatch, feedback_enabled, has_feedback
+):
+    from evofact.core.budget_models import UsageDetails
+
+    backend = OpenAICompatibleBackend("https://example.invalid/v1", "unused", "test-model")
+    captured = {}
+
+    async def call(system, payload):
+        captured.update(system=system, payload=payload)
+        return {"action": "no_change", "rationale": "No supported defect."}, UsageDetails(calls=1)
+
+    monkeypatch.setattr(backend, "_call_with_usage", call)
+    context = {"skills": [], "traces": []}
+    if feedback_enabled:
+        context["feedback_enabled"] = True
+    if has_feedback:
+        context["validation_feedback"] = [{"attempt": 1}]
+    result = asyncio.run(backend.optimize_package(context, _skill("skill_optimizer")))
+    assert result.value["action"] == "no_change"
+    assert captured["payload"] is context
+    system = captured["system"]
+    if not feedback_enabled:
+        assert "Feedback-enabled optimization policy" not in system
+        assert "schema_version is not a patch field" not in system
+        assert system.endswith(
+            "Prefer no_change unless the supplied evidence justifies a concrete change."
+        )
+        return
+    assert "schema_version is not a patch field" in system
+    assert "version, scope, triggers, contract, entrypoints" in system
+    assert "read their outcomes first" in system
+    assert "what was checked" in system
+    assert "do not default to rewriting the Judge" in system
+    assert "Never fabricate a change" in system
+
+
 def test_specialist_and_judge_prompts_include_explicit_json_contracts() -> None:
     backend = ContractCapturingBackend()
     specialist = _skill("claim_decomposition")

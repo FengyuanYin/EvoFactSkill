@@ -23,6 +23,10 @@ class JudgeContractError(ValueError):
     """A Judge response violates the active dataset label contract."""
 
 
+class ModelOutputTruncated(ValueError):
+    """The provider stopped before completing the optimizer JSON response."""
+
+
 async def call_json_with_usage(backend, system: str, payload: dict) -> tuple[dict, UsageDetails]:
     """Call a JSON backend while preserving legacy test/provider compatibility."""
     method = getattr(backend, "_call_with_usage", None)

@@ -44,23 +44,8 @@ _ALLOWED_KEYS = frozenset(
 
 
 def _clip(value: object, limit: int) -> str:
-    """截断发送给 LLM 的文本，并保证长度不超过 limit。"""
-    text = str(value)
-    if len(text) <= limit:
-        return text
-
-    return text[: limit - 3] + "..."
-
-
-def _context_chars(context: dict[str, Any]) -> int:
-    """计算上下文序列化后的字符数。"""
-    return len(
-        json.dumps(
-            context,
-            ensure_ascii=False,
-            default=str,
-        )
-    )
+    """保留旧参数接口，完整返回优化器文本，不再按字符截断。"""
+    return str(value)
 
 
 def build_optimizer_context(
@@ -70,7 +55,7 @@ def build_optimizer_context(
     bank: list[SkillSpec],
     config: EvolutionConfig,
 ) -> dict[str, Any]:
-    """构造经过裁剪、不包含真实标签的优化器输入。"""
+    """构造不包含真实标签、不按字符上限裁剪的优化器输入。"""
     if not cluster_id.strip():
         raise ValueError("cluster_id must not be empty")
 
@@ -199,17 +184,6 @@ def build_optimizer_context(
         "traces": trace_views,
         "skills": skill_views,
     }
-
-    # 优先移除低优先级 Skill，再减少 trace/report 数量。
-    while _context_chars(context) > config.max_total_chars:
-        if len(context["skills"]) > 1:
-            context["skills"].pop()
-        elif len(context["traces"]) > 1:
-            context["traces"].pop()
-        elif len(context["reports"]) > 1:
-            context["reports"].pop()
-        else:
-            raise ValueError("optimizer context cannot fit max_total_chars")
 
     return context
 

@@ -1,5 +1,7 @@
 # meta-evolve 两折实验命令（Windows PowerShell）
 
+可选的跨批 optimizer 记忆、token 窗口管理及新实验配置见 [Optimizer 持久记忆教程](optimizer持久记忆与上下文管理.md)。默认配置和已启动实验保持原行为。
+
 在项目根目录执行。命令自动读取本地 `.env`，使用 `evofact.cmd`，无需重复设置密钥。推理与 optimizer 的模型设置沿用普通 evolve 两折配置。
 
 最终测试使用 `outputs/static-100-before-pr-review/` 的同一批 `*-100.json` 样本及顺序：Fold 1 为 500 条，Fold 2 为 400 条。训练总量为 200 条、batch 为 16，每次验证取 8 条真实新样本。
@@ -7,6 +9,8 @@
 meta-evolve 复用普通 evolve 的 manifest 训练分区、领域均衡抽样和相同 200 个训练样本，再组成混域 batch。两折均为 13 批：12 批各 16 条，最后一批 8 条。每批至少混合两个源领域，至少留出一个本批未出现的源领域供验证；允许验证训练过的样本，不固定留出一个领域。最终测试领域不参与训练或验证。
 
 每批直接优化，晋升后立即进入下一批；失败则累积验证 trace，换尚未用于验证的样本继续优化，默认每批最多尝试 5 次。晋升后清空本批上下文，保留更新后的技能库。
+
+可选的新实验方案见[独立均衡验证与 FAKE 召回保护](独立均衡验证实验启动教程-Windows.md)：保持每批跨域验证范式，使用全新配置、时间标签和技能库。本教程原配置及旧断点继续保留原策略。
 
 ## Fold 1
 
@@ -40,11 +44,56 @@ meta-evolve 复用普通 evolve 的 manifest 训练分区、领域均衡抽样�
 .\evofact.cmd --config configs/weibo21_meta_evolve_fold_2.yaml --evolution-route meta-evolve --batch-size 16 --sample-concurrency 4 --progress test --output docs/weibo21_meta_evolve_fold_2/meta-evolve/final-test.json
 ```
 
+## 每领域 25 条和 50 条 final-test
+
+以下命令在训练完成后执行，使用原来的已训练技能库。每个领域固定读取原 `*-100.json` 的前 25 条或前 50 条，与从已有 100 条结果截取的样本一致。`--limit` 只控制训练数量，不能用来指定测试条数。
+
+先生成独立测试配置，保留原配置及全部训练路径，只修改每领域测试数量。在项目根目录执行一次：
+
+```powershell
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+foreach ($fold in 1, 2) {
+    $source = "configs/weibo21_meta_evolve_fold_$fold.yaml"
+    $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $source), $utf8)
+    $pattern = '(?m)^([ \t]*final_test_samples_per_domain:[ \t]*)100[ \t]*\r?$'
+    if ([regex]::Matches($text, $pattern).Count -ne 1) { throw "Expected exactly one 100/domain setting: $source" }
+    $targetRoot = "docs/weibo21_meta_evolve_fold_$fold/meta-evolve"
+    New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+    foreach ($n in 25, 50) {
+        $config = [regex]::Replace($text, $pattern, ('${1}' + $n))
+        [System.IO.File]::WriteAllText("$targetRoot/config.final-test-$n.yaml", $config, $utf8)
+    }
+}
+```
+
+测试命令须保留 `--evolution-route meta-evolve`，读取本路线已训练的技能库。
+
+### final-test 25（每领域 25 条）
+
+Fold 1 共 125 条，Fold 2 共 100 条，两折共 225 条：
+
+```powershell
+.\evofact.cmd --config docs/weibo21_meta_evolve_fold_1/meta-evolve/config.final-test-25.yaml --evolution-route meta-evolve --batch-size 16 --sample-concurrency 4 --progress test --output docs/weibo21_meta_evolve_fold_1/meta-evolve/final-test-25.json
+.\evofact.cmd --config docs/weibo21_meta_evolve_fold_2/meta-evolve/config.final-test-25.yaml --evolution-route meta-evolve --batch-size 16 --sample-concurrency 4 --progress test --output docs/weibo21_meta_evolve_fold_2/meta-evolve/final-test-25.json
+```
+
+### final-test 50（每领域 50 条）
+
+Fold 1 共 250 条，Fold 2 共 200 条，两折共 450 条：
+
+```powershell
+.\evofact.cmd --config docs/weibo21_meta_evolve_fold_1/meta-evolve/config.final-test-50.yaml --evolution-route meta-evolve --batch-size 16 --sample-concurrency 4 --progress test --output docs/weibo21_meta_evolve_fold_1/meta-evolve/final-test-50.json
+.\evofact.cmd --config docs/weibo21_meta_evolve_fold_2/meta-evolve/config.final-test-50.yaml --evolution-route meta-evolve --batch-size 16 --sample-concurrency 4 --progress test --output docs/weibo21_meta_evolve_fold_2/meta-evolve/final-test-50.json
+```
+
+每条测试命令都会调用模型重新推理。已有完整 100 条结果且只需统计子集时，可使用已导出的 25／50 条结果，无需再启动测试。25 条和 50 条分别生成 `final-test-25.*`、`final-test-50.*` 汇总、逐样本记录及测试断点，不覆盖原 `final-test.*` 或训练结果。测试中断后，在对应命令末尾添加 `--resume`，保持配置、模型和技能库不变；不要将不同测试规模的记录或断点混用。
+
+
 ## 续跑
 
 中断后，在原训练命令末尾加 `--resume`；无需传 `--checkpoint`，训练自动使用配置中的 `meta_learning.checkpoint_path`。保持配置、训练数量、batch、并发、验证领域和输出路径不变。
 
-如果 `train.json` 中的 `status` 为 `attempt_limit`，表示停在当前 batch，尚未完成全部训练。把原训练命令的 `--max-attempts-per-batch 5` 增大为 `10`，再加 `--resume`。如果状态为 `validation_pool_exhausted`，表示没有足够的新验证样本，继续执行相同命令不会补充样本池。训练状态达到 `completed` 后，再运行最终测试。
+当前 batch 达到尝试上限后，保留当前技能库，在 `skipped_batches` 记录 `reason=attempt_limit`，自动进入下一批，不强制晋升。旧版本停在 `status=attempt_limit` 的断点可直接使用原命令加 `--resume`，无需提高上限。`completed_batches` 包含无更新但已处理的批次。如果状态为 `validation_pool_exhausted`，表示没有足够的新验证样本，继续执行相同命令不会补充样本池。训练状态达到 `completed` 后，再运行最终测试。
 
 测试中断时，在原 `test` 命令末尾加 `--resume`。已完成样本跳过，失败或缺失样本补跑；默认每条超时或网络错误重试两次。
 
