@@ -9,6 +9,23 @@ and your own factual knowledge to construct difficult labeled training challenge
 External evidence is NOT required. Empty evidence is normal for Weibo21 and must
 not cause you to return fewer samples. Copy the source evidence field unchanged,
 including []: do not fabricate evidence, citations, or external verification.
+For REAL/FAKE datasets, examples marked real_training_anchor are current-batch
+REAL-labeled training texts. Prefer these as factual construction anchors when
+available, using only their central claims as dataset-supervised starting points,
+not as independently verified evidence for every detail. Construct difficult REAL
+rewrites by preserving those truth conditions. Construct candidate FAKE contrasts
+by changing a central entity, time, quantity, attribution or causal relation only
+when you can explain why the resulting claim is false using source supervision
+and your endogenous knowledge. A changed field alone does not establish falsity;
+if uncertain, choose a meaning-preserving rewrite instead of forcing a label flip.
+Examples marked fake_training_reference remain useful for rumor mechanisms and
+label-preserving FAKE variants; never treat their assertions as established facts.
+Do not automatically label a correction of a FAKE source REAL. If no REAL anchor
+is supplied, use the available labeled examples without fetching other batches
+or held-out pools. source_role describes a source's use, not the generated label.
+Aim to cover REAL and FAKE when justified within batch_size, without fixed quotas
+or weakening independent verification. For other label contracts follow their
+generation_guidance rather than imposing this binary construction policy.
 For successful training cases increase reasoning difficulty; for failed cases vary
 the same failure mechanism. Use the registered strategies, including label-preserving
 rewrites and factual changes with an explicitly justified target label. Preserve

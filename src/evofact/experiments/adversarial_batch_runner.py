@@ -12,8 +12,15 @@ from evofact.core.models import Evidence, Sample
 from evofact.evolution.firewall import validate_generation_request
 from evofact.evolution.optimizer_context import build_skillbank_optimizer_context
 from evofact.generation.data import validate_fact_links
+from evofact.generation.diagnostics import (
+    DIAGNOSTIC_POLICY,
+    challenge_statistics,
+    enrich_request,
+    policy_marker,
+)
 from evofact.generation.memory import (
     GENERATOR_MEMORY_POLICY,
+    GeneratorContextFailure,
     GeneratorMemoryBackend,
     bind_memory,
     build_memory_view,
@@ -23,6 +30,7 @@ from evofact.generation.memory import (
 from evofact.generation.prompts import KNOWLEDGE_GENERATOR_POLICY, KNOWLEDGE_VERIFIER_SYSTEM
 from evofact.generation.verifier import ChallengeVerifier, normalized
 from evofact.generation.workflow import GenerationWorkflow
+from evofact.runtime.backend import ModelOutputTruncated
 from evofact.skills.package_adapter import package_bank_digest
 from evofact.validation.independent import InferenceIncomplete
 
@@ -130,9 +138,42 @@ class AdversarialBatchRunner(MetaBatchRunner):
         }
 
     def _reset_batch(self, state):
+        super()._reset_batch(state)
         state.pop("adversarial_batch", None)
+        state.pop("adversarial_no_change", None)
+
+    def _new_route_state(self):
+        return {"adversarial_generation_policy": policy_marker()}
+
+    def _after_optimizer_outcome(self, state, *, status, stop_unchanged):
+        if not state.get("adversarial_generation_policy") or status != "no_change":
+            return stop_unchanged
+        unchanged = state.get("optimizer_no_change", {})
+        rounds = state.get("adversarial_batch", [])
+        requests = state.setdefault("adversarial_no_change", {"requested": 0, "handled": 0})
+        if (
+            unchanged.get("count", 0) >= 2
+            and len(rounds) < 1 + self.max_supplement_rounds
+            and requests.get("last_fingerprint") != unchanged.get("fingerprint")
+        ):
+            requests["requested"] += 1
+            requests["last_fingerprint"] = unchanged["fingerprint"]
+            requests["trigger_attempt"] = state["attempt"]
+            return False
+        return stop_unchanged
+
+    def _optimizer_training_sources(self, state, batch):
+        sources = super()._optimizer_training_sources(state, batch)
+        for round_ in state.get("adversarial_batch", []):
+            sources.extend(
+                (sample_from_dict(row), "verified_challenge")
+                for row in (round_.get("verification") or {}).get("accepted", [])
+            )
+        return sources
 
     async def _prepare_route_runtime(self, state, save, budget):
+        if state.get("adversarial_generation_policy") not in (None, policy_marker()):
+            raise GeneratorContextFailure("saved adversarial generation policy no longer matches")
         if self.config.generator_memory.enabled:
             bind_memory(state, self.workflow.package.package_digest)
             await GeneratorMemoryBackend(
@@ -189,6 +230,24 @@ class AdversarialBatchRunner(MetaBatchRunner):
         except ValueError as exc:
             LOGGER.warning("Rejecting malformed generator response: %s", exc)
             return [], [{"index": None, "reason": f"invalid generator response: {exc}"}]
+        plan = current["request"].get("generation_plan")
+        if plan:
+            decisions = {d["sample_id"]: d for d in response.get("decisions", [])}
+            paired = {
+                row["sample_id"]: (i, slot)
+                for i, (row, slot) in enumerate(zip(response.get("samples", []), plan["slots"]))
+                if isinstance(row, dict) and "sample_id" in row
+            }
+            kept = []
+            for sample in structured:
+                index, slot = paired[sample.sample_id]
+                if decisions[sample.sample_id]["source_sample_id"] != slot["source_sample_id"]:
+                    rejected.append(
+                        {"index": index, "reason": "source violates fixed generation slot"}
+                    )
+                else:
+                    kept.append(sample)
+            structured = kept
         return structured, rejected + overflow
 
     def _request(self, state, batch, round_id, *, forbidden=()):
@@ -205,6 +264,10 @@ class AdversarialBatchRunner(MetaBatchRunner):
             examples.append(
                 {
                     "source_sample": row,
+                    "source_role": {
+                        "REAL": "real_training_anchor",
+                        "FAKE": "fake_training_reference",
+                    }.get(row["label"], "labeled_training_reference"),
                     "trace": trace,
                     "label_contract": contract.prompt_view(),
                     "label_contract_digest": contract.digest,
@@ -273,13 +336,31 @@ class AdversarialBatchRunner(MetaBatchRunner):
                 bank_digest=package_bank_digest(self.base.packages),
                 forbidden=forbidden,
             )
+            if state.get("adversarial_generation_policy"):
+                enrich_request(request, state.get("adversarial_batch", []))
             return request  # Token management includes workflow instructions/resources below.
+        if state.get("adversarial_generation_policy"):
+            enrich_request(request, state.get("adversarial_batch", []))
         while (
             len(json.dumps(request, ensure_ascii=False, default=str))
             > self.config.evolution.max_total_chars
             and len(request["examples"]) > 1
         ):
-            request["examples"].pop()
+            protected = {
+                slot["source_sample_id"]
+                for slot in request.get("generation_plan", {}).get("slots", [])
+            }
+            removable = next(
+                (
+                    i
+                    for i in reversed(range(len(request["examples"])))
+                    if request["examples"][i]["source_sample"]["sample_id"] not in protected
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            request["examples"].pop(removable)
         if (
             len(json.dumps(request, ensure_ascii=False, default=str))
             > self.config.evolution.max_total_chars
@@ -290,8 +371,9 @@ class AdversarialBatchRunner(MetaBatchRunner):
     async def _optimizer_traces(self, state, batch, forbidden, save, *, progress, task):
         rounds = state.setdefault("adversarial_batch", [])
         failures = len(state["feedback"])
-        # One initial round, then at most one supplement per failed validation.
-        target = 1 + min(failures, self.max_supplement_rounds)
+        requested = state.get("adversarial_no_change", {}).get("requested", 0)
+        # Validation failures and no_change probes share one finite supplement budget.
+        target = 1 + min(failures + requested, self.max_supplement_rounds)
         while len(rounds) < target or (rounds and not rounds[-1].get("complete")):
             if not rounds or rounds[-1].get("complete"):
                 rounds.append(
@@ -306,6 +388,19 @@ class AdversarialBatchRunner(MetaBatchRunner):
                         "complete": False,
                     }
                 )
+                if state.get("adversarial_generation_policy"):
+                    probe = state.get("adversarial_no_change", {})
+                    cause = "initial" if len(rounds) == 1 else "validation_rejection"
+                    if len(rounds) > 1 and probe.get("handled", 0) < probe.get("requested", 0):
+                        cause = "optimizer_no_change"
+                        probe["handled"] = probe.get("handled", 0) + 1
+                    rounds[-1].update(
+                        trigger=cause,
+                        trigger_attempt=probe.get("trigger_attempt")
+                        if cause == "optimizer_no_change"
+                        else None,
+                        detector_bank_digest=package_bank_digest(self.base.packages),
+                    )
                 save()
             current = rounds[-1]
             backend = self.generation_backend or self.base._backend()
@@ -328,35 +423,67 @@ class AdversarialBatchRunner(MetaBatchRunner):
                         budget=self.base._budget_manager(),
                         forbidden=forbidden,
                     )
-                result = await self.workflow.run(
-                    backend,
-                    (),
-                    (),
-                    (),
-                    config=self.config.generation,
-                    episode_id=current["round_id"],
-                    budget_manager=self.base._budget_manager(),
-                    label_contract_registry=self.base.label_contract_registry,
-                    forbidden=forbidden,
-                    request=request,
-                    system_addendum=(
-                        "\nFor this batch route, diagnose directly from supplied traces and skills; "
-                        "there are no precomputed attributions. Consumed validation feedback is allowed "
-                        "only to identify capabilities to challenge. Construct every sample from "
-                        "labeled training examples and endogenous knowledge. Never reproduce feedback samples "
-                        "or access unused validation/final-test data.\n"
-                        + KNOWLEDGE_GENERATOR_POLICY
-                        + (GENERATOR_MEMORY_POLICY if managed else "")
-                    ),
-                    request_executor=managed.execute if managed else None,
-                )
-                current.update(
-                    request=result.request,
-                    response=result.response,
-                    request_digest=result.request_digest,
-                    response_digest=result.response_digest,
-                    generator_usage=_json(asdict(result.usage)),
-                )
+                try:
+                    result = await self.workflow.run(
+                        backend,
+                        (),
+                        (),
+                        (),
+                        config=self.config.generation,
+                        episode_id=current["round_id"],
+                        budget_manager=self.base._budget_manager(),
+                        label_contract_registry=self.base.label_contract_registry,
+                        forbidden=forbidden,
+                        request=request,
+                        system_addendum=(
+                            "\nFor this batch route, diagnose directly from supplied traces and skills; "
+                            "there are no precomputed attributions. Consumed validation feedback is allowed "
+                            "only to identify capabilities to challenge. Construct every sample from "
+                            "labeled training examples and endogenous knowledge. Never reproduce feedback samples "
+                            "or access unused validation/final-test data.\n"
+                            + KNOWLEDGE_GENERATOR_POLICY
+                            + (
+                                "\n" + DIAGNOSTIC_POLICY
+                                if state.get("adversarial_generation_policy")
+                                else ""
+                            )
+                            + (GENERATOR_MEMORY_POLICY if managed else "")
+                        ),
+                        request_executor=managed.execute if managed else None,
+                    )
+                    current.update(
+                        request=result.request,
+                        response=result.response,
+                        request_digest=result.request_digest,
+                        response_digest=result.response_digest,
+                        generator_usage=_json(asdict(result.usage)),
+                    )
+                except ModelOutputTruncated as exc:
+                    if managed is None:
+                        raise
+                    LOGGER.warning("Generator output truncated after bounded retries: %s", exc)
+                    effective = {
+                        k: v
+                        for k, v in exc.generation_payload.items()
+                        if k not in {"workflow_references", "workflow_template"}
+                    }
+                    current.update(
+                        request=effective,
+                        response={"samples": [], "decisions": []},
+                        generation_error={"type": type(exc).__name__, "reason": str(exc)},
+                        generator_usage=_json(asdict(exc.generation_usage)),
+                        verification={
+                            "accepted": [],
+                            "rejected": [
+                                {
+                                    "index": None,
+                                    "reason": "generator output truncated after bounded retries",
+                                }
+                            ],
+                            "reviews": [],
+                            "usage": {},
+                        },
+                    )
                 save()
             if current["verification"] is None:
                 existing = batch + [
@@ -367,6 +494,8 @@ class AdversarialBatchRunner(MetaBatchRunner):
                 if self.config.generator_memory.enabled:
                     existing += [sample_from_dict(s) for s in historical_samples(state)]
                 structured, rejected = self._validate_response(current, forbidden, existing)
+                if state.get("adversarial_generation_policy"):
+                    current["structural_candidates"] = len(structured)
                 if structured:
                     verified = await self.verifier.verify(
                         structured,
@@ -434,6 +563,8 @@ class AdversarialBatchRunner(MetaBatchRunner):
                     current["metrics"] = {}
                 save()
             current["complete"] = True
+            if state.get("adversarial_generation_policy"):
+                current["diagnostic_stats"] = challenge_statistics([current])
             if self.config.generator_memory.enabled:
                 record_round(
                     state,
@@ -453,6 +584,14 @@ class AdversarialBatchRunner(MetaBatchRunner):
     def _extra_outcome(self, state):
         audit = state.get("generation_audit", [])
         return {
+            **(
+                {
+                    "adversarial_generation_policy": state["adversarial_generation_policy"],
+                    "challenge_statistics": challenge_statistics(audit),
+                }
+                if state.get("adversarial_generation_policy")
+                else {}
+            ),
             "generation_policy": "endogenous-knowledge-v1",
             "generation_rounds": audit,
             "accepted_challenge_samples": sum(len(r["verification"]["accepted"]) for r in audit),

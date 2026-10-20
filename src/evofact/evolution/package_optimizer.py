@@ -370,6 +370,7 @@ class OptimizerOutcome:
     reason: str = ""
     candidate: PackageCandidate | None = None
     proposal: EvolutionProposal | None = None
+    candidates: tuple[PackageCandidate, ...] = ()
 
 
 class PackageOptimizerAgent:
@@ -427,6 +428,8 @@ class PackageOptimizerAgent:
         prior_proposals=(),
         feedback=None,
         feedback_enabled=False,
+        joint_enabled=False,
+        training_supervision=None,
     ) -> OptimizerOutcome:
         packages = tuple(packages)
         bank_mode = target is None
@@ -466,6 +469,16 @@ class PackageOptimizerAgent:
         except ValueError as exc:
             LOGGER.warning("Skipping optimizer context for %s: %s", target_id, exc)
             return failed(f"context:{type(exc).__name__}")
+        if joint_enabled:
+            if not bank_mode:
+                raise ValueError("joint optimization requires skill-bank mode")
+            context["joint_optimization"] = True
+        if training_supervision is not None:
+            if not (bank_mode and feedback_enabled):
+                raise ValueError("training supervision requires feedback skill-bank mode")
+            # Explicit, runner-constructed supervision is separate from sanitized
+            # public inference traces. Do not relax the generic redaction policy.
+            context["training_supervision"] = training_supervision
         reservation = None
         # Each proposal is a separate budget unit. Reusing only the target ID
         # would exhaust its per-sample call cap across unrelated training batches.
@@ -494,6 +507,20 @@ class PackageOptimizerAgent:
                 await self.budget_manager.reconcile(reservation, _usage_details(result))
                 reservation = None
             try:
+                if joint_enabled:
+                    from .joint_optimizer import build_joint_candidates
+
+                    candidates = build_joint_candidates(result.value, packages)
+                    if not candidates:
+                        return OptimizerOutcome(
+                            "no_change", reason=str(result.value.get("rationale") or "")[:2000]
+                        )
+                    return OptimizerOutcome(
+                        "candidate",
+                        reason=str(result.value.get("rationale") or ""),
+                        candidate=candidates[0],
+                        candidates=candidates,
+                    )
                 proposal = parse_package_optimizer_response(result.value, tuple(packages))
                 if proposal is None:
                     self.skips["no_change"] += 1

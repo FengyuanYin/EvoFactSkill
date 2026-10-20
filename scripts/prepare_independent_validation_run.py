@@ -29,6 +29,19 @@ from evofact.validation.independent import (  # noqa: E402
 )
 
 
+def without_sections(text, sections):
+    """Replace configured top-level blocks instead of emitting duplicate YAML keys."""
+    lines = []
+    skip = False
+    for line in text.splitlines(keepends=True):
+        match = re.match(r"^([A-Za-z_][A-Za-z_0-9]*):", line)
+        if match:
+            skip = match[1] in sections
+        if not skip:
+            lines.append(line)
+    return "".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples-per-domain", type=int, default=32)
@@ -65,7 +78,7 @@ def main():
     prepared = []
     for route in args.routes:
         name = {
-            "feedback-evolve": "evolve",
+            "feedback-evolve": "feedback_evolve",
             "meta-evolve": "meta_evolve",
             "adversarial-evolve": "adversarial_knowledge",
         }[route]
@@ -77,6 +90,7 @@ def main():
                 Path("skills/store_independent_validation") / tag / route / f"fold_{fold}" / route
             )
             text = source.read_text(encoding="utf-8")
+            original = load_config(source)
             replacements = {
                 "output_dir": artifact,
                 "skill_store": store,
@@ -92,23 +106,36 @@ def main():
                     continue
                 if count != 1:
                     raise ValueError(f"Expected one {key}: {source}")
+            sections = {"independent_validation"}
+            if args.optimizer_memory:
+                sections.add("optimizer_memory")
+            if args.generator_memory and route == "adversarial-evolve":
+                sections.add("generator_memory")
+            text = without_sections(text, sections)
             text += f"\nindependent_validation:\n  enabled: true\n  manifest_path: {(output / 'validation-manifest.json').as_posix()}\n  samples_per_domain: {args.samples_per_domain}\n  max_positive_recall_drop: 0.0\n  max_domain_f1_drop: 0.05\n  sample_retries: 2\n"
             text += f"  evaluation_samples_per_domain: {args.evaluation_samples_per_domain}\n"
             if args.optimizer_memory:
-                window = args.optimizer_context_window or "null"
+                window = (
+                    args.optimizer_context_window
+                    or original.optimizer_memory.context_window
+                    or "null"
+                )
                 text += (
                     "\noptimizer_memory:\n  enabled: true\n"
                     f"  context_window: {window}\n  reserved_output_tokens: 8192\n"
                     "  safety_fraction: 0.1\n  max_overflow_retries: 2\n"
                 )
             if args.generator_memory and route == "adversarial-evolve":
-                window = args.generator_context_window or "null"
+                window = (
+                    args.generator_context_window
+                    or original.generator_memory.context_window
+                    or "null"
+                )
                 text += (
                     "\ngenerator_memory:\n  enabled: true\n"
                     f"  context_window: {window}\n  reserved_output_tokens: 8192\n"
                     "  safety_fraction: 0.1\n  max_overflow_retries: 2\n"
                 )
-            original = load_config(source)
             samples = registry.load(
                 original.data.dataset,
                 ROOT / original.data.root,

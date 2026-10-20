@@ -1,6 +1,8 @@
 # feedback-evolve 两折实验命令（Windows PowerShell）
 
-可选的跨批 optimizer 记忆、token 窗口管理及新实验配置见 [Optimizer 持久记忆教程](optimizer持久记忆与上下文管理.md)。默认配置和已启动实验保持原行为。
+新启动实验支持 optimizer 自主提出多技能联合修改，整组验证和晋升；旧 checkpoint 续跑保持单技能模式，详见 [联合优化说明](optimizer持久记忆与上下文管理.md#多技能联合优化)。
+
+两折专用模板 `configs/weibo21_feedback_evolve_fold_1.yaml`、`configs/weibo21_feedback_evolve_fold_2.yaml` 已启用跨批 optimizer 记忆和 token 窗口管理，详见 [Optimizer 持久记忆教程](optimizer持久记忆与上下文管理.md)。按当前实验使用的 DeepSeek V4 Flash 窗口设置 `context_window: 1000000`（tokens）；更换 optimizer 后端模型时同步调整。旧实验配置和断点不会被改写；本教程生成的新配置不能混接旧断点。
 
 对应 [普通 evolve 两折教程](普通evolve实验启动教程-Windows.md)，不是 valid=16 教程。在项目根目录执行，命令自动读取本地 `.env`。
 
@@ -27,7 +29,7 @@ if ((Test-Path -LiteralPath $runRoot) -or (Test-Path -LiteralPath $storeRoot)) {
 $templates = @{}
 $sourceDigests = [ordered]@{}
 foreach ($fold in @(1, 2)) {
-    $source = Join-Path $workspace "configs/weibo21_evolve_fold_$fold.yaml"
+    $source = Join-Path $workspace "configs/weibo21_feedback_evolve_fold_$fold.yaml"
     $text = [IO.File]::ReadAllText($source, $utf8)
     foreach ($pattern in @('(?m)^output_dir:.*$', '(?m)^skill_store:.*$', '(?m)^  trace_log:.*$', '(?m)^  checkpoint_path:.*$')) {
         if ([regex]::Matches($text, $pattern).Count -ne 1) {

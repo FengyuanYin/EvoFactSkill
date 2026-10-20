@@ -78,11 +78,22 @@ class FeedbackEvolveRunner(MetaBatchRunner):
         history = []
         for attempt in state["attempts"]:
             if "decision" in attempt:
-                history.extend(
-                    proposal_history(
-                        self.base.packages, [attempt["proposal"]], [attempt["decision"]]
-                    )
+                summaries = proposal_history(
+                    self.base.packages,
+                    attempt.get("proposals", [attempt["proposal"]]),
+                    [attempt["decision"]] * len(attempt.get("proposals", [attempt["proposal"]])),
                 )
+                if "proposals" in attempt:
+                    summaries = tuple(
+                        dict(
+                            item,
+                            joint_outcome=True,
+                            joint_rationale=attempt.get("joint_rationale", ""),
+                            joint_proposal_ids=[p["proposal_id"] for p in attempt["proposals"]],
+                        )
+                        for item in summaries
+                    )
+                history.extend(summaries)
             else:
                 history.append(
                     {
@@ -108,11 +119,15 @@ class FeedbackEvolveRunner(MetaBatchRunner):
         judged = [a for a in outcome["attempts"] if "decision" in a]
         outcome.update(
             proposals=[a["proposal"] for a in judged],
+            proposal_groups=[a.get("proposals", [a["proposal"]]) for a in judged],
             gate_decisions=[a["decision"] for a in judged],
             evaluation_only=kwargs.get("evaluation_only", False),
             provenance=self.provenance,
             validation_pool_size=len(self.validation_samples),
-            validation_samples_per_attempt=self.config.data.evolution_validation_samples,
+            validation_samples_per_attempt=(
+                self.config.data.evolution_validation_samples
+                * outcome["validation_aggregation"]["rounds"]
+            ),
             validation_policy="disjoint_sample_pool_without_replacement",
         )
         return outcome
@@ -187,6 +202,7 @@ async def run_cli(args, config, root, manifest, select, progress, data_sampling)
                 else None
             ),
             max_attempts_per_batch=args.max_attempts_per_batch,
+            validation_rounds=args.validation_rounds,
             resume=args.resume,
             evaluation_only=args.evaluation_only,
             progress=progress,

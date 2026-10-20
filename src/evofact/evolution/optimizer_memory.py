@@ -72,6 +72,30 @@ def remember(state, audit, *, pending=None, training=()):
         if base:
             summary["base_digest"] = base["package_digest"]
             summary["base_version"] = base["manifest"]["version"]
+        if "packages" in pending:
+            summary["targets"] = pending["base_ids"]
+            summary["hypothesis"] = pending.get("joint_rationale") or summary["hypothesis"]
+            summary["joint_outcome"] = True
+            summary["changes"] = [
+                {
+                    "skill_name": p["manifest"]["name"],
+                    "candidate_digest": p["package_digest"],
+                    "candidate_version": p["manifest"]["version"],
+                    "base": next(
+                        (
+                            {
+                                "skill_id": b["skill_id"],
+                                "digest": b["package_digest"],
+                                "version": b["manifest"]["version"],
+                            }
+                            for b in state.get("packages", [])
+                            if b["manifest"]["name"] == p["manifest"]["name"]
+                        ),
+                        None,
+                    ),
+                }
+                for p in pending["packages"]
+            ]
         for role in ("baseline", "candidate"):
             result = pending[role]["result"]
             metrics = result.get("aggregate_metrics", {})
@@ -89,6 +113,7 @@ def remember(state, audit, *, pending=None, training=()):
             "baseline_traces": (pending or {}).get("baseline", {}).get("traces", []),
             "candidate_traces": (pending or {}).get("candidate", {}).get("traces", []),
             "proposal": proposal,
+            "proposals": audit.get("proposals", [proposal]),
         }
     )
 
@@ -108,7 +133,12 @@ def memory_view(records, context, forbidden):
         except ValueError:
             continue
         groups[
-            (summary.get("target"), tuple(summary.get("failures", [])), summary["status"])
+            (
+                tuple(summary.get("targets", [summary.get("target")])),
+                tuple(c["skill_name"] for c in summary.get("changes", [])),
+                tuple(summary.get("failures", [])),
+                summary["status"],
+            )
         ].append(record)
     ranked = []
     for items in groups.values():
@@ -165,16 +195,16 @@ def reduce_context(context):
         return {"kind": "old_proposal"}
     if feedback:
         latest = feedback[0]
-        package = latest.get("rejected_package", {})
-        if any("content" in item or "content_base64" in item for item in package.get("files", [])):
-            latest["rejected_package"] = dict(
-                package,
-                files=[
+        packages = [latest.get("rejected_package", {})] + latest.get("rejected_packages", [])
+        for package in packages:
+            if any(
+                "content" in item or "content_base64" in item for item in package.get("files", [])
+            ):
+                package["files"] = [
                     {k: v for k, v in item.items() if k not in {"content", "content_base64"}}
                     for item in package["files"]
-                ],
-            )
-            return {"kind": "rejected_package_file_contents", "audit_preserved": True}
+                ]
+                return {"kind": "rejected_package_file_contents", "audit_preserved": True}
         groups = [latest.get("baseline_traces", []), latest.get("candidate_traces", [])]
         group = max(groups, key=len)
         if len(group) > 1:
@@ -228,6 +258,7 @@ class ManagedOptimizerBackend:
     ):
         self.component = component
         self.backend = copy.copy(backend)
+        self.configured_output_cap = getattr(backend, "max_output_tokens", None)
         self.backend._managed_optimizer = True
         self.policy, self.state, self.save = policy, state, save
         self.budget, self.forbidden = budget, forbidden
@@ -247,7 +278,15 @@ class ManagedOptimizerBackend:
         return math.ceil((count + 64) * factor)
 
     def system(self, context, skill, selection=False):
-        name = "optimizer_selection_system" if selection else "optimizer_system"
+        name = (
+            "optimizer_joint_selection_system"
+            if selection
+            and context.get("joint_optimization")
+            and hasattr(self.backend, "optimizer_joint_selection_system")
+            else "optimizer_selection_system"
+            if selection
+            else "optimizer_system"
+        )
         method = getattr(self.backend, name, None)
         return (
             method(skill)
@@ -313,6 +352,20 @@ class ManagedOptimizerBackend:
             old = self.state.get(key, 1)
             self.state[key] = max(old, old * usage.input_tokens / estimated * 1.1)
 
+    def grow_output(self, request, output):
+        """Grow only the managed call's output allowance, respecting explicit caps."""
+        maximum = (
+            self.state.get(f"{self.component}_capabilities", {})
+            .get("value", {})
+            .get("max_output_tokens")
+        )
+        window = request["window"]
+        ceiling = math.floor(window * (1 - self.policy.safety_fraction)) - 1
+        for cap in (self.configured_output_cap, maximum):
+            if type(cap) is int and cap > 0:
+                ceiling = min(ceiling, cap)
+        return min(output * 2, ceiling)
+
     async def invoke(self, request, slot, payload, skill, *, selection, limit, output):
         stage = request.setdefault(slot, {"calls": []})
         if "response" in stage:
@@ -320,13 +373,34 @@ class ManagedOptimizerBackend:
         # Resume the saved effective payload after interruption, not a new selection.
         payload = stage.setdefault("payload", plain(payload))
         limit = stage.get("input_budget", limit)
-        overflows = sum(c["status"] == "context_overflow" for c in stage["calls"])
+        output = stage.get("output_reserve", output)
+        overflows = sum(
+            c["status"] in {"context_overflow", "output_truncated"} for c in stage["calls"]
+        )
+        if overflows > self.policy.max_overflow_retries:
+            if stage["calls"][-1]["status"] == "output_truncated":
+                raise ModelOutputTruncated("managed output retry budget exhausted")
+            raise OptimizerContextFailure("provider context retry budget exhausted")
+        # Older checkpoints saved the failed call before any larger cap was planned.
+        if stage["calls"] and stage["calls"][-1]["status"] == "output_truncated":
+            previous = stage["calls"][-1]["output_reserve"]
+            if output <= previous:
+                grown = self.grow_output(request, previous)
+                if grown <= previous:
+                    raise ModelOutputTruncated("managed output reached explicit or provider cap")
+                limit -= grown - output
+                output = grown
+                stage.update(output_reserve=output, input_budget=limit)
+                self.save()
         for retry in range(overflows, self.policy.max_overflow_retries + 1):
+            self.backend.max_output_tokens = output
             system = self.system(payload, skill, selection)
             omitted = stage.setdefault("omitted", [])
             while self.tokens(system, payload) > limit:
                 removed = self.reduce(payload)
                 if removed is None:
+                    if stage["calls"] and stage["calls"][-1]["status"] == "output_truncated":
+                        raise ModelOutputTruncated("output expansion cannot fit protected input")
                     raise OptimizerContextFailure(
                         f"protected {self.component} input does not fit model window"
                     )
@@ -398,6 +472,15 @@ class ManagedOptimizerBackend:
                     await self.budget.reconcile(reservation, usage)
                     reservation = None
                 self.save()
+                if isinstance(exc, ModelOutputTruncated):
+                    grown = self.grow_output(request, output)
+                    if retry == self.policy.max_overflow_retries or grown <= output:
+                        raise
+                    limit -= grown - output
+                    output = grown
+                    stage.update(output_reserve=output, input_budget=limit)
+                    self.save()
+                    continue
                 if not is_overflow(exc) or retry == self.policy.max_overflow_retries:
                     if is_overflow(exc):
                         raise OptimizerContextFailure(
@@ -466,6 +549,7 @@ class ManagedOptimizerBackend:
                 p
                 for p in context["skills"]
                 if p["manifest"]["kind"] in ("router", "judge", "specialist", "workflow")
+                and (not context.get("joint_optimization") or p.get("status") != "frozen")
                 and p["manifest"]["name"]
                 not in (
                     "generation_agent",
@@ -492,36 +576,34 @@ class ManagedOptimizerBackend:
                 limit=limit,
                 output=output,
             )
-            if not isinstance(choice, dict) or choice.get("action") not in (
-                "edit",
-                "add",
-                "no_change",
-            ):
-                raise OptimizerProtocolFailure("invalid optimizer target selection")
-            action, target = choice["action"], choice.get("target_skill_id")
-            if action == "no_change":
-                if target is not None:
-                    raise OptimizerProtocolFailure("no_change selection must have null target")
+            if context.get("joint_optimization"):
+                payload = self._joint_selection_payload(choice, editable, request["payload"])
+            else:
+                payload = self._single_selection_payload(choice, editable, request["payload"])
+            if payload is None:
                 return BackendResult(
                     {"action": "no_change", "rationale": choice.get("rationale", "")}
                 )
-            if action == "edit" and (
-                not isinstance(target, str) or target not in {p["skill_id"] for p in editable}
-            ):
-                raise OptimizerProtocolFailure("selection targeted a frozen or unknown package")
-            if action == "add" and target is not None:
-                raise OptimizerProtocolFailure("addition selection must have null target")
-            payload = copy.deepcopy(request["payload"])
-            payload["skills"] = (
-                [p for p in editable if p["skill_id"] == target] if action == "edit" else []
-            )
-            payload["selected_action"] = action
-            payload["selected_target_skill_id"] = target
         response = await self.invoke(
             request, "proposal", payload, skill, selection=False, limit=limit, output=output
         )
         if not isinstance(response, dict):
             raise OptimizerProtocolFailure("optimizer proposal must be a JSON object")
+        if "selected_target_skill_ids" in payload:
+            from .joint_optimizer import response_changes
+
+            try:
+                changes = response_changes(response)
+            except ValueError as exc:
+                raise OptimizerProtocolFailure(str(exc)) from exc
+            for change in changes:
+                if (
+                    change.get("action") == "edit"
+                    and change.get("target_skill_id") not in payload["selected_target_skill_ids"]
+                ):
+                    raise OptimizerProtocolFailure("proposal changed the selected targets")
+                if change.get("action") == "add" and not payload["selected_allow_additions"]:
+                    raise OptimizerProtocolFailure("proposal added an unselected package")
         if (
             payload.get("selected_action") == "edit"
             and response.get("action") != "no_change"
@@ -537,3 +619,62 @@ class ManagedOptimizerBackend:
         ):
             raise OptimizerProtocolFailure("proposal changed the selected addition action")
         return BackendResult(response)
+
+    @staticmethod
+    def _joint_selection_payload(choice, editable, original):
+        if not isinstance(choice, dict):
+            raise OptimizerProtocolFailure("invalid joint target selection")
+        if choice.get("action") != "joint":
+            legacy = ManagedOptimizerBackend._single_selection_payload(choice, editable, original)
+            if legacy is None:
+                return None
+            target = legacy.pop("selected_target_skill_id")
+            action = legacy.pop("selected_action")
+            legacy["selected_target_skill_ids"] = [target] if action == "edit" else []
+            legacy["selected_allow_additions"] = action == "add"
+            return legacy
+        if set(choice) - {"action", "target_skill_ids", "allow_additions", "rationale"}:
+            raise OptimizerProtocolFailure("unknown joint selection fields")
+        targets = choice.get("target_skill_ids")
+        additions = choice.get("allow_additions")
+        if (
+            not isinstance(targets, list)
+            or any(not isinstance(t, str) for t in targets)
+            or len(set(targets)) != len(targets)
+            or not set(targets) <= {p["skill_id"] for p in editable}
+            or type(additions) is not bool
+            or not (targets or additions)
+        ):
+            raise OptimizerProtocolFailure("invalid joint target selection")
+        payload = copy.deepcopy(original)
+        payload["skills"] = [p for p in editable if p["skill_id"] in targets]
+        payload["selected_target_skill_ids"] = targets
+        payload["selected_allow_additions"] = additions
+        return payload
+
+    @staticmethod
+    def _single_selection_payload(choice, editable, original):
+        if not isinstance(choice, dict) or choice.get("action") not in (
+            "edit",
+            "add",
+            "no_change",
+        ):
+            raise OptimizerProtocolFailure("invalid optimizer target selection")
+        action, target = choice["action"], choice.get("target_skill_id")
+        if action == "no_change":
+            if target is not None:
+                raise OptimizerProtocolFailure("no_change selection must have null target")
+            return None
+        if action == "edit" and (
+            not isinstance(target, str) or target not in {p["skill_id"] for p in editable}
+        ):
+            raise OptimizerProtocolFailure("selection targeted a frozen or unknown package")
+        if action == "add" and target is not None:
+            raise OptimizerProtocolFailure("addition selection must have null target")
+        payload = copy.deepcopy(original)
+        payload["skills"] = (
+            [p for p in editable if p["skill_id"] == target] if action == "edit" else []
+        )
+        payload["selected_action"] = action
+        payload["selected_target_skill_id"] = target
+        return payload

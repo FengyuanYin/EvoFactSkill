@@ -5,8 +5,9 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-# Ground truth and dataset label governance never reach the optimizer. Matching is by
-# substring so an unexpected key such as ``expected_label`` stays covered.
+# Generic trace/context fields redact ground truth and label governance. Explicit
+# current-training supervision is attached separately by feedback batch routes.
+# Matching by substring also covers unexpected keys such as ``expected_label``.
 SENSITIVE_TOKENS = ("gold", "label", "api_key", "secret", "held_out", "meta_test", "final_test")
 
 # …except the model's own prediction, which is the signal an error-driven optimizer needs:

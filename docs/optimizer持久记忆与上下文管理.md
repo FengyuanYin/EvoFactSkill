@@ -2,6 +2,27 @@
 
 本功能仅接入 `feedback-evolve`、`meta-evolve` 和 `adversarial-evolve` 的批处理优化器。普通 `evolve` 的调用与提示保持原样。默认关闭，已有实验配置、技能库和结果保留；启用后建立新实验，不混接旧断点。
 
+## 多技能联合优化
+
+新启动的 feedback/meta/adversarial 批次实验另启用两项 optimizer 反馈行为，checkpoint 记录 `optimizer_feedback_policy: training_supervision_no_change_v1`：
+
+- `training_supervision` 仅向 optimizer 提供当前真实训练样本与已核验挑战的真实标签、预测、正确/错误/运行失败分类及 trace ID。监督字段与公开推理 trace 分离，不进入检测器、生成器或核验器；独立验证、未消费的验证和最终测试标签不进入该字段。通用脱敏规则、验证门控与记忆排序不变。
+- 同一技能库、当前 trace、训练监督和验证反馈下连续 3 次 `no_change`，本批以 `no_new_information` 记录并提前跳过，保留现有技能。新 trace、反馈或技能版本使计数重置；非 `no_change` 的结果中断连续计数。原 `max_attempts_per_batch` 仍为总尝试上限，提前跳过不额外消耗验证样本。
+
+旧 checkpoint 缺少上述策略标记时，续跑保持旧行为；不能通过旧实验的恢复偷偷切换对错监督或提前跳过机制。评估这两项改进应另建隔离实验，已有训练结果保留。它们不依赖是否启用持久记忆，普通 evolve 不接入。
+
+新启动的三条批次路线默认支持联合提案，不依赖 `optimizer_memory.enabled`：optimizer 自主选择改哪些可编辑技能、改几个及改什么，可以不改、编辑一个或多个技能，也可以新增 specialist 并同时调整相关路由。没有固定修改数量配额，仍受上下文窗口、输出长度、执行预算、配置的修改范围和 discovery 开关约束。
+
+联合响应格式为 `{"action":"joint","rationale":"整体行为假设","changes":[...]}`。每个 change 使用原有单技能 add/edit 协议；同一目标不能出现两次，新增名称和 ID 不能冲突。旧的单技能 add/edit/no_change 响应仍可使用。优化器自身、生成器、核验器、治理组件和标签契约保持冻结，每项仍检查摘要、文件路径、固定结构与安全规则。
+
+整组修改组成一个 candidate 技能库，与 baseline 在同一批验证样本上评估；启用独立验证时再通过原有 FAKE 召回等保护条件。验证失败整组拒绝，不部分晋升；通过后通过一次技能库事务提交整组内容。断点保留整组候选、验证进度和提交意图，提交前后中断都可恢复。
+
+上下文不足时，先从目录选择多个目标及是否允许新增，再带入所有已选目标的完整文件提出联合修改。完整目标组仍放不下时明确保存上下文失败，不偷偷减少目标；历史反馈与旧记忆按现有预算策略缩减。持久记忆记录整组目标、各自版本和整体验证结果，不把联合收益当作某个成员的独立贡献。
+
+新 checkpoint 记录 `joint_optimization: true`。没有此标记的旧 checkpoint 续跑保持单技能协议，普通 evolve 不接入联合提案。更改过配置或生成提示词的旧实验仍需新保存目录，不要手工给旧断点补标记。
+
+审计中的 `proposals`、`packages`、`base_ids` 保存完整组，`joint_rationale` 保存整体假设；单数 `proposal` / `package` / `base_id` 保留第一个成员供旧报表兼容。feedback-evolve 返回结果另有 `proposal_groups`，每组对应一次 gate decision；查看多技能修改时应读取组字段。
+
 ## 启用与配置
 
 ```yaml

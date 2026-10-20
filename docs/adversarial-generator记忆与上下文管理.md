@@ -2,6 +2,30 @@
 
 该功能只接入 `adversarial-evolve` 的 `AdversarialBatchRunner`，默认关闭。普通 evolve、feedback-evolve、meta-evolve 及其他历史生成工作流不自动启用；Verifier 继续盲审，Generator 的 SKILL.md 不自动修改。
 
+## 新实验：错误驱动的挑战分配
+
+新 adversarial-evolve checkpoint 默认记录 `adversarial_generation_policy`，版本为 `error_driven_challenges_v1`。当前训练示例增加 `diagnosis`，明确给出真实标签、预测标签及 `correct` / `wrong` / `runtime_failure`。本批已通过核验并完成检测的挑战也可提供错误诊断，但新样本的来源仍只能引用当前提供的真实训练示例；独立验证和最终测试不进入生成上下文。
+
+有已确认判错时，每轮 4 条默认分为 3 个错误机制扩展位置、1 个成功边界探索位置；较小预算在可行时保留一个探索位置。没有有效判错时全部用于探索。`generation_plan.slots` 在调用前固定每个位置的来源、目标及相关 trace，输出按位置配对，来源不符会被拒绝。配额约束生成目标，不规定 REAL / FAKE 比例，也不保证模型给出的机制解释具有因果正确性；标签仍需独立盲核验，不能为填满数量强造标签。
+
+同一信息指纹连续两次 `no_change` 时可请求一次补充挑战。该补充与验证拒绝共享 `max_supplement_rounds`，不增加总上限。新有效 trace 使信息指纹变化并重新计数；若补充失败、全部被拒绝或没有新有效 trace，同一指纹不会反复请求补充，连续第三次 `no_change` 按原策略跳批。optimizer 超时等调用失败不触发此机制；总优化尝试上限仍生效。
+
+结果新增 `challenge_statistics`：分别统计提出数量、结构合规数量、标签核验通过数量、有效判对/判错、运行失败及接收标签分布；攻击成功率为 `wrong / (correct + wrong)`，不将运行失败算作攻击成功。另按生成策略及当时检测技能库摘要汇总。每轮保留 `trigger` 和 `diagnostic_stats`，区分初始生成、验证拒绝补充及 no_change 补充。
+
+生成器记忆启用时继续提供历史覆盖和能力反馈；当前被分配位置引用的训练来源及失败 trace 受窗口压缩保护，不能为凑窗口偷偷删除。生成器本身的 SKILL.md 不修改，新增专用规则仅注入带新标记的运行。
+
+**旧 checkpoint 缺少此标记时不自动升级：保留原输入、提示词、来源分配及仅由验证拒绝触发补充的行为。** 已保存请求不重建，新策略需另开实验；旧配置、技能、trace、checkpoint 和结果均保留。
+
+## REAL 训练锚点与 FAKE 参考
+
+知识型对抗生成会给当前批次提供的训练示例标记 `source_role`：REAL 为 `real_training_anchor`，FAKE 为 `fake_training_reference`，其他标签为通用训练参考。此策略不依赖是否开启记忆，也不额外读取其他批次、独立验证或最终测试样本。
+
+生成器优先以 REAL 原文的核心断言作为数据集监督的构造起点：保留真值条件生成困难 REAL 改写，或在能够解释修改后断言为何为假的前提下构造 FAKE 对照。字段变化本身不证明为假；不确定时使用保义改写。FAKE 示例用于谣言模式和保标签变体，不能把原文断言当成事实，也不能把纠正后的文本自动标为 REAL。无 REAL 示例时使用当前已有示例，不跨池补取；不强制标签配额。
+
+这些样本仍是带标签的训练素材，不转换为 evidence 型 `facts`，不伪造证据。Verifier 仍独立判断，生成器的角色标记与理由不传给核验器。训练采样、候选池和每批样本预算不变。
+
+本次更新改变生成提示词摘要，旧 checkpoint 的实验身份会不匹配；使用新实验目录启动此策略，旧训练结果与 checkpoint 保留。
+
 ## 新实验配置
 
 ```yaml

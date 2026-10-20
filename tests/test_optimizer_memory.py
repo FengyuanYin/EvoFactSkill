@@ -162,7 +162,6 @@ def test_overflow_only_retries_with_smaller_payload_and_accounts_for_failed_call
     [
         (TimeoutError(), "runtime_failure"),
         (BackendHTTPError("HTTP 429: too many tokens per minute"), "runtime_failure"),
-        (ModelOutputTruncated(), "output_truncated"),
     ],
 )
 def test_other_failures_do_not_trigger_context_pruning(error, status):
@@ -359,6 +358,8 @@ def test_failed_response_usage_survives_child_task_and_is_charged(
     backend = OpenAICompatibleBackend(
         "https://example.invalid/v1", "test", "test", pricing_table=object()
     )
+    # Keep this accounting test to one paid call; adaptive retry is tested separately.
+    backend.max_output_tokens = 8192
     budget = BudgetManager()
     if component == "optimizer":
         manager, _, state, skill = setup(backend, budget=budget)

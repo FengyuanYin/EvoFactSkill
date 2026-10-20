@@ -1,5 +1,7 @@
 # adversarial-evolve 两折实验命令（Windows PowerShell）
 
+新启动实验支持 optimizer 自主提出多技能联合修改，整组验证和晋升；旧 checkpoint 续跑保持单技能模式，详见 [联合优化说明](optimizer持久记忆与上下文管理.md#多技能联合优化)。
+
 可选的 Generator 协议/标签经验、版本化能力边界、覆盖记忆和 token 管理见 [Adversarial Generator 记忆教程](adversarial-generator记忆与上下文管理.md)，其中提供同时启用 optimizer 与 generator 记忆的新两折配置。旧实验不自动切换。
 
 可选的跨批 optimizer 记忆、token 窗口管理及新实验配置见 [Optimizer 持久记忆教程](optimizer持久记忆与上下文管理.md)。默认配置和已启动实验保持原行为。
