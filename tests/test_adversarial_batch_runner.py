@@ -44,6 +44,11 @@ class Generator:
         rows, decisions = [], []
         for i in range(payload["batch_size"]):
             example = payload["examples"][i % len(payload["examples"])]
+            if "generation_plan" in payload:
+                source_id = payload["generation_plan"]["slots"][i]["source_sample_id"]
+                example = next(
+                    e for e in payload["examples"] if e["source_sample"]["sample_id"] == source_id
+                )
             source = example["source_sample"]
             row = deepcopy(source)
             row.update(
@@ -250,12 +255,27 @@ def test_endogenous_challenges_without_evidence_reach_optimizer(tmp_path, monkey
     assert all(
         e["source_sample"]["evidence"] == [] for r in backend.requests for e in r["examples"]
     )
+    roles = set()
+    for request in backend.requests:
+        assert request["construction_facts"] == []
+        for example in request["examples"]:
+            source = example["source_sample"]
+            assert source["domain"] == "train"
+            expected_role = {
+                "REAL": "real_training_anchor",
+                "FAKE": "fake_training_reference",
+            }[source["label"]]
+            assert example["source_role"] == expected_role
+            roles.add(example["source_role"])
+    assert roles == {"real_training_anchor", "fake_training_reference"}
     assert any(phase.startswith("adversarial") for phase, _ in calls)
     assert any(t["sample_id"].startswith("gen-") for c in contexts for t in c["traces"])
     for payload in backend.verifications:
         for sample in payload["samples"]:
             assert sample["evidence"] == []
             assert sample["source_training_sample"]["gold_label"] in {"REAL", "FAKE"}
+            assert set(sample["source_training_sample"]) == {"text", "gold_label"}
+            assert "source_role" not in sample
             assert not {"label", "target_label", "reason", "strategy", "decisions"} & set(sample)
     assert "generation_policy" in runner._identity_extra()
 

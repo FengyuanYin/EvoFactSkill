@@ -10,7 +10,7 @@ from evofact.evolution.optimizer_memory import (
     OptimizerContextFailure,
     digest,
 )
-from evofact.runtime.backend import BackendResult, call_json_with_usage
+from evofact.runtime.backend import BackendResult, ModelOutputTruncated, call_json_with_usage
 from evofact.runtime.node_runner import merge_usage_details
 
 
@@ -280,6 +280,9 @@ def reduce_generator_context(context):
         if memory.get(key):
             memory[key].pop()
             return {"kind": "generator_memory", "section": key}
+    if context.get("challenge_observations"):
+        context["challenge_observations"].pop()
+        return {"kind": "challenge_observation", "assigned_failure_traces_retained": True}
     feedback = context.get("validation_feedback", [])
     if len(feedback) > 1:
         feedback.pop()
@@ -301,8 +304,13 @@ def reduce_generator_context(context):
         ]
         return {"kind": "skill_files_to_catalog"}
     if len(context.get("examples", [])) > 1:
-        context["examples"].pop()
-        return {"kind": "training_example"}
+        protected = {
+            slot["source_sample_id"] for slot in context.get("generation_plan", {}).get("slots", [])
+        }
+        for index in reversed(range(len(context["examples"]))):
+            if context["examples"][index]["source_sample"]["sample_id"] not in protected:
+                context["examples"].pop(index)
+                return {"kind": "training_example"}
     return None
 
 
@@ -352,15 +360,23 @@ class GeneratorMemoryBackend(ManagedOptimizerBackend):
             response = await self.invoke(
                 request, "generation", payload, None, selection=False, limit=limit, output=output
             )
-            usage_rows = []
-            for event in request["generation"]["calls"]:
-                row = dict(event.get("usage", {}))
-                if row.get("cost") is not None:
-                    row["cost"] = Decimal(row["cost"])
-                if row:
-                    usage_rows.append(UsageDetails(**row))
-            return response, merge_usage_details(usage_rows), request["generation"]["payload"]
+            return response, self.request_usage(request), request["generation"]["payload"]
+        except ModelOutputTruncated as exc:
+            exc.generation_usage = self.request_usage(request)
+            exc.generation_payload = request["generation"].get("payload", payload)
+            raise
         except OptimizerContextFailure as exc:
             self.state["generator_context_error"] = str(exc)
             self.save()
             raise GeneratorContextFailure(str(exc)) from exc
+
+    @staticmethod
+    def request_usage(request):
+        usage_rows = []
+        for event in request.get("generation", {}).get("calls", []):
+            row = dict(event.get("usage", {}))
+            if row.get("cost") is not None:
+                row["cost"] = Decimal(row["cost"])
+            if row:
+                usage_rows.append(UsageDetails(**row))
+        return merge_usage_details(usage_rows)

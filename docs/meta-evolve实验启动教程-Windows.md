@@ -1,6 +1,8 @@
 # meta-evolve 两折实验命令（Windows PowerShell）
 
-可选的跨批 optimizer 记忆、token 窗口管理及新实验配置见 [Optimizer 持久记忆教程](optimizer持久记忆与上下文管理.md)。默认配置和已启动实验保持原行为。
+新启动实验支持 optimizer 自主提出多技能联合修改，整组验证和晋升；旧 checkpoint 续跑保持单技能模式，详见 [联合优化说明](optimizer持久记忆与上下文管理.md#多技能联合优化)。
+
+两折配置已启用跨批 optimizer 记忆和 token 窗口管理，详见 [Optimizer 持久记忆教程](optimizer持久记忆与上下文管理.md)。按当前实验使用的 DeepSeek V4 Flash 窗口设置 `context_window: 1000000`（tokens）；更换 optimizer 后端模型时同步调整。此配置更新不能直接续跑旧 checkpoint；新训练需使用新的保存路径，旧实验结果保留。
 
 在项目根目录执行。命令自动读取本地 `.env`，使用 `evofact.cmd`，无需重复设置密钥。推理与 optimizer 的模型设置沿用普通 evolve 两折配置。
 

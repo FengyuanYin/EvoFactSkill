@@ -75,7 +75,12 @@ def test_feedback_retry_fresh_validation_and_cross_batch_history(tmp_path, monke
     feedback = contexts[1]["validation_feedback"][0]
     assert feedback["gate"]["accepted"] is False
     assert feedback["baseline_traces"] and feedback["candidate_traces"]
-    assert "gold" not in json.dumps(contexts[1])
+    assert "gold" not in json.dumps(
+        {k: v for k, v in contexts[1].items() if k != "training_supervision"}
+    )
+    assert {r["sample_id"] for r in contexts[1]["training_supervision"]["records"]} <= {
+        s.sample_id for s in train
+    }
     assert contexts[1]["prior_proposals"][0]["disposition"] == "rejected"
     assert not contexts[2].get("validation_feedback")
     assert contexts[2]["prior_proposals"][0]["disposition"] == "active"

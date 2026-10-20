@@ -229,6 +229,7 @@ def build_parser():
             command.add_argument("--checkpoint")
             if name == "feedback-evolve":
                 command.add_argument("--max-attempts-per-batch", type=int, default=5)
+                command.add_argument("--validation-rounds", type=int, default=3)
             command.add_argument(
                 "--trace-log",
                 help="single JSONL file containing every training and validation inference trace",
@@ -253,6 +254,7 @@ def build_parser():
     meta_parser.add_argument("--episodes", type=int)
     meta_parser.add_argument("--validation-domains", help="Comma-separated held-out source domains")
     meta_parser.add_argument("--max-attempts-per-batch", type=int, default=5)
+    meta_parser.add_argument("--validation-rounds", type=int, default=3)
     meta_parser.add_argument(
         "--strategy",
         choices=("repeated_holdout", "leave_one_domain_out"),
@@ -284,6 +286,7 @@ def build_parser():
     adversarial.add_argument("--resume", action="store_true")
     adversarial.add_argument("--validation-domains", help="Comma-separated held-out source domains")
     adversarial.add_argument("--max-attempts-per-batch", type=int, default=5)
+    adversarial.add_argument("--validation-rounds", type=int, default=3)
     adversarial.add_argument(
         "--max-supplement-rounds",
         type=int,
@@ -1083,6 +1086,7 @@ async def _run_impl(args, progress):
             if args.validation_domains
             else None,
             max_attempts_per_batch=args.max_attempts_per_batch,
+            validation_rounds=args.validation_rounds,
             train_limit=args.limit or None,
             match_evolve_training=True,
         )
@@ -1142,6 +1146,7 @@ async def _run_impl(args, progress):
             if args.validation_domains
             else None,
             max_attempts_per_batch=args.max_attempts_per_batch,
+            validation_rounds=args.validation_rounds,
             train_limit=args.limit or None,
             match_evolve_training=True,
         )

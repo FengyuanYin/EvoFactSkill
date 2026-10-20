@@ -88,6 +88,14 @@ gate:
   alpha: 0.05
   max_cost_ratio: 1.5
 
+optimizer_memory:
+  enabled: true
+  context_window: 1000000
+  reserved_output_tokens: 8192
+  safety_fraction: 0.1
+  max_overflow_retries: 2
+  tokenizer_encoding: null
+
 meta_learning:
   enabled: true
   strategy: leave_one_domain_out

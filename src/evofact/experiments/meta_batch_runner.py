@@ -15,11 +15,18 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from evofact.config import config_identity
-from evofact.core.models import SampleEvaluation, SkillKind, SkillStatus, StatisticalTestResult
+from evofact.core.models import SampleEvaluation, SkillKind, StatisticalTestResult
 from evofact.data.domains import data_fingerprint, effective_domain, split_source_and_final
 from evofact.evolution.firewall import validate_generation_request
+from evofact.evolution.joint_optimizer import pending_bank
 from evofact.evolution.optimizer_memory import ManagedOptimizerBackend, remember
 from evofact.evolution.package_optimizer import PackageOptimizerAgent
+from evofact.evolution.training_feedback import (
+    FEEDBACK_POLICY_VERSION,
+    build_training_supervision,
+    information_fingerprint,
+    record_no_change,
+)
 from evofact.generation.memory import GeneratorContextFailure
 from evofact.skills.candidates import apply_candidate
 from evofact.skills.package_adapter import package_bank_digest, package_to_skill_spec
@@ -33,6 +40,7 @@ from evofact.validation.independent import (
     independent_pool,
     independent_rows,
 )
+from evofact.validation.rounds import AGGREGATION_POLICY, discovery_rounds, independent_rounds
 
 from .meta_runner import MetaEvolutionRunner, _evaluation_from, _proposal_from
 from .meta_sampling import matched_meta_plan
@@ -50,11 +58,38 @@ class MetaBatchRunner(MetaEvolutionRunner):
     def _identity_extra(self):
         return {}
 
+    def _new_route_state(self):
+        return {}
+
+    def _after_optimizer_outcome(self, state, *, status, stop_unchanged):
+        return stop_unchanged
+
     async def _optimizer_traces(self, state, batch, forbidden, save, *, progress, task):
         return state["train_traces"]
 
     def _reset_batch(self, state):
-        pass
+        state.pop("optimizer_no_change", None)
+
+    def _optimizer_training_sources(self, state, batch):
+        return [(sample, "real_training") for sample in batch]
+
+    def _skip_batch(self, state, index, reason):
+        state["skipped_batches"].append(
+            {
+                "batch": index + 1,
+                "attempts": state["attempt"],
+                "reason": reason,
+                "bank_digest": package_bank_digest(self.base.packages),
+                **(
+                    {"no_change": dict(state["optimizer_no_change"])}
+                    if reason == "no_new_information"
+                    else {}
+                ),
+            }
+        )
+        state["completed_batches"] += 1
+        self._reset_batch(state)
+        state.update(pending=None, train_traces=None, feedback=[], attempt=0, commit_intent=None)
 
     def _extra_outcome(self, state):
         return {}
@@ -198,6 +233,86 @@ class MetaBatchRunner(MetaEvolutionRunner):
         save()
         return True
 
+    async def _paired_round_validation(
+        self,
+        pending,
+        stage,
+        plans,
+        samples,
+        baseline_skills,
+        candidate_skills,
+        save,
+        *,
+        progress,
+        task,
+    ):
+        """Finish every fixed paired round, then recompute metrics from the union."""
+        by_id = {s.sample_id: s for s in samples}
+        ids = [sid for group in plans for sid in group]
+        if len(set(ids)) != len(ids) or not set(ids) <= by_id.keys():
+            raise ValueError("invalid fixed validation sample plan")
+        records = pending.setdefault(stage + "_rounds", [{} for _ in plans])
+        if len(records) != len(plans):
+            raise ValueError("saved validation rounds do not match the fixed plan")
+        for index, (record, group) in enumerate(zip(records, plans, strict=True)):
+            if record.setdefault("sample_ids", group) != group:
+                raise ValueError("saved paired validation sample IDs changed")
+            rows = [by_id[sid] for sid in group]
+            for role, skills in (("baseline", baseline_skills), ("candidate", candidate_skills)):
+                if record.get(role) is not None:
+                    continue
+                clean = await self._clean_validation(
+                    record,
+                    role,
+                    rows,
+                    skills,
+                    save,
+                    progress=progress,
+                    task=task,
+                    phase=f"validation {stage} round {index + 1}/{len(plans)} {role}",
+                )
+                if not clean:
+                    return False
+            save()
+        for role in ("baseline", "candidate"):
+            evaluations = [
+                row
+                for record in records
+                for row in _evaluation_from(record[role]["result"]).per_sample
+            ]
+            if [row.sample_id for row in evaluations] != ids:
+                raise ValueError("paired validation results differ from the fixed sample plan")
+            key = role if stage == "discovery" else "independent_" + role
+            pending[key] = {
+                "traces": [t for record in records for t in record[role]["traces"]],
+                "result": _json(asdict(evaluate(evaluations))),
+            }
+        save()
+        return True
+
+    @staticmethod
+    def _round_audit(pending):
+        return {
+            "policy": AGGREGATION_POLICY,
+            "stages": {
+                stage: [
+                    {
+                        "sample_ids": record["sample_ids"],
+                        **{
+                            role: record[role]["result"]["aggregate_metrics"]
+                            for role in ("baseline", "candidate")
+                        },
+                        "runtime_failures": {
+                            role: record.get(role + "_progress", {}).get("failures", [])
+                            for role in ("baseline", "candidate")
+                        },
+                    }
+                    for record in pending.get(stage + "_rounds", [])
+                ]
+                for stage in ("discovery", "independent")
+            },
+        }
+
     async def run(
         self,
         samples,
@@ -212,8 +327,11 @@ class MetaBatchRunner(MetaEvolutionRunner):
         progress=None,
         trace_log_path=None,
         match_evolve_training=False,
+        validation_rounds=1,
     ):
         self._check_enabled()
+        if type(validation_rounds) is not int or validation_rounds < 1:
+            raise ValueError("validation_rounds must be a positive integer")
         if max_attempts_per_batch < 1 or (train_limit is not None and train_limit < 1):
             raise ValueError("attempt limit and training limit must be positive")
         source, final, train, valid, batches, heldout, sampling = self._prepare_plan(
@@ -304,6 +422,12 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 str(Path(trace_log_path).resolve()) if trace_log_path is not None else None
             ):
                 raise ValueError("resume must use the checkpoint-recorded trace log")
+            aggregation = state.get("validation_aggregation")
+            if aggregation and (
+                aggregation.get("policy") != AGGREGATION_POLICY
+                or aggregation.get("rounds") != validation_rounds
+            ):
+                raise ValueError("resume must keep the checkpoint-recorded validation rounds")
         else:
             if checkpoint.exists():
                 raise ValueError(
@@ -320,6 +444,13 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 "feedback": [],
                 "attempts": [],
                 "total_batches": len(batches),
+                "joint_optimization": True,
+                "optimizer_feedback_policy": FEEDBACK_POLICY_VERSION,
+                **self._new_route_state(),
+                "validation_aggregation": {
+                    "policy": AGGREGATION_POLICY,
+                    "rounds": validation_rounds,
+                },
                 "pending": None,
                 "packages": [package_to_dict(p) for p in self.base.packages],
                 "committed_snapshots": [],
@@ -333,6 +464,21 @@ class MetaBatchRunner(MetaEvolutionRunner):
             state["trace_log"] = (
                 str(Path(trace_log_path).resolve()) if trace_log_path is not None else None
             )
+        # A missing marker is deliberately legacy, including a pending candidate.
+        rounds = state.get("validation_aggregation", {}).get("rounds", 1)
+        discovery_size = valid_size * rounds
+        if rounds > 1 and policy.enabled:
+            # Fail before model calls if a complete balanced, disjoint plan cannot fit.
+            for batch in batches:
+                independent_rounds(
+                    independent,
+                    batch,
+                    rounds=rounds,
+                    per_domain=policy.evaluation_samples_per_domain,
+                    registry=self.base.label_contract_registry,
+                    seed=self.config.seed,
+                    cross_domain=match_evolve_training,
+                )
         if policy.enabled:
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             (checkpoint.parent / "independent-validation-manifest.json").write_text(
@@ -360,7 +506,10 @@ class MetaBatchRunner(MetaEvolutionRunner):
             budget.restore(state["budget"])
 
         def save():
-            state["budget"] = budget.export_state()
+            # Per-sample callbacks may save while sibling requests are in flight.
+            # Persist settled usage only; reservations remain live in memory and
+            # must not be restored as charges or stale locks after a restart.
+            state["budget"] = budget.export_reconciled_state()
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             temporary = checkpoint.with_name(checkpoint.name + ".tmp")
             temporary.write_text(
@@ -467,23 +616,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         save()
                 if state["pending"] is None:
                     if state["attempt"] >= max_attempts_per_batch:
-                        state["skipped_batches"].append(
-                            {
-                                "batch": index + 1,
-                                "attempts": state["attempt"],
-                                "reason": "attempt_limit",
-                                "bank_digest": package_bank_digest(self.base.packages),
-                            }
-                        )
-                        state["completed_batches"] += 1
-                        self._reset_batch(state)
-                        state.update(
-                            pending=None,
-                            train_traces=None,
-                            feedback=[],
-                            attempt=0,
-                            commit_intent=None,
-                        )
+                        self._skip_batch(state, index, "attempt_limit")
                         save()
                         continue
                     if match_evolve_training:
@@ -505,7 +638,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     else:
                         available = valid[state["validation_cursor"] :]
                         forbidden_validation = available
-                    if len(available) < valid_size:
+                    if len(available) < discovery_size:
                         state["status"] = "validation_pool_exhausted"
                         break
                     forbidden = (
@@ -524,6 +657,22 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     except InferenceIncomplete:
                         state["status"] = "challenge_runtime_failure"
                         break
+                    supervised = state.get("optimizer_feedback_policy") == FEEDBACK_POLICY_VERSION
+                    supervision = None
+                    fingerprint = None
+                    if supervised:
+                        supervision = build_training_supervision(
+                            optimizer_traces,
+                            self._optimizer_training_sources(state, batch),
+                            self.base.label_contract_registry,
+                        )
+                        validate_generation_request(supervision, forbidden)
+                        fingerprint = information_fingerprint(
+                            package_bank_digest(self.base.packages),
+                            optimizer_traces,
+                            state["feedback"],
+                            supervision,
+                        )
                     optimizer_packages = [
                         p
                         for p in self.base.packages
@@ -556,6 +705,8 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         feedback=list(reversed(state["feedback"])) or None,
                         prior_proposals=self._proposal_history(state),
                         feedback_enabled=True,
+                        joint_enabled=state.get("joint_optimization", False),
+                        training_supervision=supervision,
                     )
                     if memory_policy.enabled:
                         request = state.get("optimizer_request")
@@ -571,8 +722,18 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             state.setdefault("optimizer_requests", []).append(request)
                             state.pop("optimizer_request", None)
                     candidate = optimized.candidate
+                    candidates = optimized.candidates or ((candidate,) if candidate else ())
+                    stop_unchanged = False
+                    if supervised:
+                        stop_unchanged = record_no_change(
+                            state, fingerprint, no_change=optimized.status == "no_change"
+                        )
+                    stop_unchanged = self._after_optimizer_outcome(
+                        state, status=optimized.status, stop_unchanged=stop_unchanged
+                    )
                     if candidate is None or (
-                        candidate.base is None and not self.config.evolution.discovery
+                        any(c.base is None for c in candidates)
+                        and not self.config.evolution.discovery
                     ):
                         state["attempts"].append(
                             {
@@ -580,21 +741,28 @@ class MetaBatchRunner(MetaEvolutionRunner):
                                 "attempt": state["attempt"],
                                 "status": optimized.status,
                                 "reason": optimized.reason,
+                                **({"information_fingerprint": fingerprint} if supervised else {}),
                             }
                         )
                         if memory_policy.enabled:
                             remember(state, state["attempts"][-1], training=state["train_traces"])
+                        if stop_unchanged:
+                            self._skip_batch(state, index, "no_new_information")
                         save()
                         continue
-                    if candidate.base is not None and self.config.evolution.scope == "instructions":
-                        edits = {op.path for op in candidate.patch.file_operations}
-                        manifest = replace(
-                            candidate.package.manifest, version=candidate.base.manifest.version
-                        )
-                        if (
-                            edits - {candidate.base.manifest.entrypoints.instructions}
-                            or manifest != candidate.base.manifest
-                        ):
+                    if self.config.evolution.scope == "instructions":
+
+                        def outside_scope(c):
+                            if c.base is None:
+                                return False
+                            edits = {op.path for op in c.patch.file_operations}
+                            manifest = replace(c.package.manifest, version=c.base.manifest.version)
+                            return bool(
+                                edits - {c.base.manifest.entrypoints.instructions}
+                                or manifest != c.base.manifest
+                            )
+
+                        if any(outside_scope(c) for c in candidates):
                             state["attempts"].append(
                                 {
                                     "batch": index + 1,
@@ -606,49 +774,109 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             continue
                     from evofact.evolution.package_candidate import package_candidate_to_proposal
 
-                    proposal = package_candidate_to_proposal(
-                        candidate,
-                        cluster_id=task,
-                        source_trace_ids=tuple(t["trace_id"] for t in optimizer_traces),
-                    )
+                    proposals = [
+                        package_candidate_to_proposal(
+                            c,
+                            cluster_id=task,
+                            source_trace_ids=tuple(t["trace_id"] for t in optimizer_traces),
+                        )
+                        for c in candidates
+                    ]
+                    proposal = proposals[0]
                     forbidden = (
                         independent
                         + forbidden_validation
                         + [s for s in samples if effective_domain(s) in final]
                     )
-                    validate_generation_request(asdict(proposal), forbidden)
+                    for item in proposals:
+                        validate_generation_request(asdict(item), forbidden)
+                    for c in candidates:
+                        validate_generation_request(package_to_dict(c.package), forbidden)
                     start = state["validation_cursor"]
                     state["pending"] = {
                         "proposal": _json(asdict(proposal)),
                         "package": package_to_dict(candidate.package),
                         "base_id": candidate.base.skill_id if candidate.base else None,
-                        "safety": candidate.safety_level,
+                        "safety": "review_required"
+                        if any(c.safety_level == "review_required" for c in candidates)
+                        else candidate.safety_level,
                         "validation_start": start,
                         "baseline": None,
                         "candidate": None,
                         **(
-                            {"validation_ids": [s.sample_id for s in available[:valid_size]]}
+                            {"validation_ids": [s.sample_id for s in available[:discovery_size]]}
                             if match_evolve_training
                             else {}
                         ),
                     }
+                    if rounds > 1:
+                        # Freeze both stages' complete sample plans before any evaluation.
+                        state["pending"]["discovery_round_ids"] = discovery_rounds(
+                            available, size=valid_size, rounds=rounds
+                        )
+                        if policy.enabled:
+                            guard_ids = independent_rounds(
+                                independent,
+                                batch,
+                                rounds=rounds,
+                                per_domain=policy.evaluation_samples_per_domain,
+                                registry=self.base.label_contract_registry,
+                                seed=self.config.seed + start,
+                                cross_domain=match_evolve_training,
+                            )
+                            state["pending"]["independent_round_ids"] = guard_ids
+                            state["pending"]["independent_sample_ids"] = [
+                                sid for group in guard_ids for sid in group
+                            ]
+                    if state.get("joint_optimization"):
+                        state["pending"].update(
+                            proposals=[_json(asdict(p)) for p in proposals],
+                            packages=[package_to_dict(c.package) for c in candidates],
+                            base_ids=[c.base.skill_id for c in candidates if c.base is not None],
+                            joint_rationale=optimized.reason,
+                        )
                     if match_evolve_training:
                         state["used_validation_ids"].extend(state["pending"]["validation_ids"])
-                    state["validation_cursor"] += valid_size
+                    state["validation_cursor"] += discovery_size
                     save()
                 pending = state["pending"]
                 proposal = _proposal_from(pending["proposal"])
-                candidate_skills = apply_candidate(self.base.skills, proposal)
-                if match_evolve_training:
+                candidate_skills = (
+                    [package_to_skill_spec(p) for p in pending_bank(self.base.packages, pending)]
+                    if "packages" in pending
+                    else apply_candidate(self.base.skills, proposal)
+                )
+                if rounds > 1:
+                    by_id = {s.sample_id: s for s in valid}
+                    rows = [by_id[sid] for group in pending["discovery_round_ids"] for sid in group]
+                elif match_evolve_training:
                     by_id = {s.sample_id: s for s in valid}
                     rows = [by_id[sid] for sid in pending["validation_ids"]]
                 else:
                     rows = valid[
                         pending["validation_start"] : pending["validation_start"] + valid_size
                     ]
+                if rounds > 1:
+                    clean = await self._paired_round_validation(
+                        pending,
+                        "discovery",
+                        pending["discovery_round_ids"],
+                        valid,
+                        self.base.skills,
+                        candidate_skills,
+                        save,
+                        progress=progress,
+                        task=task,
+                    )
+                    if not clean:
+                        state["status"] = "validation_runtime_failure"
                 for role, skills in (
-                    ("baseline", self.base.skills),
-                    ("candidate", candidate_skills),
+                    ()
+                    if rounds > 1
+                    else (
+                        ("baseline", self.base.skills),
+                        ("candidate", candidate_skills),
+                    )
                 ):
                     if pending[role] is None:
                         if policy.enabled:
@@ -681,20 +909,42 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     safety=pending["safety"],
                 )
                 if policy.enabled and decision.accepted:
-                    guard_rows = independent_rows(
-                        independent,
-                        batch,
-                        cross_domain=match_evolve_training,
-                        per_domain=policy.evaluation_samples_per_domain,
-                        registry=self.base.label_contract_registry,
-                        seed=self.config.seed + pending["validation_start"],
+                    guard_rows = (
+                        []
+                        if rounds > 1
+                        else independent_rows(
+                            independent,
+                            batch,
+                            cross_domain=match_evolve_training,
+                            per_domain=policy.evaluation_samples_per_domain,
+                            registry=self.base.label_contract_registry,
+                            seed=self.config.seed + pending["validation_start"],
+                        )
                     )
                     pending.setdefault("independent_sample_ids", [s.sample_id for s in guard_rows])
                     by_id = {s.sample_id: s for s in independent}
                     guard_rows = [by_id[sid] for sid in pending["independent_sample_ids"]]
+                    if rounds > 1:
+                        clean = await self._paired_round_validation(
+                            pending,
+                            "independent",
+                            pending["independent_round_ids"],
+                            independent,
+                            self.base.skills,
+                            candidate_skills,
+                            save,
+                            progress=progress,
+                            task=task,
+                        )
+                        if not clean:
+                            state["status"] = "validation_runtime_failure"
                     for role, skills in (
-                        ("independent_baseline", self.base.skills),
-                        ("independent_candidate", candidate_skills),
+                        ()
+                        if rounds > 1
+                        else (
+                            ("independent_baseline", self.base.skills),
+                            ("independent_candidate", candidate_skills),
+                        )
                     ):
                         if pending.get(role) is None:
                             clean = await self._clean_validation(
@@ -729,7 +979,18 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     "attempt": state["attempt"],
                     "validation_sample_ids": [s.sample_id for s in rows],
                     "proposal": pending["proposal"],
+                    **(
+                        {
+                            "proposals": pending["proposals"],
+                            "joint_rationale": pending.get("joint_rationale", ""),
+                        }
+                        if "proposals" in pending
+                        else {}
+                    ),
                     "decision": _json(asdict(decision)),
+                    **(
+                        {"validation_aggregation": self._round_audit(pending)} if rounds > 1 else {}
+                    ),
                     **(
                         {
                             "train_domains": sorted({effective_domain(s) for s in batch}),
@@ -757,6 +1018,11 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         {
                             "attempt": state["attempt"],
                             "rejected_package": pending["package"],
+                            **(
+                                {"rejected_packages": pending["packages"]}
+                                if "packages" in pending
+                                else {}
+                            ),
                             "gate": audit["decision"],
                             "baseline_traces": pending["baseline"]["traces"],
                             "candidate_traces": pending["candidate"]["traces"],
@@ -765,10 +1031,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     state["pending"] = None
                     save()
                     continue
-                desired = [p for p in self.base.packages if p.skill_id != pending["base_id"]]
-                desired.append(
-                    replace(package_from_dict(pending["package"]), status=SkillStatus.ACTIVE)
-                )
+                desired = pending_bank(self.base.packages, pending)
                 intent = {
                     "packages": [package_to_dict(p) for p in desired],
                     "run_id": f"{state['run_id']}-batch-{index + 1}",
@@ -815,6 +1078,13 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 else {}
             ),
             "validation_samples_used": state["validation_cursor"],
+            "validation_aggregation": state.get(
+                "validation_aggregation",
+                {
+                    "policy": "legacy_single_round",
+                    "rounds": 1,
+                },
+            ),
             "attempts": state["attempts"],
             "skipped_batches": state["skipped_batches"],
             "committed_snapshots": state["committed_snapshots"],
