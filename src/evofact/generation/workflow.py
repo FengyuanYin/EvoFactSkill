@@ -173,6 +173,17 @@ class GenerationWorkflow:
                 reservation = None
             else:
                 response, usage = await call_json_with_usage(backend, system, payload)
+        except TimeoutError as exc:
+            if reservation is not None:
+                usage = getattr(exc, "usage_details", None) or UsageDetails(calls=1)
+                await budget_manager.reconcile(reservation, usage)
+                reservation = None
+                exc.generation_usage = usage
+            if not hasattr(exc, "generation_usage"):
+                exc.generation_usage = UsageDetails(calls=1)
+            if not hasattr(exc, "generation_payload"):
+                exc.generation_payload = payload
+            raise
         finally:
             if reservation is not None:
                 await budget_manager.release(reservation)

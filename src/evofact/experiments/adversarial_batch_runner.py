@@ -484,6 +484,26 @@ class AdversarialBatchRunner(MetaBatchRunner):
                             "usage": {},
                         },
                     )
+                except TimeoutError as exc:
+                    LOGGER.warning(
+                        "Generator request timed out; retaining prior challenges: %s", exc
+                    )
+                    current.update(
+                        request={
+                            k: v
+                            for k, v in exc.generation_payload.items()
+                            if k not in {"workflow_references", "workflow_template"}
+                        },
+                        response={"samples": [], "decisions": []},
+                        generation_error={"type": type(exc).__name__, "reason": str(exc)},
+                        generator_usage=_json(asdict(exc.generation_usage)),
+                        verification={
+                            "accepted": [],
+                            "rejected": [{"index": None, "reason": "generator request timed out"}],
+                            "reviews": [],
+                            "usage": {},
+                        },
+                    )
                 save()
             if current["verification"] is None:
                 existing = batch + [

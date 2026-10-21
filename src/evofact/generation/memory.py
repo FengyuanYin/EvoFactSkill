@@ -344,6 +344,7 @@ class GeneratorMemoryBackend(ManagedOptimizerBackend):
 
     async def execute(self, system, payload):
         self.instructions = system
+        request = None
         try:
             window, output, limit = await self.prepare()
             requests = self.state.setdefault("generator_requests", {})
@@ -361,9 +362,9 @@ class GeneratorMemoryBackend(ManagedOptimizerBackend):
                 request, "generation", payload, None, selection=False, limit=limit, output=output
             )
             return response, self.request_usage(request), request["generation"]["payload"]
-        except ModelOutputTruncated as exc:
-            exc.generation_usage = self.request_usage(request)
-            exc.generation_payload = request["generation"].get("payload", payload)
+        except (ModelOutputTruncated, TimeoutError) as exc:
+            exc.generation_usage = self.request_usage(request or {})
+            exc.generation_payload = (request or {}).get("generation", {}).get("payload", payload)
             raise
         except OptimizerContextFailure as exc:
             self.state["generator_context_error"] = str(exc)

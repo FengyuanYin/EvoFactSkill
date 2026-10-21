@@ -1,6 +1,10 @@
 # 最新 adversarial-evolve 完整实验启动教程（Windows PowerShell）
 
-适用于当前知识型对抗生成、REAL 训练锚点、多技能联合优化、独立均衡验证，以及 optimizer / generator 持久记忆与窗口管理版本。
+适用于当前知识型对抗生成、REAL 训练锚点、多 Agent 联合优化、源领域验证完整反馈，以及 optimizer / generator 持久记忆与窗口管理版本。
+
+**最新策略：新准备的 adversarial-evolve 配置默认 `independent_validation.source_feedback: true`。不再预留源领域独立保护名单，也不再运行第二阶段独立保护。所有符合跨域条件的源领域样本均可参与验证；每次候选完成固定三轮后，baseline / candidate trace、真实标签及判错诊断向 optimizer 开放，并跨批保存。Final-test 数据与标签继续隔离。**
+
+旧目录没有这个配置项时，仍按原独立保护策略续跑。不要修改正在运行的配置，也不要将旧实验改成新策略后直接 `--resume`；配置身份不同会拒绝恢复。应用新策略请另开带时间标签的实验，保留旧结果。
 
 **本教程所有训练和测试都写入新时间标签目录。旧实验的配置、checkpoint、技能库、trace 和 final-test 结果全部保留。不要删除旧文件，也不要将新命令指向 `docs/weibo21_adversarial_knowledge_fold_*` 或旧技能库。**
 
@@ -11,16 +15,16 @@
 | 两折训练数据 | 沿用普通 evolve 的真实训练样本选择，每折 200 条 |
 | 真实训练批次 | batch=16，共 13 批；按跨域验证要求组成混域批次 |
 | 训练样本并发 | 8 |
-| 发现验证（新实验） | 固定 3 轮，每轮新增 8 条，共 24 条；来自当前批次未出现的源领域 |
+| 源领域验证（新实验） | 固定 3 轮，每轮新增 8 条，共 24 条；来自当前批次未出现的源领域，按领域 / 标签分组交替取样 |
 | 对抗生成（新实验） | 每轮最多 4 条；有判错时默认 3 条错误扩展、1 条边界探索，无判错则全部探索 |
 | 补充触发（新实验） | 验证拒绝或相同信息连续两次 no_change；两者共享最多 5 轮补充，不计运行失败为攻击成功 |
 | 生成材料 | 当前提供的带标签训练示例及模型内源知识；优先使用 REAL 锚点，保留 FAKE 参考 |
 | 候选修改 | optimizer 自主选择一个或多个可编辑技能，可新增 specialist；整组验证与晋升 |
-| 每批优化上限 | 10 次；耗尽后记录跳过并进入下一批 |
-| 独立均衡候选池 | 每个源领域固定 32 条，REAL / FAKE 各 16 条；两折分别 128 / 160 条 |
-| 独立验证（新实验） | 固定 3 轮，每个符合跨域条件的源领域每轮新增 4 条，真假各 2 条，共每域 12 条；两侧用相同 ID |
-| 晋升保护 | 先通过发现验证；独立验证要求整体 Macro-F1 不下降、整体及各域 FAKE 召回不下降、单域 Macro-F1 降幅不超过 0.05 |
-| 运行失败处理 | 独立验证功能启用时，仅重试运行失败样本，额外最多 2 次；完整输出但判错不重试 |
+| 每批优化上限 | 总共最多尝试 5 次（含首次）；耗尽后记录跳过并进入下一批 |
+| 验证候选范围 | 全部符合条件的源领域样本；不划出禁止反馈的保护池；直接训练仍固定 200 条 |
+| 验证反馈 | 候选全部轮次结束后，开放双方 trace、真实标签与判错诊断；晋升和拒绝的经验都跨批保留 |
+| 晋升条件 | 本次三轮聚合 Macro-F1 严格提升，整体及各域 FAKE 召回不下降，并通过安全检查；没有第二道独立保护否决 |
+| 运行失败处理 | 仅重试运行失败样本，额外最多 2 次；完整输出但判错不重试 |
 | optimizer / generator 记忆 | 均开启；保留跨批经验及单次请求的本地响应复用 |
 | 上下文窗口 | 按本实验使用的 DeepSeek V4 Flash 设置，两者均为 1,000,000 tokens |
 | 窗口预算 | 安全余量 10%，输出预留 8192 tokens；基础输入预算 891,808 tokens |
@@ -33,9 +37,13 @@
 
 新实验同时启用错误驱动生成，checkpoint 记录 `adversarial_generation_policy`。生成前提供明确的判对/判错诊断，并固定每个生成位置的当前训练来源。生成器及盲核验器保持冻结，REAL / FAKE 标签不设配额。旧断点不升级；具体输入、补充触发及 `challenge_statistics` 统计口径见 [生成器机制与记忆说明](adversarial-generator记忆与上下文管理.md)。
 
-新建 CLI 实验默认 `--validation-rounds 3`，同一候选在三轮内保持不变。验证前固定三轮发现验证及独立保护的全部名单；每轮使用不同样本，baseline 和 candidate 使用相同名单。三轮结束后合并逐样本预测重新计算 Macro-F1、各域指标及 FAKE 召回，不平均各轮 F1，不根据中间结果提前晋升或临时追加样本。独立保护仍仅在发现验证整体通过后执行。
+新建 CLI 实验默认 `--validation-rounds 3`，同一候选在三轮内保持不变。验证前固定三轮的全部名单；每轮使用不同样本，baseline 和 candidate 使用相同名单。三轮结束后合并逐样本预测重新计算 Macro-F1、各域指标及 FAKE 召回，不平均各轮 F1，不根据中间结果提前晋升或临时追加样本。源领域验证是开发反馈，不作为独立泛化成绩；未见领域效果由 final-test 衡量。
 
-拒绝后形成的新候选使用新的发现验证样本，不沿用旧候选成绩。验证样本不足时明确停止，不能减少轮数、回退到训练领域或换样本直到通过。三轮方案的样本推理量约为原单轮的三倍，固定独立候选池仍为每域 32 条。可在首次启动时用 `--validation-rounds 1` 显式选择单轮对照；新实验续跑必须保持首次记录的轮数。
+拒绝后形成的新候选使用新的源领域验证样本，不沿用旧候选成绩。验证样本不足时明确停止，不能减少轮数或回退到当前训练批次的领域。可在首次启动时用 `--validation-rounds 1` 显式选择单轮对照；新实验续跑必须保持首次记录的轮数。完整验证反馈保存在 checkpoint 的 `source_validation_feedback` 中；每次请求按新到旧供 optimizer 使用，窗口不足时优先移除旧反馈，checkpoint 保留原始记录。
+
+即使只剩最后一份历史验证反馈，其完整 trace 仍可逐条移出请求，优先移除判对案例，保留真实标签及判错诊断，再考虑减少当前 trace。没有配置 tokenizer 时使用 UTF-8 字节作保守估算，因此本地窗口不足不代表服务端实际 token 已达 1M。若旧断点停在 `protected optimizer input does not fit model window`，修复后直接使用原命令加 `--resume`；尚未调用模型的阶段会从原始请求重建上下文，已调用阶段的记录和预算不会重置，无需删除 checkpoint。
+
+对抗生成的 API 读取超时会记录为该轮 `generation_error`，不接受不完整样本，也不计作攻击成功；保留之前通过核验的挑战，继续用现有训练反馈优化。失败调用仍计入预算，超时轮占用原有生成轮数，不额外无限重试。已因生成超时退出的旧断点可直接 `--resume`，已完成的训练和验证结果保留。
 
 **本教程已有运行目录及旧 checkpoint 不自动升级。** 缺少 `validation_aggregation` 标记的断点仍按原单轮方式续跑，即使命令省略该参数。应用三轮策略需另开实验，保留旧结果；断点会保存全部轮次名单、逐样本进度和聚合结果，续跑只补未完成部分。
 
@@ -46,15 +54,15 @@
 ```powershell
 Set-Location 'F:\intern\Agent\auto-skill\EvoFactSkill'
 $ErrorActionPreference = 'Stop'
-$runRoot = 'docs/independent-validation/20261020-012145-77a96fd4'
+$runRoot = 'docs/independent-validation/20261020-233621-0f256927'
 ```
 
-**上面的新目录已经离线准备好，两折配置和固定验证名单均已生成；尚未启动训练，也没有调用模型。可以直接进入第 3 步。** `evofact.cmd` 使用项目内 `.venv` 的 Python，并沿用项目现有的 `.env`。推理模型别名为配置中的 `deepseek-flash`；optimizer 模型及端点使用 `EVOFACT_OPTIMIZER_MODEL`、`EVOFACT_OPTIMIZER_BASE_URL` 等现有环境设置。两者实际服务应与上面的窗口设置一致。
+上面的新目录已经离线准备好，两折均启用源领域验证完整反馈，尚未启动训练、没有调用模型，可直接进入第 3 步。`evofact.cmd` 使用项目内 `.venv` 的 Python，并沿用项目现有的 `.env`。推理模型别名为配置中的 `deepseek-flash`；optimizer 模型及端点使用 `EVOFACT_OPTIMIZER_MODEL`、`EVOFACT_OPTIMIZER_BASE_URL` 等现有环境设置。
 
 本次文件位置：
 
 ```text
-docs/independent-validation/20261020-012145-77a96fd4/
+docs/independent-validation/20261020-233621-0f256927/
   run.json
   adversarial-evolve/
     fold_1/
@@ -66,7 +74,7 @@ docs/independent-validation/20261020-012145-77a96fd4/
       validation-manifest.json
       adversarial-evolve/
 
-skills/store_independent_validation/20261020-012145-77a96fd4/
+skills/store_independent_validation/20261020-233621-0f256927/
   adversarial-evolve/
     fold_1/adversarial-evolve/     # 本折新技能库
     fold_2/adversarial-evolve/
@@ -76,7 +84,7 @@ skills/store_independent_validation/20261020-012145-77a96fd4/
 
 ### 另开一次全新实验时使用
 
-**只有另开实验才运行下面这段；本次直接使用上面的已准备目录即可。断点续跑绝不能重新运行准备命令。** 准备脚本生成北京时间戳和随机短标签，不调用模型。
+**仅另开实验时运行下面这段；使用上面的已准备目录时不需要运行，断点续跑也不能重新运行。** 准备脚本生成北京时间戳和随机短标签，不调用模型。对于 adversarial-evolve，默认不分配独立保护池，`--samples-per-domain 32` 与 `--evaluation-samples-per-domain 4` 只保留给旧保护模式及其他路线；新模式每轮仍由 `evolution_validation_samples: 8` 决定验证数量。需要保留旧独立保护作为新对照实验时，可额外添加 `--independent-protection`。
 
 ```powershell
 $prepareArgs = @(
@@ -108,7 +116,7 @@ if ($runRoot -notmatch '^docs/independent-validation/\d{8}-\d{6}-[0-9a-f]{8}$') 
 }
 if (-not (Test-Path -LiteralPath "$runRoot/run.json")) { throw 'Run manifest not found.' }
 $runTag = Split-Path -Leaf $runRoot
-$maxAttempts = 10
+$maxAttempts = 5
 $jobs = @()
 foreach ($fold in 1, 2) {
     $foldRoot = "$runRoot/adversarial-evolve/fold_$fold"
@@ -165,7 +173,7 @@ foreach ($job in $jobs) {
 Write-Host 'Both folds have completed training.'
 ```
 
-达到每批 10 次尝试上限会自动进入下一批，不会因为“没有晋升”停掉整个实验。`completed_batches=13` 表示 13 批都已处理，包含 `skipped_batches` 中没有晋升的批次，不表示技能更新了 13 次。
+达到每批 5 次尝试上限会自动进入下一批，不会因为“没有晋升”停掉整个实验。`completed_batches=13` 表示 13 批都已处理，包含 `skipped_batches` 中没有晋升的批次，不表示技能更新了 13 次。
 
 若出现 `optimizer_context_failure`、`generator_context_failure` 或运行失败状态，先检查原因；不清空目录，不重新准备实验。普通网络中断修复后可使用原配置续跑。若必须修改会影响实验身份的配置，另开新实验并保留旧目录。
 
@@ -177,10 +185,10 @@ Write-Host 'Both folds have completed training.'
 $fold = 1
 Set-Location 'F:\intern\Agent\auto-skill\EvoFactSkill'
 $ErrorActionPreference = 'Stop'
-$runRoot = 'docs/independent-validation/20261020-012145-77a96fd4'  # 另开实验时替换为实际新目录
+$runRoot = 'docs/independent-validation/20261020-233621-0f256927'  # 另开实验时替换为实际新目录
 $foldRoot = "$runRoot/adversarial-evolve/fold_$fold"
 if (-not (Test-Path -LiteralPath "$foldRoot/config.yaml")) { throw "Config not found: $foldRoot/config.yaml" }
-.\evofact.cmd --config "$foldRoot/config.yaml" --limit 200 --batch-size 16 --sample-concurrency 8 --progress adversarial-evolve --max-attempts-per-batch 10 --max-supplement-rounds 5 --output "$foldRoot/adversarial-evolve/train.json"
+.\evofact.cmd --config "$foldRoot/config.yaml" --limit 200 --batch-size 16 --sample-concurrency 8 --progress adversarial-evolve --max-attempts-per-batch 5 --max-supplement-rounds 5 --output "$foldRoot/adversarial-evolve/train.json"
 ```
 
 这是首次启动命令，不加 `--resume`；该折已有 checkpoint 时使用第 4 步的单折续跑命令，不删除原断点。
@@ -194,7 +202,7 @@ if (-not (Test-Path -LiteralPath "$foldRoot/config.yaml")) { throw "Config not f
 ```powershell
 $fold = 1  # Fold 2 则改为 2
 $foldRoot = "$runRoot/adversarial-evolve/fold_$fold"
-.\evofact.cmd --config "$foldRoot/config.yaml" --limit 200 --batch-size 16 --sample-concurrency 8 --progress adversarial-evolve --max-attempts-per-batch 10 --max-supplement-rounds 5 --output "$foldRoot/adversarial-evolve/train.json" --resume
+.\evofact.cmd --config "$foldRoot/config.yaml" --limit 200 --batch-size 16 --sample-concurrency 8 --progress adversarial-evolve --max-attempts-per-batch 5 --max-supplement-rounds 5 --output "$foldRoot/adversarial-evolve/train.json" --resume
 ```
 
 只有存在该折 `train-checkpoint.json` 时才加 `--resume`。对抗路线直接使用配置里的 `meta_learning.checkpoint_path`，此命令不需要额外的 `--checkpoint` 参数。
@@ -215,7 +223,7 @@ $foldRoot = "$runRoot/adversarial-evolve/fold_$fold"
 
 ```powershell
 Set-Location 'F:\intern\Agent\auto-skill\EvoFactSkill'
-$runRoot = 'docs/independent-validation/20261020-012145-77a96fd4'
+$runRoot = 'docs/independent-validation/20261020-233621-0f256927'
 $ErrorActionPreference = 'Stop'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $testFolds = @(1)
@@ -299,7 +307,7 @@ Write-Host 'All requested tests completed.'
 |---|---|
 | `train-checkpoint.json` | 实时状态、批次、尝试、技能、记忆、预算及续跑信息；训练完成时 `status=completed` |
 | `train.json` | 命令返回后的训练汇总 |
-| `training-traces.jsonl` | 真实训练、挑战推理、发现验证及独立验证的 trace |
+| `training-traces.jsonl` | 真实训练、挑战推理及源领域验证的 trace；旧保护模式还记录独立验证 |
 | `adversarial-batch-report.json` | 优化尝试、门控结果和生成轮次 |
 | `generation-audit.json` | 生成响应、核验结果和接受 / 拒绝记录 |
 | `final-test-25.json` / `final-test-50.json` / `final-test.json` | 各规模测试汇总，完成时 `status=complete` |
@@ -307,6 +315,6 @@ Write-Host 'All requested tests completed.'
 
 训练 checkpoint 的 `joint_optimization=true` 表示使用新联合提案模式。完整修改组查看 `attempts[].proposals` 和候选 `packages`，不要只看兼容旧格式的单数 `proposal`。模型生成了候选不代表已增强：只有核验通过并完成挑战推理的样本才能进入优化反馈。
 
-独立验证的样本文本、标签和逐样本预测不会传给 optimizer 或 generator；优化器可得到门控拒绝原因。独立样本池名单见每折 `validation-manifest.json`。
+新模式的 `validation-manifest.json` 记录全部源领域验证候选 ID，不保留独立保护池。评估完成后，双方 trace、真实标签和判错诊断存入 checkpoint 的 `source_validation_feedback`，跨批供 optimizer 使用。Final-test 始终不进入这些反馈。只有显式选择旧保护模式时，独立样本的文本、标签和逐样本预测才继续隔离。
 
 不要将旧实验的训练结果或 final-test 文件复制到本次输出目录冒充新结果。旧结果继续保留在各自原目录，可在本次完成后用于比较。

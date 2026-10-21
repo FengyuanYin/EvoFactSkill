@@ -26,11 +26,14 @@ do not invent edits or force all agents to change.
 """.strip()
 
 
-def build_training_supervision(traces, sources, registry):
+def build_training_supervision(traces, sources, registry, *, allow_source_validation=False):
     """Project trusted training sources, never arbitrary dataset/validation rows."""
     by_id = {}
     for sample, provenance in sources:
-        if provenance not in {"real_training", "verified_challenge"}:
+        allowed = {"real_training", "verified_challenge"}
+        if allow_source_validation:
+            allowed.add("source_validation")
+        if provenance not in allowed:
             raise ValueError("optimizer supervision source is not training")
         if sample.sample_id in by_id:
             raise ValueError("duplicate optimizer supervision source")

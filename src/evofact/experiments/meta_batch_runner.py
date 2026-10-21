@@ -21,6 +21,13 @@ from evofact.evolution.firewall import validate_generation_request
 from evofact.evolution.joint_optimizer import pending_bank
 from evofact.evolution.optimizer_memory import ManagedOptimizerBackend, remember
 from evofact.evolution.package_optimizer import PackageOptimizerAgent
+from evofact.evolution.source_feedback import (
+    SOURCE_FEEDBACK_POLICY,
+    balanced_source_rows,
+    source_recall_failures,
+    source_validation_feedback,
+    validate_source_feedback_manifest,
+)
 from evofact.evolution.training_feedback import (
     FEEDBACK_POLICY_VERSION,
     build_training_supervision,
@@ -343,9 +350,10 @@ class MetaBatchRunner(MetaEvolutionRunner):
             match_evolve_training=match_evolve_training,
         )
         policy = self.config.independent_validation
+        source_feedback = policy.enabled and policy.source_feedback
         memory_policy = self.config.optimizer_memory
         independent = []
-        if policy.enabled:
+        if policy.enabled and not source_feedback:
             pool_candidates = getattr(self, "independent_validation_samples", None) or valid
             if any(effective_domain(s) not in source for s in pool_candidates):
                 raise ValueError("independent validation candidates must stay in source domains")
@@ -393,6 +401,18 @@ class MetaBatchRunner(MetaEvolutionRunner):
             }
             sampling["validation_sample_ids"] = [s.sample_id for s in valid]
         valid_size = self.config.data.evolution_validation_samples
+        if source_feedback:
+            if policy.manifest_path is not None:
+                expected = json.loads(
+                    (self.root / policy.manifest_path).read_text(encoding="utf-8")
+                )
+                validate_source_feedback_manifest(expected, train, valid)
+            sampling = {
+                **(sampling or {}),
+                "validation_feedback_policy": SOURCE_FEEDBACK_POLICY,
+                "validation_sample_ids": [s.sample_id for s in valid],
+            }
+            sampling.pop("protected_sample_ids", None)
         checkpoint = self.root / self.config.meta_learning.checkpoint_path
         identity = hashlib.sha256(
             json.dumps(
@@ -467,7 +487,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
         # A missing marker is deliberately legacy, including a pending candidate.
         rounds = state.get("validation_aggregation", {}).get("rounds", 1)
         discovery_size = valid_size * rounds
-        if rounds > 1 and policy.enabled:
+        if rounds > 1 and policy.enabled and not source_feedback:
             # Fail before model calls if a complete balanced, disjoint plan cannot fit.
             for batch in batches:
                 independent_rounds(
@@ -479,7 +499,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     seed=self.config.seed,
                     cross_domain=match_evolve_training,
                 )
-        if policy.enabled:
+        if policy.enabled and not source_feedback:
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             (checkpoint.parent / "independent-validation-manifest.json").write_text(
                 json.dumps(
@@ -619,7 +639,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         self._skip_batch(state, index, "attempt_limit")
                         save()
                         continue
-                    if match_evolve_training:
+                    if match_evolve_training or source_feedback:
                         used = set(state["used_validation_ids"])
                         batch_domains = {effective_domain(s) for s in batch}
                         available = [
@@ -638,6 +658,13 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     else:
                         available = valid[state["validation_cursor"] :]
                         forbidden_validation = available
+                    if source_feedback:
+                        available = balanced_source_rows(
+                            available,
+                            size=valid_size,
+                            rounds=rounds,
+                            registry=self.base.label_contract_registry,
+                        )
                     if len(available) < discovery_size:
                         state["status"] = "validation_pool_exhausted"
                         break
@@ -646,6 +673,8 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         + forbidden_validation
                         + [s for s in samples if effective_domain(s) in final]
                     )
+                    if source_feedback:
+                        forbidden = [s for s in samples if effective_domain(s) in final]
                     try:
                         optimizer_traces = await self._optimizer_traces(
                             state, batch, forbidden, save, progress=progress, task=task
@@ -666,6 +695,10 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             self._optimizer_training_sources(state, batch),
                             self.base.label_contract_registry,
                         )
+                        if source_feedback:
+                            supervision["source_validation_feedback"] = list(
+                                reversed(state.get("source_validation_feedback", []))
+                            )
                         validate_generation_request(supervision, forbidden)
                         fingerprint = information_fingerprint(
                             package_bank_digest(self.base.packages),
@@ -788,6 +821,8 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         + forbidden_validation
                         + [s for s in samples if effective_domain(s) in final]
                     )
+                    if source_feedback:
+                        forbidden = [s for s in samples if effective_domain(s) in final]
                     for item in proposals:
                         validate_generation_request(asdict(item), forbidden)
                     for c in candidates:
@@ -805,7 +840,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         "candidate": None,
                         **(
                             {"validation_ids": [s.sample_id for s in available[:discovery_size]]}
-                            if match_evolve_training
+                            if match_evolve_training or source_feedback
                             else {}
                         ),
                     }
@@ -814,7 +849,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         state["pending"]["discovery_round_ids"] = discovery_rounds(
                             available, size=valid_size, rounds=rounds
                         )
-                        if policy.enabled:
+                        if policy.enabled and not source_feedback:
                             guard_ids = independent_rounds(
                                 independent,
                                 batch,
@@ -835,7 +870,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             base_ids=[c.base.skill_id for c in candidates if c.base is not None],
                             joint_rationale=optimized.reason,
                         )
-                    if match_evolve_training:
+                    if match_evolve_training or source_feedback:
                         state["used_validation_ids"].extend(state["pending"]["validation_ids"])
                     state["validation_cursor"] += discovery_size
                     save()
@@ -849,7 +884,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 if rounds > 1:
                     by_id = {s.sample_id: s for s in valid}
                     rows = [by_id[sid] for group in pending["discovery_round_ids"] for sid in group]
-                elif match_evolve_training:
+                elif match_evolve_training or source_feedback:
                     by_id = {s.sample_id: s for s in valid}
                     rows = [by_id[sid] for sid in pending["validation_ids"]]
                 else:
@@ -908,7 +943,21 @@ class MetaBatchRunner(MetaEvolutionRunner):
                     StatisticalTestResult("not_used_for_promotion", 0, 1, False),
                     safety=pending["safety"],
                 )
-                if policy.enabled and decision.accepted:
+                if source_feedback and decision.accepted:
+                    failures = source_recall_failures(
+                        _evaluation_from(pending["baseline"]["result"]),
+                        _evaluation_from(pending["candidate"]["result"]),
+                        max_drop=policy.max_positive_recall_drop,
+                    )
+                    if failures:
+                        decision = replace(
+                            decision,
+                            accepted=False,
+                            disposition="rejected",
+                            regression_failures=tuple(failures),
+                            reason="; ".join(failures),
+                        )
+                if policy.enabled and not source_feedback and decision.accepted:
                     guard_rows = (
                         []
                         if rounds > 1
@@ -1011,6 +1060,17 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             "candidate": pending["independent_candidate"]["result"],
                         }
                 state["attempts"].append(audit)
+                if source_feedback:
+                    state.setdefault("source_validation_feedback", []).append(
+                        source_validation_feedback(
+                            pending,
+                            valid,
+                            self.base.label_contract_registry,
+                            batch=index + 1,
+                            attempt=state["attempt"],
+                            decision=decision,
+                        )
+                    )
                 if memory_policy.enabled:
                     remember(state, audit, pending=pending, training=state["train_traces"])
                 if not decision.accepted:
