@@ -50,10 +50,13 @@ class IndependentValidationConfig:
     max_positive_recall_drop: float = 0.0
     max_domain_f1_drop: float = 0.05
     sample_retries: int = 2
+    source_feedback: bool = False
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError("independent_validation.enabled must be boolean")
+        if type(self.source_feedback) is not bool or (self.source_feedback and not self.enabled):
+            raise ValueError("source_feedback requires enabled validation and a boolean value")
         if (
             type(self.samples_per_domain) is not int
             or self.samples_per_domain < 2
@@ -76,6 +79,8 @@ class IndependentValidationConfig:
 def config_identity(config):
     """Preserve legacy checkpoint identity when the new policy is disabled."""
     payload = asdict(config)
+    if not config.independent_validation.source_feedback:
+        payload["independent_validation"].pop("source_feedback", None)
     if not config.optimizer_memory.enabled:
         payload.pop("optimizer_memory", None)
     if not config.generator_memory.enabled:

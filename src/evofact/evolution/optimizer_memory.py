@@ -184,6 +184,35 @@ def reduce_context(context):
     memory = context.get("training_memory", {})
     if memory.get("retrieved_traces"):
         return {"kind": "old_trace", "item": memory["retrieved_traces"].pop()["memory_id"]}
+    source_feedback = context.get("training_supervision", {}).get("source_validation_feedback", [])
+    if len(source_feedback) > 1:
+        source_feedback.pop()
+        return {"kind": "older_source_validation_feedback", "checkpoint_preserved": True}
+    if source_feedback:
+        # The last source-feedback record is still history, not protected input.
+        # Remove whole traces (success cases first), keeping its gold labels and
+        # error diagnoses. Full records remain in the checkpoint, not this view.
+        latest = source_feedback[0]
+        choices = []
+        for role in ("baseline", "candidate"):
+            view = latest.get(role, {})
+            outcomes = {
+                r["trace_id"]: r.get("outcome")
+                for r in view.get("supervision", {}).get("records", [])
+            }
+            for index, trace in enumerate(view.get("traces", [])):
+                priority = 0 if outcomes.get(trace.get("trace_id")) == "correct" else 1
+                choices.append((priority, index, role))
+        if choices:
+            _, index, role = min(choices)
+            trace = latest[role]["traces"].pop(index)
+            return {
+                "kind": "source_validation_trace",
+                "role": role,
+                "trace_id": trace.get("trace_id"),
+                "diagnostics_retained": True,
+                "checkpoint_preserved": True,
+            }
     feedback = context.get("validation_feedback", [])
     if len(feedback) > 1:
         feedback.pop()
@@ -510,6 +539,16 @@ class ManagedOptimizerBackend:
         return await self.backend.optimize_package(context, skill)
 
     async def optimize_package(self, context, skill):
+        if self.state.get("optimizer_context_error") == (
+            "protected optimizer input does not fit model window"
+        ):
+            # A local fit failure made no provider call. Rebuild only uncalled
+            # stage views from the immutable request payload, so a fixed pruning
+            # policy can retain current traces previously displaced by history.
+            for slot in ("selection", "proposal"):
+                stage = self.state.get("optimizer_request", {}).get(slot, {})
+                if not stage.get("calls") and not stage.get("inflight") and "response" not in stage:
+                    stage.pop("payload", None)
         try:
             return await self._optimize_package(context, skill)
         except OptimizerContextFailure as exc:

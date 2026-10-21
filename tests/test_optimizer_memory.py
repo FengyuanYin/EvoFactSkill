@@ -181,6 +181,78 @@ def test_protected_input_is_not_truncated():
     assert all(c[0] != "proposal" for c in backend.calls)
 
 
+def test_last_source_feedback_can_shrink_before_current_traces_without_losing_gold():
+    payload = context()
+    supervision = {
+        "records": [
+            {"trace_id": "success", "gold_label": "REAL", "outcome": "correct"},
+            {"trace_id": "mistake", "gold_label": "FAKE", "outcome": "wrong"},
+        ]
+    }
+    feedback = {
+        "baseline": {
+            "traces": [{"trace_id": "mistake"}, {"trace_id": "success"}],
+            "supervision": supervision,
+        },
+        "candidate": {"traces": [], "supervision": {"records": []}},
+    }
+    persisted = copy.deepcopy(feedback)
+    payload["training_supervision"] = {"source_validation_feedback": [feedback]}
+    current = copy.deepcopy(payload["traces"])
+    assert reduce_context(payload)["trace_id"] == "success"
+    assert reduce_context(payload)["trace_id"] == "mistake"
+    assert payload["traces"] == current
+    assert (
+        payload["training_supervision"]["source_validation_feedback"][0]["baseline"]["supervision"]
+        == supervision
+    )
+    assert len(persisted["baseline"]["traces"]) == 2
+
+
+def test_local_fit_failure_resumes_from_full_request_with_source_feedback():
+    from evofact.evolution.optimizer_memory import digest
+
+    payload = context()
+    payload["training_supervision"] = {
+        "source_validation_feedback": [
+            {
+                "baseline": {
+                    "traces": [{"trace_id": "old", "text": "z" * 40000}],
+                    "supervision": {
+                        "records": [{"trace_id": "old", "gold_label": "REAL", "outcome": "correct"}]
+                    },
+                },
+                "candidate": {"traces": [], "supervision": {"records": []}},
+            }
+        ]
+    }
+    manager, backend, state, skill = setup()
+    # Reproduce an older uncalled selection stage after it dropped current traces.
+    state["optimizer_context_error"] = "protected optimizer input does not fit model window"
+    state["optimizer_request"] = {
+        "id": "b1-a1",
+        "source_digest": digest(payload),
+        "window": 30000,
+        "payload": copy.deepcopy(payload),
+        "selection": {"calls": [], "payload": copy.deepcopy(payload)},
+    }
+    stage = state["optimizer_request"]["selection"]
+    assert not stage["calls"] and not backend.calls
+    stage["payload"]["traces"] = stage["payload"]["traces"][:1]
+    saved_history = copy.deepcopy(state["optimizer_request"]["payload"])
+    restored, _, _, _ = setup(backend, state=state)
+    asyncio.run(restored.optimize_package(payload, skill))
+    assert [kind for kind, _ in backend.calls] == ["selection", "proposal"]
+    assert backend.calls[0][1]["traces"] == payload["traces"]
+    assert state["optimizer_request"]["payload"] == saved_history
+    assert (
+        backend.calls[1][1]["training_supervision"]["source_validation_feedback"][0]["baseline"][
+            "supervision"
+        ]["records"][0]["gold_label"]
+        == "REAL"
+    )
+
+
 def test_relevance_precedes_fifo_and_repeated_observations_are_grouped():
     records = []
     for i, target in enumerate(("critical", "unrelated", "critical")):

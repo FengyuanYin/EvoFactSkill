@@ -21,6 +21,7 @@ from evofact.config import (  # noqa: E402
 from evofact.data.manifests import build_manifest  # noqa: E402
 from evofact.data.registry import DataRegistry  # noqa: E402
 from evofact.data.sampling import balanced_domain_sample, select_final_test_samples  # noqa: E402
+from evofact.evolution.source_feedback import SOURCE_FEEDBACK_POLICY  # noqa: E402
 from evofact.experiments.meta_sampling import matched_meta_plan  # noqa: E402
 from evofact.validation.independent import (  # noqa: E402
     discovery_without_pool,
@@ -51,6 +52,11 @@ def main():
     parser.add_argument("--generator-memory", action="store_true")
     parser.add_argument("--generator-context-window", type=int)
     parser.add_argument(
+        "--independent-protection",
+        action="store_true",
+        help="Keep legacy independent protection for new adversarial runs instead of source feedback.",
+    )
+    parser.add_argument(
         "--routes",
         nargs="+",
         choices=("feedback-evolve", "meta-evolve", "adversarial-evolve"),
@@ -77,6 +83,7 @@ def main():
     registry = DataRegistry()
     prepared = []
     for route in args.routes:
+        source_feedback = route == "adversarial-evolve" and not args.independent_protection
         name = {
             "feedback-evolve": "feedback_evolve",
             "meta-evolve": "meta_evolve",
@@ -114,6 +121,8 @@ def main():
             text = without_sections(text, sections)
             text += f"\nindependent_validation:\n  enabled: true\n  manifest_path: {(output / 'validation-manifest.json').as_posix()}\n  samples_per_domain: {args.samples_per_domain}\n  max_positive_recall_drop: 0.0\n  max_domain_f1_drop: 0.05\n  sample_retries: 2\n"
             text += f"  evaluation_samples_per_domain: {args.evaluation_samples_per_domain}\n"
+            if source_feedback:
+                text += "  source_feedback: true\n"
             if args.optimizer_memory:
                 window = (
                     args.optimizer_context_window
@@ -188,15 +197,17 @@ def main():
                     label_contract_digest=registry.label_contracts.digest,
                 )
                 pool_candidates = valid
-            pool, _ = independent_pool(
-                pool_candidates,
-                train,
-                final,
-                registry=registry.label_contracts,
-                per_domain=args.samples_per_domain,
-                seed=original.seed,
-            )
-            discovery = discovery_without_pool(valid, pool)
+            pool = []
+            if not source_feedback:
+                pool, _ = independent_pool(
+                    pool_candidates,
+                    train,
+                    final,
+                    registry=registry.label_contracts,
+                    per_domain=args.samples_per_domain,
+                    seed=original.seed,
+                )
+            discovery = valid if source_feedback else discovery_without_pool(valid, pool)
             manifest = {
                 "route": route,
                 "fold": fold,
@@ -212,7 +223,9 @@ def main():
                     for s in pool
                 ],
                 "discovery_pool_size": len(discovery),
-                "batch_independent_sample_ids": [
+                "batch_independent_sample_ids": []
+                if source_feedback
+                else [
                     [
                         s.sample_id
                         for s in independent_rows(pool, b, cross_domain=route != "feedback-evolve")
@@ -220,6 +233,11 @@ def main():
                     for b in batches
                 ],
             }
+            if source_feedback:
+                manifest.update(
+                    validation_feedback_policy=SOURCE_FEEDBACK_POLICY,
+                    source_validation_sample_ids=[s.sample_id for s in valid],
+                )
             prepared.append((output, text, manifest))
     for output, text, manifest in prepared:
         (ROOT / output).mkdir(parents=True, exist_ok=False)

@@ -765,7 +765,12 @@ prefer manifest_patch=null and update the instruction file through file_operatio
         if context.get("training_supervision") is not None:
             from evofact.evolution.training_feedback import TRAINING_FEEDBACK_POLICY
 
-            system += "\n\n" + TRAINING_FEEDBACK_POLICY
+            if context.get("source_validation_feedback_policy"):
+                from evofact.evolution.source_feedback import SOURCE_TRAINING_FEEDBACK_POLICY
+
+                system += "\n\n" + SOURCE_TRAINING_FEEDBACK_POLICY
+            else:
+                system += "\n\n" + TRAINING_FEEDBACK_POLICY
         return system
 
     async def optimize_package(self, context, optimizer_skill) -> BackendResult:

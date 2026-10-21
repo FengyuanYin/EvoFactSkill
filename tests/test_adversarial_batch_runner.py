@@ -159,6 +159,39 @@ def test_initial_supplement_feedback_and_reset(tmp_path, monkeypatch):
     assert len(set(sum(baseline, []))) == 6
 
 
+@pytest.mark.parametrize("managed", [False, True])
+def test_supplement_timeout_keeps_prior_challenges_and_continues(tmp_path, monkeypatch, managed):
+    from evofact.config import GeneratorMemoryConfig
+
+    runner, backend, contexts, _, samples = setup(tmp_path, monkeypatch)
+    if managed:
+        runner.config = replace(
+            runner.config,
+            generator_memory=GeneratorMemoryConfig(enabled=True, context_window=1000000),
+        )
+    original = backend._call
+    timeouts = []
+
+    async def call(system, payload):
+        if "examples" in payload and "-b1-r1" in payload["id_prefix"]:
+            timeouts.append(payload["id_prefix"])
+            raise TimeoutError("The read operation timed out")
+        return await original(system, payload)
+
+    monkeypatch.setattr(backend, "_call", call)
+    result = invoke(runner, samples)
+    assert result["status"] == "completed" and result["completed_batches"] == 2
+    assert len(timeouts) == 1
+    failed = result["generation_rounds"][1]
+    assert failed["kind"] == "supplement" and failed["complete"]
+    assert failed["generation_error"]["type"] == "TimeoutError"
+    assert failed["generator_usage"]["calls"] == 1
+    assert failed["traces"] == [] and failed["verification"]["accepted"] == []
+    assert result["accepted_challenge_samples"] == 4
+    assert len(contexts[1]["traces"]) == 4  # Real training plus the retained initial challenges.
+    assert runner.base._budget_manager().snapshot().calls_reserved == 0
+
+
 def test_generator_overflow_keeps_only_bounded_paired_candidates(tmp_path, monkeypatch):
     runner, backend, contexts, calls, samples = setup(tmp_path, monkeypatch)
     original = backend._call

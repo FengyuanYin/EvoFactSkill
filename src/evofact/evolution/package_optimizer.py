@@ -479,6 +479,14 @@ class PackageOptimizerAgent:
             # Explicit, runner-constructed supervision is separate from sanitized
             # public inference traces. Do not relax the generic redaction policy.
             context["training_supervision"] = training_supervision
+            if "source_validation_feedback" in training_supervision:
+                context["source_validation_feedback_policy"] = (
+                    "Evaluated source-domain validation rows are authorized development data. "
+                    "Use their explicit gold labels, baseline/candidate traces and outcomes in "
+                    "training_supervision.source_validation_feedback to diagnose errors across "
+                    "attempts and batches. They are not an independent holdout. Final-test "
+                    "samples and labels remain forbidden. Never memorize case-specific answers."
+                )
         reservation = None
         # Each proposal is a separate budget unit. Reusing only the target ID
         # would exhaust its per-sample call cap across unrelated training batches.
