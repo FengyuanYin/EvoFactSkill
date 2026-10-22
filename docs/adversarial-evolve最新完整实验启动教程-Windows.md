@@ -4,6 +4,12 @@
 
 **最新策略：新准备的 adversarial-evolve 配置默认 `independent_validation.source_feedback: true`。不再预留源领域独立保护名单，也不再运行第二阶段独立保护。所有符合跨域条件的源领域样本均可参与验证；每次候选完成固定三轮后，baseline / candidate trace、真实标签及判错诊断向 optimizer 开放，并跨批保存。Final-test 数据与标签继续隔离。**
 
+**新实验的 optimizer 同时启用 `paired_regression_review_v1` 提示策略。** 目标选择和最终提案都要求配对审查“修正 / 退步 / 共同正确 / 共同错误”，将历史 REAL 误判与当前训练错误同等对待；增加规则前检查具有相同表面特征的正确反例，写清适用边界；重复已失败的假说必须给出新依据，否则返回 `no_change`。运行失败仍单独处理，现有 JSON 输出格式、联合修改权限、晋升规则和普通 evolve 提示词均不改变。
+
+checkpoint 的 `optimizer_regression_policy` 保存版本和提示词摘要。旧 checkpoint 缺少该标记时继续使用原提示词，不自动升级；带标记的实验续跑必须使用相同提示版本。新的 `run.json` 也记录该策略，便于对照。下面新目录从当前初始种子开始，不复制旧实验进化后的技能库。
+
+新建源领域完整反馈实验还默认启用 `paired_source_diagnostics_v1`：程序在同一次候选的所有验证轮结束后，按 `sample_id` 配对 baseline 和 candidate，生成 `paired_comparison`。其中列出真实标签、双方预测及 trace ID，统计修正、退步、共同正确、共同错误，并按真实标签和领域汇总；任一侧运行失败单独统计，不算修正或退步。净正确数变化为修正数减退步数，不代表 F1 增量。该诊断随验证反馈传给 optimizer，窗口裁剪完整 trace 时仍保留最近一次的配对表。晋升门控与验证样本选择保持原样；普通 evolve 不受影响。checkpoint 通过 `paired_source_diagnostics_policy` 固定此功能，缺少标记的旧断点续跑不自动添加诊断，也不改写历史结果。
+
 旧目录没有这个配置项时，仍按原独立保护策略续跑。不要修改正在运行的配置，也不要将旧实验改成新策略后直接 `--resume`；配置身份不同会拒绝恢复。应用新策略请另开带时间标签的实验，保留旧结果。
 
 **本教程所有训练和测试都写入新时间标签目录。旧实验的配置、checkpoint、技能库、trace 和 final-test 结果全部保留。不要删除旧文件，也不要将新命令指向 `docs/weibo21_adversarial_knowledge_fold_*` 或旧技能库。**
@@ -54,7 +60,7 @@
 ```powershell
 Set-Location 'F:\intern\Agent\auto-skill\EvoFactSkill'
 $ErrorActionPreference = 'Stop'
-$runRoot = 'docs/independent-validation/20261020-233621-0f256927'
+$runRoot = 'docs/independent-validation/20261021-205918-b991fc2f'
 ```
 
 上面的新目录已经离线准备好，两折均启用源领域验证完整反馈，尚未启动训练、没有调用模型，可直接进入第 3 步。`evofact.cmd` 使用项目内 `.venv` 的 Python，并沿用项目现有的 `.env`。推理模型别名为配置中的 `deepseek-flash`；optimizer 模型及端点使用 `EVOFACT_OPTIMIZER_MODEL`、`EVOFACT_OPTIMIZER_BASE_URL` 等现有环境设置。
@@ -62,7 +68,7 @@ $runRoot = 'docs/independent-validation/20261020-233621-0f256927'
 本次文件位置：
 
 ```text
-docs/independent-validation/20261020-233621-0f256927/
+docs/independent-validation/20261021-205918-b991fc2f/
   run.json
   adversarial-evolve/
     fold_1/
@@ -74,7 +80,7 @@ docs/independent-validation/20261020-233621-0f256927/
       validation-manifest.json
       adversarial-evolve/
 
-skills/store_independent_validation/20261020-233621-0f256927/
+skills/store_independent_validation/20261021-205918-b991fc2f/
   adversarial-evolve/
     fold_1/adversarial-evolve/     # 本折新技能库
     fold_2/adversarial-evolve/
@@ -185,7 +191,7 @@ Write-Host 'Both folds have completed training.'
 $fold = 1
 Set-Location 'F:\intern\Agent\auto-skill\EvoFactSkill'
 $ErrorActionPreference = 'Stop'
-$runRoot = 'docs/independent-validation/20261020-233621-0f256927'  # 另开实验时替换为实际新目录
+$runRoot = 'docs/independent-validation/20261021-205918-b991fc2f'  # 另开实验时替换为实际新目录
 $foldRoot = "$runRoot/adversarial-evolve/fold_$fold"
 if (-not (Test-Path -LiteralPath "$foldRoot/config.yaml")) { throw "Config not found: $foldRoot/config.yaml" }
 .\evofact.cmd --config "$foldRoot/config.yaml" --limit 200 --batch-size 16 --sample-concurrency 8 --progress adversarial-evolve --max-attempts-per-batch 5 --max-supplement-rounds 5 --output "$foldRoot/adversarial-evolve/train.json"
@@ -223,7 +229,7 @@ $foldRoot = "$runRoot/adversarial-evolve/fold_$fold"
 
 ```powershell
 Set-Location 'F:\intern\Agent\auto-skill\EvoFactSkill'
-$runRoot = 'docs/independent-validation/20261020-233621-0f256927'
+$runRoot = 'docs/independent-validation/20261021-205918-b991fc2f'
 $ErrorActionPreference = 'Stop'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $testFolds = @(1)

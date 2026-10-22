@@ -83,6 +83,9 @@ def test_source_feedback_runs_without_protection_and_keeps_labels_across_batches
     assert not contexts[0]["training_supervision"]["source_validation_feedback"]
     feedback = contexts[1]["training_supervision"]["source_validation_feedback"]
     assert len(feedback) == 1 and feedback[0]["accepted"] is False
+    paired = feedback[0]["paired_comparison"]
+    assert paired["summary"]["preserved"] == 6
+    assert paired["summary"]["total"] == 6
     for role in ("baseline", "candidate"):
         assert len(feedback[0][role]["traces"]) == 6
         records = feedback[0][role]["supervision"]["records"]
@@ -90,6 +93,7 @@ def test_source_feedback_runs_without_protection_and_keeps_labels_across_batches
         assert {r["outcome"] for r in records} == {"correct"}
     history = contexts[2]["training_supervision"]["source_validation_feedback"]
     assert len(history) == 2 and history[0]["accepted"] is True
+    assert history[0]["paired_comparison"]["summary"]["repaired"] == 3
     assert not any(s.sample_id in json.dumps(contexts) for s in samples if s.domain == "final")
     assert not any("independent_validation" in a for a in result["attempts"])
     state = json.loads((tmp_path / "checkpoint.json").read_text())
@@ -120,6 +124,48 @@ def test_source_fake_recall_protects_even_when_f1_improves():
     assert candidate.aggregate_metrics["macro_f1_all"] > baseline.aggregate_metrics["macro_f1_all"]
     assert source_recall_failures(baseline, candidate, max_drop=0)
     assert not source_recall_failures(baseline, baseline, max_drop=0)
+
+
+@pytest.mark.parametrize("policy", [None, "unknown_version"])
+def test_paired_diagnostics_legacy_resume_and_unknown_policy(tmp_path, monkeypatch, policy):
+    runner, contexts, samples, _ = setup_runner(tmp_path, monkeypatch)
+    runner.config = replace(
+        runner.config,
+        independent_validation=IndependentValidationConfig(enabled=True, source_feedback=True),
+    )
+    original = runner._optimizer_traces
+
+    async def pause(*args, **kwargs):
+        raise RuntimeError("pause before optimizer")
+
+    monkeypatch.setattr(runner, "_optimizer_traces", pause)
+    with pytest.raises(RuntimeError, match="pause before optimizer"):
+        invoke(runner, samples, train_limit=2)
+    path = tmp_path / "checkpoint.json"
+    state = json.loads(path.read_text())
+    assert state.pop("paired_source_diagnostics_policy") == "paired_source_diagnostics_v1"
+    if policy is not None:
+        state["paired_source_diagnostics_policy"] = policy
+    path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(runner, "_optimizer_traces", original)
+    if policy is not None:
+        unchanged = path.read_bytes()
+        with pytest.raises(ValueError, match="unsupported paired source diagnostics policy"):
+            invoke(runner, samples, train_limit=2, resume=True)
+        assert path.read_bytes() == unchanged and not contexts
+    else:
+        invoke(runner, samples, train_limit=2, max_attempts_per_batch=2, resume=True)
+        saved = json.loads(path.read_text())
+        assert saved["source_validation_feedback"]
+        assert "paired_source_diagnostics_policy" not in saved
+        assert all(
+            "paired_comparison" not in entry for entry in saved["source_validation_feedback"]
+        )
+        assert all(
+            "paired_comparison" not in entry
+            for context in contexts
+            for entry in context["training_supervision"]["source_validation_feedback"]
+        )
 
 
 def test_source_feedback_window_discards_oldest_keeps_checkpoint_records():

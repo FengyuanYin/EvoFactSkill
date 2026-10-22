@@ -3,6 +3,7 @@
 from collections import defaultdict
 
 from evofact.data.domains import effective_domain
+from evofact.evolution.paired_feedback import paired_source_diagnostics
 from evofact.evolution.training_feedback import build_training_supervision
 
 SOURCE_FEEDBACK_POLICY = "all_source_validation_feedback_v1"
@@ -50,7 +51,9 @@ def balanced_source_rows(rows, *, size, rounds, registry):
     return ordered[: size * rounds]
 
 
-def source_validation_feedback(pending, sources, registry, *, batch, attempt, decision):
+def source_validation_feedback(
+    pending, sources, registry, *, batch, attempt, decision, paired_diagnostics=False
+):
     """Authorize labels only for evaluated source rows after the frozen evaluation."""
     result = {"batch": batch, "attempt": attempt, "accepted": decision.accepted}
     for role in ("baseline", "candidate"):
@@ -64,6 +67,11 @@ def source_validation_feedback(pending, sources, registry, *, batch, attempt, de
                 allow_source_validation=True,
             ),
         }
+    if paired_diagnostics:
+        result["paired_comparison"] = paired_source_diagnostics(
+            result["baseline"]["supervision"]["records"],
+            result["candidate"]["supervision"]["records"],
+        )
     return result
 
 

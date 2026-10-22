@@ -317,13 +317,18 @@ class ManagedOptimizerBackend:
             else "optimizer_system"
         )
         method = getattr(self.backend, name, None)
-        return (
+        system = (
             method(skill)
             if selection and method
             else method(context, skill)
             if method
             else skill.instructions
         )
+        if selection:
+            from .regression_policy import append_regression_review
+
+            return append_regression_review(system, context)
+        return system
 
     async def capabilities(self):
         identity = {

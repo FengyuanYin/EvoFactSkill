@@ -430,6 +430,7 @@ class PackageOptimizerAgent:
         feedback_enabled=False,
         joint_enabled=False,
         training_supervision=None,
+        regression_policy=None,
     ) -> OptimizerOutcome:
         packages = tuple(packages)
         bank_mode = target is None
@@ -473,6 +474,17 @@ class PackageOptimizerAgent:
             if not bank_mode:
                 raise ValueError("joint optimization requires skill-bank mode")
             context["joint_optimization"] = True
+        if regression_policy is not None:
+            from .regression_policy import regression_policy_identity
+
+            if (
+                not (bank_mode and feedback_enabled)
+                or regression_policy != regression_policy_identity()
+            ):
+                raise ValueError(
+                    "optimizer regression policy requires matching feedback skill-bank mode"
+                )
+            context["optimizer_regression_policy"] = dict(regression_policy)
         if training_supervision is not None:
             if not (bank_mode and feedback_enabled):
                 raise ValueError("training supervision requires feedback skill-bank mode")
