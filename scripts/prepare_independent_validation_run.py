@@ -21,6 +21,8 @@ from evofact.config import (  # noqa: E402
 from evofact.data.manifests import build_manifest  # noqa: E402
 from evofact.data.registry import DataRegistry  # noqa: E402
 from evofact.data.sampling import balanced_domain_sample, select_final_test_samples  # noqa: E402
+from evofact.evolution.paired_feedback import PAIRED_FEEDBACK_POLICY  # noqa: E402
+from evofact.evolution.regression_policy import regression_policy_identity  # noqa: E402
 from evofact.evolution.source_feedback import SOURCE_FEEDBACK_POLICY  # noqa: E402
 from evofact.experiments.meta_sampling import matched_meta_plan  # noqa: E402
 from evofact.validation.independent import (  # noqa: E402
@@ -250,6 +252,8 @@ def main():
             {
                 "tag": tag,
                 "routes": args.routes,
+                "optimizer_regression_policy": regression_policy_identity(),
+                "source_feedback_diagnostics_policy": PAIRED_FEEDBACK_POLICY,
                 "samples_per_domain": args.samples_per_domain,
                 "evaluation_samples_per_domain": args.evaluation_samples_per_domain,
                 "optimizer_memory": args.optimizer_memory,

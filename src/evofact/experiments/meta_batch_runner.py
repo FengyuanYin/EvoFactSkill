@@ -21,6 +21,8 @@ from evofact.evolution.firewall import validate_generation_request
 from evofact.evolution.joint_optimizer import pending_bank
 from evofact.evolution.optimizer_memory import ManagedOptimizerBackend, remember
 from evofact.evolution.package_optimizer import PackageOptimizerAgent
+from evofact.evolution.paired_feedback import PAIRED_FEEDBACK_POLICY
+from evofact.evolution.regression_policy import regression_policy_identity
 from evofact.evolution.source_feedback import (
     SOURCE_FEEDBACK_POLICY,
     balanced_source_rows,
@@ -442,6 +444,14 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 str(Path(trace_log_path).resolve()) if trace_log_path is not None else None
             ):
                 raise ValueError("resume must use the checkpoint-recorded trace log")
+            recorded_policy = state.get("optimizer_regression_policy")
+            if recorded_policy is not None and recorded_policy != regression_policy_identity():
+                raise ValueError(
+                    "optimizer regression prompt changed; use the original code or a new experiment"
+                )
+            paired_policy = state.get("paired_source_diagnostics_policy")
+            if paired_policy is not None and paired_policy != PAIRED_FEEDBACK_POLICY:
+                raise ValueError("unsupported paired source diagnostics policy")
             aggregation = state.get("validation_aggregation")
             if aggregation and (
                 aggregation.get("policy") != AGGREGATION_POLICY
@@ -466,6 +476,12 @@ class MetaBatchRunner(MetaEvolutionRunner):
                 "total_batches": len(batches),
                 "joint_optimization": True,
                 "optimizer_feedback_policy": FEEDBACK_POLICY_VERSION,
+                "optimizer_regression_policy": regression_policy_identity(),
+                **(
+                    {"paired_source_diagnostics_policy": PAIRED_FEEDBACK_POLICY}
+                    if source_feedback
+                    else {}
+                ),
                 **self._new_route_state(),
                 "validation_aggregation": {
                     "policy": AGGREGATION_POLICY,
@@ -740,6 +756,7 @@ class MetaBatchRunner(MetaEvolutionRunner):
                         feedback_enabled=True,
                         joint_enabled=state.get("joint_optimization", False),
                         training_supervision=supervision,
+                        regression_policy=state.get("optimizer_regression_policy"),
                     )
                     if memory_policy.enabled:
                         request = state.get("optimizer_request")
@@ -1069,6 +1086,10 @@ class MetaBatchRunner(MetaEvolutionRunner):
                             batch=index + 1,
                             attempt=state["attempt"],
                             decision=decision,
+                            paired_diagnostics=(
+                                state.get("paired_source_diagnostics_policy")
+                                == PAIRED_FEEDBACK_POLICY
+                            ),
                         )
                     )
                 if memory_policy.enabled:

@@ -771,7 +771,9 @@ prefer manifest_patch=null and update the instruction file through file_operatio
                 system += "\n\n" + SOURCE_TRAINING_FEEDBACK_POLICY
             else:
                 system += "\n\n" + TRAINING_FEEDBACK_POLICY
-        return system
+        from evofact.evolution.regression_policy import append_regression_review
+
+        return append_regression_review(system, context)
 
     async def optimize_package(self, context, optimizer_skill) -> BackendResult:
         system = self.optimizer_system(context, optimizer_skill)
